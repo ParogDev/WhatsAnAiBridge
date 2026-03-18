@@ -8,7 +8,7 @@ namespace WhatsAnAiBridge;
 
 /// <summary>
 /// Self-contained neon-styled settings panel for WhatsAnAiBridge.
-/// Teal (#00CED1) accent — dev-tool / bridge theme.
+/// Teal (#00CED1) accent  - dev-tool / bridge theme.
 /// Custom DrawList widgets, tabbed layout, live status display.
 /// </summary>
 public class WhatsAnAiBridgeSettingsUi
@@ -119,7 +119,7 @@ public class WhatsAnAiBridgeSettingsUi
         };
         string statusText = status.State switch
         {
-            "idle" => "Idle — waiting for request",
+            "idle" => "Idle  - waiting for request",
             "processing" => "Processing query...",
             _ => status.State
         };
@@ -136,9 +136,9 @@ public class WhatsAnAiBridgeSettingsUi
         // Stats
         SectionHeader(dl, x, ref y, "Statistics");
         StatusRow(dl, x, cx, ref y, "Total Queries", status.TotalQueries.ToString());
-        StatusRow(dl, x, cx, ref y, "Last Query", string.IsNullOrEmpty(status.LastQueryType) ? "—" : status.LastQueryType);
-        StatusRow(dl, x, cx, ref y, "Last Response", status.LastResponseTime > 0 ? $"{status.LastResponseTime:F0}ms" : "—");
-        StatusRow(dl, x, cx, ref y, "Last Response Size", status.LastResponseSize > 0 ? FormatBytes(status.LastResponseSize) : "—");
+        StatusRow(dl, x, cx, ref y, "Last Query", string.IsNullOrEmpty(status.LastQueryType) ? " -" : status.LastQueryType);
+        StatusRow(dl, x, cx, ref y, "Last Response", status.LastResponseTime > 0 ? $"{status.LastResponseTime:F0}ms" : " -");
+        StatusRow(dl, x, cx, ref y, "Last Response Size", status.LastResponseSize > 0 ? FormatBytes(status.LastResponseSize) : " -");
         StatusRow(dl, x, cx, ref y, "Poll Interval", $"{status.PollIntervalMs}ms");
 
         if (status.LastQueryTimestamp != default)
