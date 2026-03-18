@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>net10.0-windows</TargetFramework>
+        <OutputPath>C:\Users\Parog\Documents\halp1\Plugins\Compiled\Whats An AI Bridge\</OutputPath>
+        <RootNamespace>WhatsAnAiBridge</RootNamespace>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+        <LangVersion>latest</LangVersion>
+        <DebugType>embedded</DebugType>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>disable</ImplicitUsings>
+    </PropertyGroup>
+    <ItemGroup>
+        <PackageReference Include="ImGui.NET" Version="1.91.0.1" />
+        <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
+    </ItemGroup>
+    <ItemGroup>
+        <Reference Include="ExileCore">
+            <HintPath>C:\Users\Parog\Documents\halp1\ExileCore.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="GameOffsets">
+            <HintPath>C:\Users\Parog\Documents\halp1\GameOffsets.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+    </ItemGroup>
+</Project>
