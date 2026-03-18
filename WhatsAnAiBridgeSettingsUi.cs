@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using ExileCore.Shared.Nodes;
 using ImGuiNET;
@@ -16,7 +17,7 @@ public class WhatsAnAiBridgeSettingsUi
     private int _activeTab;
     private readonly Dictionary<string, float> _anims = new();
 
-    private static readonly string[] Tabs = { "Status", "Settings", "Query Log", "Guide" };
+    private static readonly string[] Tabs = { "Status", "Settings", "Query Log", "Recording", "Guide" };
 
     // ── Palette ─────────────────────────────────────────────────────
     private static uint Accent => Col(0f, 0.81f, 0.82f);       // #00CED1 DarkTurquoise
@@ -95,7 +96,8 @@ public class WhatsAnAiBridgeSettingsUi
             case 0: TabStatus(cdl, status, x, cx, ref y, sw, cSz.X - 24); break;
             case 1: TabSettings(cdl, s, x, cx, ref y, sw); break;
             case 2: TabQueryLog(cdl, queryLog, x, ref y, cSz.X - 24); break;
-            case 3: TabGuide(cdl, x, ref y, cSz.X - 24); break;
+            case 3: TabRecording(cdl, status, s, x, cx, ref y, sw, cSz.X - 24); break;
+            case 4: TabGuide(cdl, x, ref y, cSz.X - 24); break;
         }
 
         ImGui.SetCursorScreenPos(new Vector2(x, y));
@@ -140,6 +142,7 @@ public class WhatsAnAiBridgeSettingsUi
         StatusRow(dl, x, cx, ref y, "Last Response", status.LastResponseTime > 0 ? $"{status.LastResponseTime:F0}ms" : " -");
         StatusRow(dl, x, cx, ref y, "Last Response Size", status.LastResponseSize > 0 ? FormatBytes(status.LastResponseSize) : " -");
         StatusRow(dl, x, cx, ref y, "Poll Interval", $"{status.PollIntervalMs}ms");
+        StatusRow(dl, x, cx, ref y, "Recording", status.IsRecording ? $"active ({status.RecordingFrames} frames)" : "idle");
 
         if (status.LastQueryTimestamp != default)
         {
@@ -185,6 +188,16 @@ public class WhatsAnAiBridgeSettingsUi
             "Deep Scan Max Stats", "Maximum stat entries per entity in deep scans");
         IntSlider("cb_uc", s.MaxUiChildren, dl, x, cx, ref y, sw,
             "UI Scan Depth", "How many UI children to scan in 'ui' queries");
+
+        SectionHeader(dl, x, ref y, "Recording");
+        IntSlider("cb_ri", s.RecordingIntervalMs, dl, x, cx, ref y, sw,
+            "Recording Interval (ms)", "Time between snapshot captures during recording");
+        IntSlider("cb_rr", s.RecordingEntityRange, dl, x, cx, ref y, sw,
+            "Recording Entity Range", "Max distance for entities in recording snapshots");
+        Toggle("cb_rd", s.AutoDeepScanBosses, dl, x, cx, ref y,
+            "Auto Deep Scan Bosses", "Full deep scan for Unique/Rare entities during recording");
+        IntSlider("cb_rs", s.RecordingMaxDeepStats, dl, x, cx, ref y, sw,
+            "Recording Max Stats", "Maximum stat entries per deep-scanned entity");
     }
 
     private void TabQueryLog(ImDrawListPtr dl, List<WhatsAnAiBridge.QueryLogEntry> log,
@@ -227,6 +240,84 @@ public class WhatsAnAiBridgeSettingsUi
         }
     }
 
+    private void TabRecording(ImDrawListPtr dl, WhatsAnAiBridge.BridgeStatus status,
+        WhatsAnAiBridgeSettings s, float x, float cx, ref float y, float sw, float width)
+    {
+        SectionHeader(dl, x, ref y, "Recording Status");
+
+        // Recording indicator
+        if (status.IsRecording)
+        {
+            float pulse = (float)(0.4 + 0.6 * Math.Abs(Math.Sin(ImGui.GetTime() * 3.0)));
+            dl.AddCircleFilled(new Vector2(x + 8, y + 8), 8f, WithAlpha(Red, pulse));
+            dl.AddCircle(new Vector2(x + 8, y + 8), 11f, WithAlpha(Red, pulse * 0.5f), 12, 1.5f);
+            dl.AddText(new Vector2(x + 24, y + 1), Red, "RECORDING");
+        }
+        else
+        {
+            dl.AddCircleFilled(new Vector2(x + 8, y + 8), 8f, Green);
+            dl.AddText(new Vector2(x + 24, y + 1), Green, "IDLE");
+        }
+        y += 24;
+
+        // Stats
+        StatusRow(dl, x, cx, ref y, "Frames Captured", status.RecordingFrames.ToString());
+        if (status.IsRecording)
+        {
+            var elapsed = TimeSpan.FromMilliseconds(status.RecordingElapsedMs);
+            StatusRow(dl, x, cx, ref y, "Elapsed", $"{elapsed.Minutes:D2}:{elapsed.Seconds:D2}.{elapsed.Milliseconds / 100}");
+        }
+        if (!string.IsNullOrEmpty(status.RecordingFile))
+        {
+            var fileName = System.IO.Path.GetFileName(status.RecordingFile);
+            StatusRow(dl, x, cx, ref y, "File", fileName);
+            try
+            {
+                if (System.IO.File.Exists(status.RecordingFile))
+                {
+                    var fi = new System.IO.FileInfo(status.RecordingFile);
+                    StatusRow(dl, x, cx, ref y, "File Size", FormatBytes(fi.Length));
+                }
+            }
+            catch { }
+        }
+
+        y += 8;
+
+        // Recordings list
+        SectionHeader(dl, x, ref y, "Saved Recordings");
+        try
+        {
+            var recDir = System.IO.Path.Combine(s.BridgeDirectory.Value, "recordings");
+            if (System.IO.Directory.Exists(recDir))
+            {
+                var files = System.IO.Directory.GetFiles(recDir, "*.jsonl");
+                if (files.Length == 0)
+                {
+                    dl.AddText(new Vector2(x + 4, y), Desc, "No recordings yet. Use record:start to begin.");
+                    y += 20;
+                }
+                else
+                {
+                    foreach (var f in files.OrderByDescending(f => f))
+                    {
+                        var fi = new System.IO.FileInfo(f);
+                        dl.AddText(new Vector2(x + 4, y), Accent, fi.Name);
+                        dl.AddText(new Vector2(x + width * 0.55f, y), Label, FormatBytes(fi.Length));
+                        dl.AddText(new Vector2(x + width * 0.75f, y), Desc, fi.LastWriteTime.ToString("yyyy-MM-dd HH:mm"));
+                        y += 18;
+                    }
+                }
+            }
+            else
+            {
+                dl.AddText(new Vector2(x + 4, y), Desc, "No recordings directory yet.");
+                y += 20;
+            }
+        }
+        catch { }
+    }
+
     private void TabGuide(ImDrawListPtr dl, float x, ref float y, float width)
     {
         SectionHeader(dl, x, ref y, "How It Works");
@@ -248,6 +339,37 @@ public class WhatsAnAiBridgeSettingsUi
         QueryGuideEntry(dl, x, ref y, width, "npcdialog", "NPC dialog state: visible, name, lines, dialog depth");
         QueryGuideEntry(dl, x, ref y, width, "mapdata", "Map stats, Djinn quest flags, dialog depth");
         QueryGuideEntry(dl, x, ref y, width, "ui", "Scan all visible UI panels with child text (2 levels deep)");
+
+        y += 8;
+        SectionHeader(dl, x, ref y, "Recording Commands");
+        QueryGuideEntry(dl, x, ref y, width, "record:start[:interval]", "Start recording snapshots (optional interval in ms)");
+        QueryGuideEntry(dl, x, ref y, width, "record:stop", "Stop recording, returns summary with frame count and file");
+        QueryGuideEntry(dl, x, ref y, width, "record:status", "Check current recording state");
+        QueryGuideEntry(dl, x, ref y, width, "snapshot", "Capture single snapshot (also written to file if recording)");
+
+        y += 8;
+        SectionHeader(dl, x, ref y, "Playback Commands");
+        QueryGuideEntry(dl, x, ref y, width, "recording:list", "List saved .jsonl recording files");
+        QueryGuideEntry(dl, x, ref y, width, "recording:load:filename", "Load a recording for playback/analysis");
+        QueryGuideEntry(dl, x, ref y, width, "recording:frame:N", "Read frame N from loaded recording");
+        QueryGuideEntry(dl, x, ref y, width, "recording:range:N:M", "Read frames N through M");
+        QueryGuideEntry(dl, x, ref y, width, "recording:search:term", "Find frames containing term in entity/buff data");
+        QueryGuideEntry(dl, x, ref y, width, "recording:summary", "Analyze loaded recording: entities, buffs, timestamps");
+
+        y += 8;
+        SectionHeader(dl, x, ref y, "Snapshot Data (per frame)");
+        dl.AddText(new Vector2(x + 4, y), Label, "Each snapshot captures the full game state:"); y += 18;
+        dl.AddText(new Vector2(x + 8, y), Accent, "Player"); y += 16;
+        dl.AddText(new Vector2(x + 16, y), Desc, "HP/ES/Mana, position, rotation, actor (action, animation,"); y += 16;
+        dl.AddText(new Vector2(x + 16, y), Desc, "current skill/destination/target), buffs (stacks, maxTime, source)"); y += 20;
+        dl.AddText(new Vector2(x + 8, y), Accent, "Entities (adaptive depth)"); y += 16;
+        dl.AddText(new Vector2(x + 16, y), Desc, "Unique/Rare: deep scan with Life, Actor, Buffs, StateMachine,"); y += 16;
+        dl.AddText(new Vector2(x + 16, y), Desc, "Stats, Targetable, OMP, Render, Positioned"); y += 16;
+        dl.AddText(new Vector2(x + 16, y), Desc, "Normal/Magic: id, type, path, name, alive, hostile, rarity, hp"); y += 20;
+        dl.AddText(new Vector2(x + 8, y), Accent, "Visual Effects (all entities)"); y += 16;
+        dl.AddText(new Vector2(x + 16, y), Desc, "Beam (start/end positions), GroundEffect (duration, scale),"); y += 16;
+        dl.AddText(new Vector2(x + 16, y), Desc, "EffectPack (presence flag), AnimationController (id, progress, speed)"); y += 16;
+        dl.AddText(new Vector2(x + 16, y), Desc, "Entities with effects auto-promoted to deep scan"); y += 20;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────
