@@ -204,12 +204,14 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         var incNpcDialog = ql == "all" || ql == "npcdialog";
         var incMapData = ql == "all" || ql == "mapdata";
         var incUi = ql == "ui";
+        var incStash = ql == "stash";
 
         if (incPlayer) WritePlayer(sb);
         if (incArea) WriteArea(sb);
         if (incNpcDialog) WriteNpcDialog(sb);
         if (incMapData) WriteMapData(sb);
         if (incUi) WriteUi(sb);
+        if (incStash) WriteStash(sb);
         if (incEntities) WriteEntities(sb, ql);
         if (isDeep) WriteDeep(sb, query);
 
@@ -425,6 +427,54 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         }
         catch (Exception ex) { sb.Append($"\"error\":\"{Esc(ex.Message)}\""); }
         sb.Append("},");
+    }
+
+    // ── STASH TABS ────────────────────────────────────────────────────
+    // Query: "stash"
+    // Returns all stash tabs from ServerData.PlayerStashTabs with:
+    //   index        - raw position in PlayerStashTabs array
+    //   name         - display name (includes "(Remove-only)" suffix from game)
+    //   type         - InventoryTabType enum: Normal, Premium, Currency, Map, etc.
+    //   visibleIndex - display order in stash UI (what Stashie uses for arrow-key nav)
+    //   color        - RGB tab color
+    //   isPremium, isPublic, isRemoveOnly, isHidden, isMapSeries - flag booleans
+    //   rawFlags     - raw InventoryTabFlags byte for debugging
+    // Note: Tab affinity data is not yet exposed by the API.
+
+    private void WriteStash(StringBuilder sb)
+    {
+        sb.Append("\"stashTabs\":[");
+        try
+        {
+            var tabs = GameController.IngameState.Data.ServerData.PlayerStashTabs;
+            if (tabs != null)
+            {
+                var first = true;
+                for (var i = 0; i < tabs.Count; i++)
+                {
+                    var tab = tabs[i];
+                    if (!first) sb.Append(',');
+                    first = false;
+
+                    var flags = tab.Flags;
+                    sb.Append('{');
+                    sb.Append($"\"index\":{i},");
+                    sb.Append($"\"name\":\"{Esc(tab.Name)}\",");
+                    sb.Append($"\"type\":\"{tab.TabType}\",");
+                    sb.Append($"\"visibleIndex\":{tab.VisibleIndex},");
+                    sb.Append($"\"color\":{{\"r\":{tab.Color2.R},\"g\":{tab.Color2.G},\"b\":{tab.Color2.B}}},");
+                    sb.Append($"\"isPremium\":{Bool((flags & InventoryTabFlags.Premium) != 0)},");
+                    sb.Append($"\"isPublic\":{Bool((flags & InventoryTabFlags.Public) != 0)},");
+                    sb.Append($"\"isRemoveOnly\":{Bool(tab.RemoveOnly)},");
+                    sb.Append($"\"isHidden\":{Bool(tab.IsHidden)},");
+                    sb.Append($"\"isMapSeries\":{Bool((flags & InventoryTabFlags.MapSeries) != 0)},");
+                    sb.Append($"\"rawFlags\":{(byte)flags}");
+                    sb.Append('}');
+                }
+            }
+        }
+        catch (Exception ex) { sb.Append($"{{\"error\":\"{Esc(ex.Message)}\"}}"); }
+        sb.Append("],");
     }
 
     // ── ENTITIES (shallow) ──────────────────────────────────────────

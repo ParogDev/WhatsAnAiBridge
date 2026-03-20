@@ -7,7 +7,7 @@ Part of the **WhatsA** plugin family for ExileApi.
 ## What It Does
 
 - Lets AI tools (like Claude Code) query live game state by reading/writing files in a bridge directory
-- Supports queries for player stats, entities, buffs, UI panels, NPC dialog, and deep component dumps
+- Supports queries for player stats, entities, buffs, UI panels, NPC dialog, stash tabs, and deep component dumps
 - Records gameplay snapshots to JSONL files for offline AI analysis and debugging
 - Shows a status HUD and maintains a query log so you can see what the AI is asking
 
@@ -46,6 +46,7 @@ Part of the **WhatsA** plugin family for ExileApi.
 - `npcdialog` -- NPC dialog state, visibility, depth, dialog lines
 - `mapdata` -- Map stats, Djinn quest flags, dialog depth tracking
 - `ui` -- Scan all visible UI panels with hierarchical child text (2 levels deep)
+- `stash` -- All stash tabs with name, type, visibleIndex, color, flags (premium, public, remove-only, hidden)
 
 **Deep analysis:**
 - `deep:Filter[:range]` -- Deep component dump for entities matching path filter
