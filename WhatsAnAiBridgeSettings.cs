@@ -8,7 +8,7 @@ public class WhatsAnAiBridgeSettings : ISettings
     public ToggleNode Enable { get; set; } = new(true);
 
     // Bridge
-    public TextNode BridgeDirectory { get; set; } = new(@"C:\Users\Parog\Documents\halp1\claude-bridge");
+    public TextNode BridgeDirectory { get; set; } = new("claude-bridge");
     public RangeNode<int> PollIntervalMs { get; set; } = new(250, 50, 2000);
 
     // Status HUD
