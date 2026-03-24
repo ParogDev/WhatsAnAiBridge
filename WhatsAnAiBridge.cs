@@ -3,12 +3,12 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text;
 using ExileCore;
 using ExileCore.PoEMemory.Components;
 using ExileCore.PoEMemory.MemoryObjects;
 using ExileCore.Shared.Enums;
 using GameOffsets.Native;
+using Newtonsoft.Json;
 using SharpDX;
 using Vector2N = System.Numerics.Vector2;
 using Color = SharpDX.Color;
@@ -43,6 +43,18 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         public long ResponseSize;
         public bool Success;
     }
+
+    // ── Serialization ─────────────────────────────────────────────────
+
+    private static readonly JsonSerializerSettings JsonSettings = new()
+    {
+        NullValueHandling = NullValueHandling.Ignore,
+        Formatting = Formatting.None,
+        FloatFormatHandling = FloatFormatHandling.DefaultValue,
+    };
+
+    private static string Serialize(object obj)
+        => JsonConvert.SerializeObject(obj, JsonSettings);
 
     // ── State ────────────────────────────────────────────────────────
 
@@ -131,7 +143,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             _status.LastError = ex.Message;
             _status.State = "idle";
 
-            try { File.WriteAllText(_responseFile, $"{{\"error\":\"{Esc(ex.Message)}\"}}"); } catch { }
+            try { File.WriteAllText(_responseFile, Serialize(new ErrorResponse { Error = ex.Message })); } catch { }
         }
 
         _queryLog.Add(logEntry);
@@ -191,8 +203,6 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
     private string ProcessQuery(string query)
     {
         var ql = query.ToLower();
-        var sb = new StringBuilder(8192);
-        sb.Append('{');
 
         // Recording commands
         if (ql.StartsWith("record:") || ql == "snapshot" || ql.StartsWith("recording:"))
@@ -210,99 +220,97 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         var incUi = ql == "ui";
         var incStash = ql == "stash";
 
-        if (incPlayerStats) WritePlayerStats(sb);
-        if (incBuffProbe) WriteBuffProbe(sb);
-        if (incPlayer) WritePlayer(sb);
-        if (incArea) WriteArea(sb);
-        if (incNpcDialog) WriteNpcDialog(sb);
-        if (incMapData) WriteMapData(sb);
-        if (incUi) WriteUi(sb);
-        if (incStash) WriteStash(sb);
-        if (incEntities) WriteEntities(sb, ql);
-        if (isDeep) WriteDeep(sb, query);
+        var response = new BridgeResponse
+        {
+            Query = ql,
+            Timestamp = DateTime.UtcNow.ToString("O"),
+        };
 
-        sb.Append($"\"query\":\"{Esc(ql)}\",\"timestamp\":\"{DateTime.UtcNow:O}\"}}");
-        return sb.ToString();
+        if (incPlayerStats) response.Stats = BuildPlayerStats();
+        if (incBuffProbe) response.BuffProbe = BuildBuffProbe();
+        if (incPlayer) response.Player = BuildPlayer();
+        if (incArea) response.Area = BuildArea();
+        if (incNpcDialog) response.NpcDialog = BuildNpcDialog();
+        if (incMapData) response.MapData = BuildMapData();
+        if (incUi) response.Ui = BuildUi();
+        if (incStash) response.StashTabs = BuildStash();
+        if (incEntities) response.Entities = BuildEntities(ql);
+        if (isDeep) BuildDeep(response, query);
+
+        return Serialize(response);
     }
 
     // ── PLAYER ──────────────────────────────────────────────────────
 
-    private void WritePlayer(StringBuilder sb)
+    private PlayerDto BuildPlayer()
     {
         var player = GameController.Player;
         var life = player.GetComponent<Life>();
         var buffs = player.GetComponent<Buffs>();
 
-        sb.Append($"\"player\":{{\"path\":\"{Esc(player.Path)}\",");
-        sb.Append($"\"hp\":{life?.CurHP ?? 0},\"maxHp\":{life?.MaxHP ?? 0},");
-        sb.Append($"\"es\":{life?.CurES ?? 0},\"maxEs\":{life?.MaxES ?? 0},");
-        sb.Append($"\"mana\":{life?.CurMana ?? 0},\"maxMana\":{life?.MaxMana ?? 0},");
-        sb.Append($"\"pos\":[{player.GridPosNum.X:F0},{player.GridPosNum.Y:F0}]");
+        var dto = new PlayerDto
+        {
+            Path = player.Path ?? "",
+            Hp = life?.CurHP ?? 0,
+            MaxHp = life?.MaxHP ?? 0,
+            Es = life?.CurES ?? 0,
+            MaxEs = life?.MaxES ?? 0,
+            Mana = life?.CurMana ?? 0,
+            MaxMana = life?.MaxMana ?? 0,
+            Pos = [(float)Math.Round(player.GridPosNum.X), (float)Math.Round(player.GridPosNum.Y)],
+        };
 
         if (buffs?.BuffsList != null)
-        {
-            sb.Append(",\"buffs\":[");
-            var first = true;
-            foreach (var b in buffs.BuffsList)
-            {
-                if (!first) sb.Append(',');
-                first = false;
-                WriteBuff(sb, b);
-            }
-            sb.Append(']');
-        }
+            dto.Buffs = buffs.BuffsList.Select(BuildBuff).ToList();
+
         var actor = player.GetComponent<ExileCore.PoEMemory.Components.Actor>();
         if (actor != null)
-            WriteSkills(sb, actor);
-        sb.Append("},");
+            dto.Skills = BuildSkills(actor);
+
+        return dto;
     }
 
     // ── PLAYER STATS (full dump, no truncation) ────────────────────
 
-    private void WritePlayerStats(StringBuilder sb)
+    private Dictionary<string, int>? BuildPlayerStats()
     {
         var player = GameController.Player;
         var stats = player?.GetComponent<Stats>();
-        if (stats?.StatDictionary == null) return;
-        sb.Append("\"stats\":{");
-        var first = true;
+        if (stats?.StatDictionary == null) return null;
+
+        var result = new Dictionary<string, int>();
         foreach (var kv in stats.StatDictionary)
-        {
-            if (!first) sb.Append(',');
-            first = false;
-            sb.Append($"\"{kv.Key}\":{kv.Value}");
-        }
-        sb.Append("},");
+            result[kv.Key.ToString()] = kv.Value;
+        return result;
     }
 
     // ── BUFF PROBE (memory dump for reverse-engineering) ────────────
 
-    private void WriteBuffProbe(StringBuilder sb)
+    private List<BuffProbeDto>? BuildBuffProbe()
     {
         var mem = GameController.Memory;
         var player = GameController.Player;
         var buffs = player?.GetComponent<Buffs>()?.BuffsList;
-        if (buffs == null) return;
+        if (buffs == null) return null;
 
-        sb.Append("\"buffProbe\":[");
-        var first = true;
+        var result = new List<BuffProbeDto>();
         foreach (var b in buffs)
         {
             if (b.Name != "stolen_mods_buff" && b.Name != "herald_of_ice") continue;
-            if (!first) sb.Append(',');
-            first = false;
 
-            sb.Append($"{{\"name\":\"{Esc(b.Name)}\",\"timer\":{Num(b.Timer)},\"address\":\"{b.Address:X}\"");
+            var probe = new BuffProbeDto
+            {
+                Name = b.Name ?? "",
+                Timer = SafeFloat(b.Timer),
+                Address = b.Address.ToString("X"),
+            };
 
             // Raw memory: 0x48 to 0x100
-            sb.Append(",\"raw\":{");
             for (int off = 0x48; off <= 0x100; off += 8)
             {
-                if (off > 0x48) sb.Append(',');
-                try { sb.Append($"\"0x{off:X2}\":\"{mem.Read<long>(b.Address + off):X16}\""); }
-                catch { sb.Append($"\"0x{off:X2}\":\"ERROR\""); }
+                try { probe.Raw[$"0x{off:X2}"] = mem.Read<long>(b.Address + off).ToString("X16"); }
+                catch { probe.Raw[$"0x{off:X2}"] = "ERROR"; }
             }
-            sb.Append('}');
 
             // Read StdVector at 0x80: {First, Last, End}
             try
@@ -310,39 +318,45 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                 var svFirst = mem.Read<long>(b.Address + 0x80);
                 var svLast = mem.Read<long>(b.Address + 0x88);
                 var dataSize = svLast - svFirst;
-                sb.Append($",\"sv80\":{{\"first\":\"{svFirst:X}\",\"last\":\"{svLast:X}\",\"dataSize\":{dataSize}");
+                var sv = new StdVectorDto
+                {
+                    First = svFirst.ToString("X"),
+                    Last = svLast.ToString("X"),
+                    DataSize = dataSize,
+                };
 
                 if (svFirst > 0x10000 && dataSize > 0 && dataSize < 1000)
                 {
                     // Read the raw data as ints
-                    sb.Append(",\"dataInts\":[");
+                    sv.DataInts = new List<object>();
                     for (long addr = svFirst; addr < svLast && addr < svFirst + 64; addr += 4)
                     {
-                        if (addr > svFirst) sb.Append(',');
-                        try { sb.Append(mem.Read<int>(addr)); }
-                        catch { sb.Append("\"ERR\""); }
+                        try { sv.DataInts.Add(mem.Read<int>(addr)); }
+                        catch { sv.DataInts.Add("ERR"); }
                     }
-                    sb.Append(']');
 
                     // Read as (GameStat, int) pairs if size is multiple of 8
                     if (dataSize % 8 == 0 && dataSize >= 8)
                     {
-                        sb.Append(",\"statPairs\":[");
+                        sv.StatPairs = new List<object>();
                         for (long addr = svFirst; addr < svLast; addr += 8)
                         {
-                            if (addr > svFirst) sb.Append(',');
                             try
                             {
                                 var stat = mem.Read<int>(addr);
                                 var val = mem.Read<int>(addr + 4);
-                                sb.Append($"{{\"statId\":{stat},\"stat\":\"{(GameStat)stat}\",\"val\":{val}}}");
+                                sv.StatPairs.Add(new StatPairDto
+                                {
+                                    StatId = stat,
+                                    Stat = ((GameStat)stat).ToString(),
+                                    Val = val,
+                                });
                             }
-                            catch { sb.Append("\"ERR\""); }
+                            catch { sv.StatPairs.Add("ERR"); }
                         }
-                        sb.Append(']');
                     }
                 }
-                sb.Append('}');
+                probe.Sv80 = sv;
             }
             catch { }
 
@@ -352,116 +366,92 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                 var ptr80 = mem.Read<long>(b.Address + 0x80);
                 if (ptr80 > 0x10000 && ptr80 < long.MaxValue / 2)
                 {
-                    // Each tree node likely has: left(8), parent(8), right(8), color(1-8), key(4), value(4)
-                    // Try reading key/value at various offsets within the node
-                    sb.Append(",\"treeNode0\":{");
-                    for (int off = 0; off <= 0x38; off += 4)
-                    {
-                        if (off > 0) sb.Append(',');
-                        try
-                        {
-                            var v = mem.Read<int>(ptr80 + off);
-                            sb.Append($"\"0x{off:X2}\":{v}");
-                        }
-                        catch { sb.Append($"\"0x{off:X2}\":\"ERR\""); }
-                    }
-                    sb.Append("}");
+                    probe.TreeNode0 = ReadTreeNode(mem, ptr80);
 
-                    // Follow first child pointer and read that node too
                     var child = mem.Read<long>(ptr80);
                     if (child > 0x10000 && child < long.MaxValue / 2)
-                    {
-                        sb.Append(",\"treeNode1\":{");
-                        for (int off = 0; off <= 0x38; off += 4)
-                        {
-                            if (off > 0) sb.Append(',');
-                            try
-                            {
-                                var v = mem.Read<int>(child + off);
-                                sb.Append($"\"0x{off:X2}\":{v}");
-                            }
-                            catch { sb.Append($"\"0x{off:X2}\":\"ERR\""); }
-                        }
-                        sb.Append("}");
-                    }
+                        probe.TreeNode1 = ReadTreeNode(mem, child);
                 }
             }
             catch { }
 
-            sb.Append('}');
+            result.Add(probe);
         }
-        sb.Append("],");
+        return result;
+    }
+
+    private static Dictionary<string, object> ReadTreeNode(ExileCore.Shared.Interfaces.IMemory mem, long ptr)
+    {
+        var node = new Dictionary<string, object>();
+        for (int off = 0; off <= 0x38; off += 4)
+        {
+            try { node[$"0x{off:X2}"] = mem.Read<int>(ptr + off); }
+            catch { node[$"0x{off:X2}"] = "ERR"; }
+        }
+        return node;
     }
 
     // ── AREA ────────────────────────────────────────────────────────
 
-    private void WriteArea(StringBuilder sb)
+    private AreaDto BuildArea()
     {
         var area = GameController.IngameState.Data.CurrentArea;
-        sb.Append($"\"area\":{{\"name\":\"{Esc(area?.Name)}\",\"areaLevel\":{area?.AreaLevel ?? 0},\"act\":{area?.Act ?? 0}}},");
+        return new AreaDto
+        {
+            Name = area?.Name,
+            AreaLevel = area?.AreaLevel ?? 0,
+            Act = area?.Act ?? 0,
+        };
     }
 
     // ── NPC DIALOG ──────────────────────────────────────────────────
 
-    private void WriteNpcDialog(StringBuilder sb)
+    private NpcDialogDto BuildNpcDialog()
     {
-        sb.Append("\"npcDialog\":{");
+        var dto = new NpcDialogDto();
         try
         {
             var ui = GameController.IngameState.IngameUi;
             var npcDlg = ui.NpcDialog;
             var sd = GameController.IngameState.Data.ServerData;
-            sb.Append($"\"isVisible\":{Bool(npcDlg?.IsVisible == true)},\"dialogDepth\":{sd.DialogDepth}");
+            dto.IsVisible = npcDlg?.IsVisible == true;
+            dto.DialogDepth = sd.DialogDepth;
 
             if (npcDlg?.IsVisible == true)
             {
-                sb.Append($",\"npcName\":\"{Esc(npcDlg.NpcName)}\"");
-                sb.Append($",\"isLoreTalk\":{Bool(npcDlg.IsLoreTalkVisible)}");
+                dto.NpcName = npcDlg.NpcName;
+                dto.IsLoreTalk = npcDlg.IsLoreTalkVisible;
                 try
                 {
                     var lines = npcDlg.NpcLines;
-                    sb.Append(",\"lines\":[");
-                    var first = true;
-                    foreach (var line in lines)
-                    {
-                        if (!first) sb.Append(',');
-                        first = false;
-                        sb.Append($"\"{Esc(line.Text)}\"");
-                    }
-                    sb.Append(']');
+                    dto.Lines = lines.Select(l => l.Text ?? "").ToList();
                 }
-                catch { sb.Append(",\"lines\":[]"); }
+                catch { dto.Lines = []; }
             }
         }
-        catch (Exception ex) { sb.Append($"\"error\":\"{Esc(ex.Message)}\""); }
-        sb.Append("},");
+        catch (Exception ex) { dto.Error = ex.Message; }
+        return dto;
     }
 
     // ── MAP DATA ────────────────────────────────────────────────────
 
-    private void WriteMapData(StringBuilder sb)
+    private MapDataDto BuildMapData()
     {
-        sb.Append("\"mapData\":{");
+        var dto = new MapDataDto();
         try
         {
             var data = GameController.IngameState.Data;
             var sd = data.ServerData;
-            sb.Append($"\"dialogDepth\":{sd.DialogDepth}");
+            dto.DialogDepth = sd.DialogDepth;
 
             try
             {
                 var ms = data.MapStats;
                 if (ms != null && ms.Count > 0)
                 {
-                    sb.Append(",\"mapStats\":{");
-                    var first = true;
+                    dto.MapStats = new Dictionary<string, int>();
                     foreach (var kv in ms.Take(100))
-                    {
-                        if (!first) sb.Append(',');
-                        first = false;
-                        sb.Append($"\"{kv.Key}\":{kv.Value}");
-                    }
-                    sb.Append('}');
+                        dto.MapStats[kv.Key.ToString()] = kv.Value;
                 }
             }
             catch { }
@@ -471,59 +461,56 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                 var qf = sd.QuestFlags;
                 if (qf != null)
                 {
-                    sb.Append(",\"questFlags\":{");
-                    var first = true;
+                    var questDto = new QuestFlagsDto { Total = qf.Count };
                     foreach (var kv in qf)
                     {
                         var name = kv.Key.ToString();
                         if (name.Contains("Djinn") || name.Contains("OrderOfThe") || name.Contains("Faridun"))
-                        {
-                            if (!first) sb.Append(',');
-                            first = false;
-                            sb.Append($"\"{name}\":{Bool(kv.Value)}");
-                        }
+                            questDto.Flags[name] = kv.Value;
                     }
-                    sb.Append($",\"_total\":{qf.Count}}}");
+                    dto.QuestFlags = questDto;
                 }
             }
             catch { }
         }
-        catch (Exception ex) { sb.Append($"\"error\":\"{Esc(ex.Message)}\""); }
-        sb.Append("},");
+        catch (Exception ex) { dto.Error = ex.Message; }
+        return dto;
     }
 
     // ── UI PANEL SCAN ───────────────────────────────────────────────
 
-    private void WriteUi(StringBuilder sb)
+    private UiDto BuildUi()
     {
-        sb.Append("\"ui\":{");
+        var dto = new UiDto();
         try
         {
             var ui = GameController.IngameState.IngameUi;
             var sd = GameController.IngameState.Data.ServerData;
-            sb.Append($"\"dialogDepth\":{sd.DialogDepth},");
+            dto.DialogDepth = sd.DialogDepth;
 
-            sb.Append($"\"npcDialog\":{Bool(ui.NpcDialog?.IsVisible == true)},");
-            sb.Append($"\"purchaseWindow\":{Bool(ui.PurchaseWindow?.IsVisible == true)},");
-            sb.Append($"\"sellWindow\":{Bool(ui.SellWindow?.IsVisible == true)},");
-            sb.Append($"\"mapDeviceWindow\":{Bool(ui.MapDeviceWindow?.IsVisible == true)},");
-            sb.Append($"\"tradeWindow\":{Bool(ui.TradeWindow?.IsVisible == true)},");
-            sb.Append($"\"popUpWindow\":{Bool(ui.PopUpWindow?.IsVisible == true)},");
-            sb.Append($"\"ritualWindow\":{Bool(ui.RitualWindow?.IsVisible == true)},");
-            sb.Append($"\"villageRewardWindow\":{Bool(ui.VillageRewardWindow?.IsVisible == true)},");
-            sb.Append($"\"mercenaryEncounterWindow\":{Bool(ui.MercenaryEncounterWindow?.IsVisible == true)},");
-            sb.Append($"\"zanaMissionChoice\":{Bool(ui.ZanaMissionChoice?.IsVisible == true)},");
+            dto.NpcDialog = ui.NpcDialog?.IsVisible == true;
+            dto.PurchaseWindow = ui.PurchaseWindow?.IsVisible == true;
+            dto.SellWindow = ui.SellWindow?.IsVisible == true;
+            dto.MapDeviceWindow = ui.MapDeviceWindow?.IsVisible == true;
+            dto.TradeWindow = ui.TradeWindow?.IsVisible == true;
+            dto.PopUpWindow = ui.PopUpWindow?.IsVisible == true;
+            dto.RitualWindow = ui.RitualWindow?.IsVisible == true;
+            dto.VillageRewardWindow = ui.VillageRewardWindow?.IsVisible == true;
+            dto.MercenaryEncounterWindow = ui.MercenaryEncounterWindow?.IsVisible == true;
+            dto.ZanaMissionChoice = ui.ZanaMissionChoice?.IsVisible == true;
 
             try
             {
                 var lm = ui.LeagueMechanicButtons;
-                sb.Append($"\"leagueMechanicButtons\":{{\"vis\":{Bool(lm?.IsVisible == true)},\"cc\":{lm?.ChildCount ?? 0}}},");
+                dto.LeagueMechanicButtons = new LeagueMechanicButtonsDto
+                {
+                    Vis = lm?.IsVisible == true,
+                    Cc = (int)(lm?.ChildCount ?? 0),
+                };
             }
             catch { }
 
             int maxChildren = Settings.MaxUiChildren.Value;
-            sb.Append("\"visibleChildren\":[");
-            var fc = true;
             for (int i = 0; i < maxChildren; i++)
             {
                 try
@@ -531,12 +518,15 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                     var child = ui.GetChildAtIndex(i);
                     if (child != null && child.IsVisible)
                     {
-                        if (!fc) sb.Append(',');
-                        fc = false;
-                        sb.Append($"{{\"i\":{i},\"cc\":{child.ChildCount}");
+                        var childDto = new UiChildDto
+                        {
+                            I = i,
+                            Cc = (int)child.ChildCount,
+                        };
+
                         var txt = child.Text;
                         if (!string.IsNullOrEmpty(txt))
-                            sb.Append($",\"t\":\"{Esc(Trunc(txt, 80))}\"");
+                            childDto.T = Trunc(txt, 80);
 
                         var ct = new List<string>();
                         for (int j = 0; j < Math.Min(child.ChildCount, 20); j++)
@@ -546,7 +536,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                                 var c2 = child.GetChildAtIndex(j);
                                 if (c2 == null) continue;
                                 var t2 = c2.Text;
-                                if (!string.IsNullOrEmpty(t2)) ct.Add(Esc(Trunc(t2, 60)));
+                                if (!string.IsNullOrEmpty(t2)) ct.Add(Trunc(t2, 60));
                                 for (int k = 0; k < Math.Min(c2.ChildCount, 10); k++)
                                 {
                                     try
@@ -554,78 +544,63 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                                         var c3 = c2.GetChildAtIndex(k);
                                         if (c3 == null) continue;
                                         var t3 = c3.Text;
-                                        if (!string.IsNullOrEmpty(t3)) ct.Add(Esc(Trunc(t3, 60)));
+                                        if (!string.IsNullOrEmpty(t3)) ct.Add(Trunc(t3, 60));
                                     }
                                     catch { }
                                 }
                             }
                             catch { }
                         }
-                        if (ct.Count > 0)
-                            sb.Append($",\"ct\":[{string.Join(",", ct.Select(t => $"\"{t}\""))}]");
-                        sb.Append('}');
+                        if (ct.Count > 0) childDto.Ct = ct;
+                        dto.VisibleChildren.Add(childDto);
                     }
                 }
                 catch { }
             }
-            sb.Append(']');
         }
-        catch (Exception ex) { sb.Append($"\"error\":\"{Esc(ex.Message)}\""); }
-        sb.Append("},");
+        catch (Exception ex) { dto.Error = ex.Message; }
+        return dto;
     }
 
-    // ── STASH TABS ────────────────────────────────────────────────────
-    // Query: "stash"
-    // Returns all stash tabs from ServerData.PlayerStashTabs with:
-    //   index        - raw position in PlayerStashTabs array
-    //   name         - display name (includes "(Remove-only)" suffix from game)
-    //   type         - InventoryTabType enum: Normal, Premium, Currency, Map, etc.
-    //   visibleIndex - display order in stash UI (what Stashie uses for arrow-key nav)
-    //   color        - RGB tab color
-    //   isPremium, isPublic, isRemoveOnly, isHidden, isMapSeries - flag booleans
-    //   rawFlags     - raw InventoryTabFlags byte for debugging
-    // Tab affinity is available via tab.Affinity (InventoryTabAffinity flags enum).
+    // ── STASH TABS ──────────────────────────────────────────────────
 
-    private void WriteStash(StringBuilder sb)
+    private List<StashTabDto> BuildStash()
     {
-        sb.Append("\"stashTabs\":[");
+        var result = new List<StashTabDto>();
         try
         {
             var tabs = GameController.IngameState.Data.ServerData.PlayerStashTabs;
             if (tabs != null)
             {
-                var first = true;
                 for (var i = 0; i < tabs.Count; i++)
                 {
                     var tab = tabs[i];
-                    if (!first) sb.Append(',');
-                    first = false;
-
                     var flags = tab.Flags;
-                    sb.Append('{');
-                    sb.Append($"\"index\":{i},");
-                    sb.Append($"\"name\":\"{Esc(tab.Name)}\",");
-                    sb.Append($"\"type\":\"{tab.TabType}\",");
-                    sb.Append($"\"visibleIndex\":{tab.VisibleIndex},");
-                    sb.Append($"\"color\":{{\"r\":{tab.Color2.R},\"g\":{tab.Color2.G},\"b\":{tab.Color2.B}}},");
-                    sb.Append($"\"isPremium\":{Bool((flags & InventoryTabFlags.Premium) != 0)},");
-                    sb.Append($"\"isPublic\":{Bool((flags & InventoryTabFlags.Public) != 0)},");
-                    sb.Append($"\"isRemoveOnly\":{Bool(tab.RemoveOnly)},");
-                    sb.Append($"\"isHidden\":{Bool(tab.IsHidden)},");
-                    sb.Append($"\"isMapSeries\":{Bool((flags & InventoryTabFlags.MapSeries) != 0)},");
-                    sb.Append($"\"rawFlags\":{(byte)flags},");
-                    sb.Append($"\"affinity\":{(uint)tab.Affinity}");
-                    sb.Append('}');
+                    result.Add(new StashTabDto
+                    {
+                        Index = i,
+                        Name = tab.Name ?? "",
+                        Type = tab.TabType.ToString(),
+                        VisibleIndex = tab.VisibleIndex,
+                        Color = new ColorDto { R = tab.Color2.R, G = tab.Color2.G, B = tab.Color2.B },
+                        IsPremium = (flags & InventoryTabFlags.Premium) != 0,
+                        IsPublic = (flags & InventoryTabFlags.Public) != 0,
+                        IsRemoveOnly = tab.RemoveOnly,
+                        IsHidden = tab.IsHidden,
+                        IsMapSeries = (flags & InventoryTabFlags.MapSeries) != 0,
+                        RawFlags = (byte)flags,
+                        Affinity = (uint)tab.Affinity,
+                    });
                 }
             }
         }
-        catch (Exception ex) { sb.Append($"{{\"error\":\"{Esc(ex.Message)}\"}}"); }
-        sb.Append("],");
+        catch { }
+        return result;
     }
 
     // ── ENTITIES (shallow) ──────────────────────────────────────────
 
-    private void WriteEntities(StringBuilder sb, string ql)
+    private List<EntityDto> BuildEntities(string ql)
     {
         var maxDist = (float)Settings.MaxEntityRange.Value;
         if (ql.Contains(':'))
@@ -640,31 +615,37 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         else if (ql == "items")
             entities = entities.Where(e => e.Type == EntityType.WorldItem);
 
-        sb.Append("\"entities\":[");
-        var first = true;
-        foreach (var e in entities.OrderBy(e => e.DistancePlayer))
+        return entities.OrderBy(e => e.DistancePlayer)
+            .Select(e => BuildShallowEntity(e))
+            .ToList();
+    }
+
+    private EntityDto BuildShallowEntity(Entity e)
+    {
+        var life = e.GetComponent<Life>();
+        var render = e.GetComponent<Render>();
+        var dto = new EntityDto
         {
-            var life = e.GetComponent<Life>();
-            var render = e.GetComponent<Render>();
-            if (!first) sb.Append(',');
-            first = false;
-            sb.Append($"{{\"id\":{e.Id},");
-            sb.Append($"\"type\":\"{e.Type}\",");
-            sb.Append($"\"path\":\"{Esc(e.Path)}\",");
-            sb.Append($"\"name\":\"{Esc(render?.Name)}\",");
-            sb.Append($"\"alive\":{Bool(e.IsAlive)},");
-            sb.Append($"\"hostile\":{Bool(e.IsHostile)},");
-            sb.Append($"\"rarity\":\"{e.Rarity}\",");
-            sb.Append($"\"dist\":{Num(e.DistancePlayer)},");
-            sb.Append($"\"pos\":[{e.GridPosNum.X:F0},{e.GridPosNum.Y:F0}],");
-            sb.Append($"\"hp\":{life?.CurHP ?? 0},\"maxHp\":{life?.MaxHP ?? 0}}}");
-        }
-        sb.Append("],");
+            Id = e.Id,
+            Type = e.Type.ToString(),
+            Path = e.Path ?? "",
+            Name = render?.Name,
+            Alive = e.IsAlive,
+            Hostile = e.IsHostile,
+            Rarity = e.Rarity.ToString(),
+            Dist = SafeFloat(e.DistancePlayer),
+            Pos = [(float)Math.Round(e.GridPosNum.X), (float)Math.Round(e.GridPosNum.Y)],
+            Hp = life?.CurHP ?? 0,
+            MaxHp = life?.MaxHP ?? 0,
+        };
+
+        PopulateEffectComponents(dto, e);
+        return dto;
     }
 
     // ── DEEP ENTITY INSPECTION ──────────────────────────────────────
 
-    private void WriteDeep(StringBuilder sb, string query)
+    private void BuildDeep(BridgeResponse response, string query)
     {
         var parts = query.Substring(5).Split(':');
         var filter = parts[0];
@@ -678,159 +659,127 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             .OrderBy(e => e.DistancePlayer)
             .ToList();
 
-        sb.Append($"\"filter\":\"{Esc(filter)}\",\"matchCount\":{entities.Count},\"entities\":[");
+        response.Filter = filter;
+        response.MatchCount = entities.Count;
 
         var maxStats = Settings.MaxDeepStats.Value;
-        var first = true;
-        foreach (var e in entities)
+        response.Entities = entities.Select(e => BuildDeepEntityFull(e, maxStats)).ToList();
+    }
+
+    private EntityDto BuildDeepEntityFull(Entity e, int maxStats)
+    {
+        var life = e.GetComponent<Life>();
+        var render = e.GetComponent<Render>();
+
+        var dto = new EntityDto
         {
-            if (!first) sb.Append(',');
-            first = false;
-            sb.Append('{');
+            Id = e.Id,
+            Type = e.Type.ToString(),
+            Path = e.Path ?? "",
+            Name = render?.Name,
+            Alive = e.IsAlive,
+            Hostile = e.IsHostile,
+            Rarity = e.Rarity.ToString(),
+            Dist = SafeFloat(e.DistancePlayer),
+            Pos = [(float)Math.Round(e.GridPosNum.X), (float)Math.Round(e.GridPosNum.Y)],
+            Hp = life?.CurHP ?? 0,
+            MaxHp = life?.MaxHP ?? 0,
+            IsValid = e.IsValid,
+            End = true,
+        };
 
-            sb.Append($"\"id\":{e.Id},");
-            sb.Append($"\"type\":\"{e.Type}\",");
-            sb.Append($"\"path\":\"{Esc(e.Path)}\",");
-            sb.Append($"\"alive\":{Bool(e.IsAlive)},");
-            sb.Append($"\"hostile\":{Bool(e.IsHostile)},");
-            sb.Append($"\"rarity\":\"{e.Rarity}\",");
-            sb.Append($"\"dist\":{Num(e.DistancePlayer)},");
-            sb.Append($"\"isValid\":{Bool(e.IsValid)},");
+        var cc = e.CacheComp;
+        if (cc != null)
+            dto.AllComponents = cc.Keys.ToList();
 
-            var cc = e.CacheComp;
-            if (cc != null)
-                sb.Append($"\"allComponents\":[{string.Join(",", cc.Keys.Select(k => $"\"{Esc(k)}\""))}],");
-
-            var render = e.GetComponent<Render>();
-            if (render != null)
-                sb.Append($"\"render\":{{\"name\":\"{Esc(render.Name)}\",\"pos\":[{render.PosNum.X:F1},{render.PosNum.Y:F1},{render.PosNum.Z:F1}],\"bounds\":[{render.BoundsNum.X:F1},{render.BoundsNum.Y:F1},{render.BoundsNum.Z:F1}]}},");
-
-            var pos = e.GetComponent<Positioned>();
-            if (pos != null)
-                sb.Append($"\"positioned\":{{\"grid\":[{pos.GridX},{pos.GridY}],\"reaction\":{pos.Reaction},\"size\":{pos.Size},\"scale\":{pos.Scale:F3},\"rotation\":{pos.Rotation:F3}}},");
-
-            var anim = e.GetComponent<Animated>();
-            if (anim != null)
+        if (render != null)
+        {
+            dto.Render = new RenderDto
             {
-                try
-                {
-                    var bao = anim.BaseAnimatedObjectEntity;
-                    sb.Append($"\"animated\":{{\"baseEntityPath\":\"{Esc(bao?.Path)}\",\"baseEntityId\":{bao?.Id ?? 0}}},");
-                }
-                catch { sb.Append("\"animated\":{\"error\":true},"); }
-            }
-
-            var sm = e.GetComponent<StateMachine>();
-            if (sm != null)
-            {
-                try
-                {
-                    var sts = sm.States;
-                    if (sts != null && sts.Count > 0)
-                    {
-                        sb.Append("\"stateMachine\":{\"canBeTarget\":");
-                        sb.Append(Bool(sm.CanBeTarget));
-                        sb.Append(",\"inTarget\":");
-                        sb.Append(Bool(sm.InTarget));
-                        sb.Append(",\"states\":{");
-                        var smf = true;
-                        foreach (var s in sts)
-                        {
-                            if (!smf) sb.Append(',');
-                            smf = false;
-                            sb.Append($"\"{Esc(s.Name)}\":{s.Value}");
-                        }
-                        sb.Append("}},");
-                    }
-                }
-                catch { sb.Append("\"stateMachine\":{\"error\":true},"); }
-            }
-
-            var npc = e.GetComponent<NPC>();
-            if (npc != null)
-                sb.Append($"\"npc\":{{\"hasIconOverhead\":{Bool(npc.HasIconOverhead)},\"isIgnoreHidden\":{Bool(npc.IsIgnoreHidden)},\"isMinMapLabelVisible\":{Bool(npc.IsMinMapLabelVisible)}}},");
-
-            var life = e.GetComponent<Life>();
-            if (life != null)
-                sb.Append($"\"life\":{{\"hp\":{life.CurHP},\"maxHp\":{life.MaxHP},\"es\":{life.CurES},\"maxEs\":{life.MaxES}}},");
-
-            var tgt = e.GetComponent<Targetable>();
-            if (tgt != null)
-                sb.Append($"\"targetable\":{{\"isTargetable\":{Bool(tgt.isTargetable)},\"isTargeted\":{Bool(tgt.isTargeted)}}},");
-
-            var chest = e.GetComponent<Chest>();
-            if (chest != null)
-            {
-                sb.Append($"\"chest\":{{\"isOpened\":{Bool(chest.IsOpened)},");
-                sb.Append($"\"isLocked\":{Bool(chest.IsLocked)},");
-                sb.Append($"\"isStrongbox\":{Bool(chest.IsStrongbox)},");
-                sb.Append($"\"destroyAfterOpen\":{Bool(chest.DestroyingAfterOpen)},");
-                sb.Append($"\"isLarge\":{Bool(chest.IsLarge)},");
-                sb.Append($"\"stompable\":{Bool(chest.Stompable)},");
-                sb.Append($"\"openOnDamage\":{Bool(chest.OpenOnDamage)}}},");
-            }
-
-            var omp = e.GetComponent<ObjectMagicProperties>();
-            if (omp != null)
-            {
-                sb.Append($"\"omp\":{{\"rarity\":\"{omp.Rarity}\"");
-                try
-                {
-                    var mods = omp.Mods;
-                    if (mods != null && mods.Count > 0)
-                        sb.Append($",\"mods\":[{string.Join(",", mods.Select(m => $"\"{Esc(m)}\""))}]");
-                }
-                catch { }
-                sb.Append("},");
-            }
-
-            var mi = e.GetComponent<MinimapIcon>();
-            if (mi != null)
-                sb.Append($"\"minimapIcon\":{{\"name\":\"{Esc(mi.Name)}\",\"isVisible\":{Bool(mi.IsVisible)},\"isHide\":{Bool(mi.IsHide)}}},");
-
-            var buffs = e.GetComponent<Buffs>();
-            if (buffs?.BuffsList != null && buffs.BuffsList.Count > 0)
-            {
-                sb.Append("\"buffs\":[");
-                var bf = true;
-                foreach (var b in buffs.BuffsList)
-                {
-                    if (!bf) sb.Append(',');
-                    bf = false;
-                    WriteBuff(sb, b);
-                }
-                sb.Append("],");
-            }
-
-            var stats = e.GetComponent<Stats>();
-            if (stats != null)
-            {
-                try
-                {
-                    var sd = stats.StatDictionary;
-                    if (sd != null && sd.Count > 0)
-                    {
-                        sb.Append("\"stats\":{");
-                        var sf = true;
-                        foreach (var kv in sd.Take(maxStats))
-                        {
-                            if (!sf) sb.Append(',');
-                            sf = false;
-                            sb.Append($"\"{kv.Key}\":{kv.Value}");
-                        }
-                        if (sd.Count > maxStats) sb.Append($",\"_truncated\":{sd.Count}");
-                        sb.Append("},");
-                    }
-                }
-                catch { }
-            }
-
-            // Visual effect components
-            WriteEffectComponents(sb, e);
-
-            sb.Append("\"_end\":true}");
+                Name = render.Name,
+                Pos = [
+                    (float)Math.Round(render.PosNum.X, 1),
+                    (float)Math.Round(render.PosNum.Y, 1),
+                    (float)Math.Round(render.PosNum.Z, 1)
+                ],
+                Bounds = [
+                    (float)Math.Round(render.BoundsNum.X, 1),
+                    (float)Math.Round(render.BoundsNum.Y, 1),
+                    (float)Math.Round(render.BoundsNum.Z, 1)
+                ],
+            };
         }
-        sb.Append("],");
+
+        var pos = e.GetComponent<Positioned>();
+        if (pos != null)
+        {
+            dto.Positioned = new PositionedDto
+            {
+                Grid = [pos.GridX, pos.GridY],
+                Reaction = pos.Reaction,
+                Size = pos.Size,
+                Scale = (float)Math.Round(pos.Scale, 3),
+                Rotation = (float)Math.Round(pos.Rotation, 3),
+            };
+        }
+
+        var anim = e.GetComponent<Animated>();
+        if (anim != null)
+        {
+            try
+            {
+                var bao = anim.BaseAnimatedObjectEntity;
+                dto.Animated = new AnimatedDto
+                {
+                    BaseEntityPath = bao?.Path,
+                    BaseEntityId = bao?.Id ?? 0,
+                };
+            }
+            catch { dto.Animated = new AnimatedDto { Error = true }; }
+        }
+
+        PopulateStateMachine(dto, e, includeTargetFlags: true);
+
+        var npc = e.GetComponent<NPC>();
+        if (npc != null)
+        {
+            dto.Npc = new NpcDto
+            {
+                HasIconOverhead = npc.HasIconOverhead,
+                IsIgnoreHidden = npc.IsIgnoreHidden,
+                IsMinMapLabelVisible = npc.IsMinMapLabelVisible,
+            };
+        }
+
+        if (life != null)
+        {
+            dto.Life = new LifeDto
+            {
+                Hp = life.CurHP,
+                MaxHp = life.MaxHP,
+                Es = life.CurES,
+                MaxEs = life.MaxES,
+            };
+        }
+
+        var tgt = e.GetComponent<Targetable>();
+        if (tgt != null)
+        {
+            dto.Targetable = new TargetableDto
+            {
+                IsTargetable = tgt.isTargetable,
+                IsTargeted = tgt.isTargeted,
+            };
+        }
+
+        PopulateChest(dto, e);
+        PopulateOmp(dto, e);
+        PopulateMinimapIcon(dto, e);
+        PopulateBuffs(dto, e);
+        PopulateStats(dto, e, maxStats);
+        PopulateEffectComponents(dto, e);
+
+        return dto;
     }
 
     // ── RECORDING ENGINE ─────────────────────────────────────────────
@@ -840,7 +789,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         if (ql == "record:start" || ql.StartsWith("record:start:"))
         {
             if (_isRecording)
-                return "{\"error\":\"Already recording\",\"file\":\"" + Esc(_currentRecordingPath) + "\"}";
+                return Serialize(new ErrorResponse { Error = "Already recording", File = _currentRecordingPath });
 
             if (ql.StartsWith("record:start:") && int.TryParse(ql.Substring("record:start:".Length), out var interval))
                 Settings.RecordingIntervalMs.Value = Math.Clamp(interval, Settings.RecordingIntervalMs.Min, Settings.RecordingIntervalMs.Max);
@@ -856,13 +805,17 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             _lastSnapshot = DateTime.MinValue;
             _frameCount = 0;
 
-            return $"{{\"status\":\"recording_started\",\"file\":\"{Esc(_currentRecordingPath)}\",\"intervalMs\":{Settings.RecordingIntervalMs.Value}}}";
+            return Serialize(new RecordingStartResponse
+            {
+                File = _currentRecordingPath,
+                IntervalMs = Settings.RecordingIntervalMs.Value,
+            });
         }
 
         if (ql == "record:stop")
         {
             if (!_isRecording)
-                return "{\"status\":\"not_recording\"}";
+                return Serialize(new RecordingStatusResponse { Status = "not_recording" });
 
             _isRecording = false;
             _recordingWriter?.Flush();
@@ -873,7 +826,13 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             long fileSize = 0;
             try { fileSize = new FileInfo(_currentRecordingPath!).Length; } catch { }
 
-            var result = $"{{\"status\":\"recording_stopped\",\"frames\":{_frameCount},\"durationMs\":{elapsed:F0},\"file\":\"{Esc(_currentRecordingPath)}\",\"sizeBytes\":{fileSize}}}";
+            var result = Serialize(new RecordingStopResponse
+            {
+                Frames = _frameCount,
+                DurationMs = Math.Round(elapsed),
+                File = _currentRecordingPath ?? "",
+                SizeBytes = fileSize,
+            });
             _currentRecordingPath = null;
             return result;
         }
@@ -881,40 +840,50 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         if (ql == "record:status")
         {
             if (!_isRecording)
-                return "{\"status\":\"idle\",\"isRecording\":false}";
+                return Serialize(new RecordingStatusResponse { Status = "idle", IsRecording = false });
             var elapsed = (DateTime.UtcNow - _recordingStart).TotalMilliseconds;
-            return $"{{\"status\":\"recording\",\"isRecording\":true,\"frames\":{_frameCount},\"durationMs\":{elapsed:F0},\"file\":\"{Esc(_currentRecordingPath)}\",\"intervalMs\":{Settings.RecordingIntervalMs.Value}}}";
+            return Serialize(new RecordingStatusResponse
+            {
+                Status = "recording",
+                IsRecording = true,
+                Frames = _frameCount,
+                DurationMs = Math.Round(elapsed),
+                File = _currentRecordingPath,
+                IntervalMs = Settings.RecordingIntervalMs.Value,
+            });
         }
 
         if (ql == "snapshot")
         {
             var snapshot = BuildSnapshot();
+            var json = Serialize(snapshot);
             if (_isRecording && _recordingWriter != null)
             {
-                _recordingWriter.WriteLine(snapshot);
+                _recordingWriter.WriteLine(json);
                 _frameCount++;
                 if (_frameCount % 25 == 0) _recordingWriter.Flush();
             }
-            return snapshot;
+            return json;
         }
 
         if (ql == "recording:list")
         {
             var recDir = Path.Combine(_bridgeDir, "recordings");
             if (!Directory.Exists(recDir))
-                return "{\"recordings\":[]}";
+                return Serialize(new RecordingListResponse());
             var files = Directory.GetFiles(recDir, "*.jsonl");
-            var sb = new StringBuilder("{\"recordings\":[");
-            var first = true;
-            foreach (var f in files.OrderByDescending(f => f))
+            return Serialize(new RecordingListResponse
             {
-                if (!first) sb.Append(',');
-                first = false;
-                var fi = new FileInfo(f);
-                sb.Append($"{{\"name\":\"{Esc(fi.Name)}\",\"sizeBytes\":{fi.Length},\"modified\":\"{fi.LastWriteTimeUtc:O}\"}}");
-            }
-            sb.Append("]}");
-            return sb.ToString();
+                Recordings = files.OrderByDescending(f => f)
+                    .Select(f => new FileInfo(f))
+                    .Select(fi => new RecordingFileDto
+                    {
+                        Name = fi.Name,
+                        SizeBytes = fi.Length,
+                        Modified = fi.LastWriteTimeUtc.ToString("O"),
+                    })
+                    .ToList(),
+            });
         }
 
         if (ql.StartsWith("recording:load:"))
@@ -923,83 +892,81 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             var recDir = Path.Combine(_bridgeDir, "recordings");
             var filePath = Path.Combine(recDir, fileName);
             if (!File.Exists(filePath))
-                return $"{{\"error\":\"File not found\",\"file\":\"{Esc(fileName)}\"}}";
+                return Serialize(new ErrorResponse { Error = "File not found", File = fileName });
             LoadRecording(filePath);
-            return $"{{\"status\":\"loaded\",\"file\":\"{Esc(fileName)}\",\"frames\":{_loadedFrameOffsets?.Count ?? 0}}}";
+            return Serialize(new RecordingLoadResponse
+            {
+                File = fileName,
+                Frames = _loadedFrameOffsets?.Count ?? 0,
+            });
         }
 
         if (ql.StartsWith("recording:frame:"))
         {
             if (_loadedRecordingPath == null || _loadedFrameOffsets == null)
-                return "{\"error\":\"No recording loaded. Use recording:load:filename first.\"}";
+                return Serialize(new ErrorResponse { Error = "No recording loaded. Use recording:load:filename first." });
             if (!int.TryParse(ql.Substring("recording:frame:".Length), out var n))
-                return "{\"error\":\"Invalid frame number\"}";
+                return Serialize(new ErrorResponse { Error = "Invalid frame number" });
             if (n < 0 || n >= _loadedFrameOffsets.Count)
-                return $"{{\"error\":\"Frame {n} out of range\",\"totalFrames\":{_loadedFrameOffsets.Count}}}";
+                return Serialize(new ErrorResponse { Error = $"Frame {n} out of range", TotalFrames = _loadedFrameOffsets.Count });
             return ReadFrame(n);
         }
 
         if (ql.StartsWith("recording:range:"))
         {
             if (_loadedRecordingPath == null || _loadedFrameOffsets == null)
-                return "{\"error\":\"No recording loaded\"}";
+                return Serialize(new ErrorResponse { Error = "No recording loaded" });
             var parts = ql.Substring("recording:range:".Length).Split(':');
             if (parts.Length != 2 || !int.TryParse(parts[0], out var rangeStart) || !int.TryParse(parts[1], out var rangeEnd))
-                return "{\"error\":\"Usage: recording:range:N:M\"}";
+                return Serialize(new ErrorResponse { Error = "Usage: recording:range:N:M" });
             rangeStart = Math.Max(0, rangeStart);
             rangeEnd = Math.Min(_loadedFrameOffsets.Count - 1, rangeEnd);
-            var sb = new StringBuilder("{\"frames\":[");
+            var frames = new List<object>();
             for (int i = rangeStart; i <= rangeEnd; i++)
-            {
-                if (i > rangeStart) sb.Append(',');
-                sb.Append(ReadFrame(i));
-            }
-            sb.Append("]}");
-            return sb.ToString();
+                frames.Add(ReadFrame(i));
+            return Serialize(new RecordingFramesResponse { Frames = frames });
         }
 
         if (ql.StartsWith("recording:search:"))
         {
             if (_loadedRecordingPath == null || _loadedFrameOffsets == null)
-                return "{\"error\":\"No recording loaded\"}";
+                return Serialize(new ErrorResponse { Error = "No recording loaded" });
             var term = query.Substring("recording:search:".Length).Trim();
             var matches = SearchFrames(term);
-            return $"{{\"term\":\"{Esc(term)}\",\"matchCount\":{matches.Count},\"frames\":[{string.Join(",", matches)}]}}";
+            return Serialize(new RecordingSearchResponse
+            {
+                Term = term,
+                MatchCount = matches.Count,
+                Frames = matches,
+            });
         }
 
         if (ql == "recording:summary")
         {
             if (_loadedRecordingPath == null || _loadedFrameOffsets == null)
-                return "{\"error\":\"No recording loaded\"}";
+                return Serialize(new ErrorResponse { Error = "No recording loaded" });
             return SummarizeRecording();
         }
 
-        return $"{{\"error\":\"Unknown recording command\",\"query\":\"{Esc(ql)}\"}}";
+        return Serialize(new ErrorResponse { Error = "Unknown recording command", Query = ql });
     }
 
-    private string BuildSnapshot()
+    private SnapshotResponse BuildSnapshot()
     {
-        var sb = new StringBuilder(16384);
-        sb.Append('{');
-
-        // Frame metadata
         var elapsed = _isRecording ? (DateTime.UtcNow - _recordingStart).TotalMilliseconds : 0;
-        sb.Append($"\"frame\":{_frameCount},\"timestamp\":\"{DateTime.UtcNow:O}\",\"elapsedMs\":{elapsed:F0},");
-
-        // Area
-        WriteArea(sb);
-
-        // Player (full with actor)
-        WritePlayerFull(sb);
-
-        // Entities (adaptive depth)
-        WriteRecordingEntities(sb);
-
-        sb.Append("\"_end\":true}");
-        return sb.ToString();
+        var snapshot = new SnapshotResponse
+        {
+            Frame = _frameCount,
+            Timestamp = DateTime.UtcNow.ToString("O"),
+            ElapsedMs = Math.Round(elapsed),
+            Area = BuildArea(),
+            Player = BuildPlayerFull(),
+            Entities = BuildRecordingEntities(),
+        };
+        return snapshot;
     }
 
-    private void WritePlayerFull(StringBuilder sb)
+    private PlayerDto BuildPlayerFull()
     {
         var player = GameController.Player;
         var life = player.GetComponent<Life>();
@@ -1007,56 +974,34 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         var actor = player.GetComponent<ExileCore.PoEMemory.Components.Actor>();
         var pos = player.GetComponent<Positioned>();
 
-        sb.Append($"\"player\":{{\"path\":\"{Esc(player.Path)}\",");
-        sb.Append($"\"hp\":{life?.CurHP ?? 0},\"maxHp\":{life?.MaxHP ?? 0},");
-        sb.Append($"\"es\":{life?.CurES ?? 0},\"maxEs\":{life?.MaxES ?? 0},");
-        sb.Append($"\"mana\":{life?.CurMana ?? 0},\"maxMana\":{life?.MaxMana ?? 0},");
-        sb.Append($"\"pos\":[{player.GridPosNum.X:F0},{player.GridPosNum.Y:F0}]");
+        var dto = new PlayerDto
+        {
+            Path = player.Path ?? "",
+            Hp = life?.CurHP ?? 0,
+            MaxHp = life?.MaxHP ?? 0,
+            Es = life?.CurES ?? 0,
+            MaxEs = life?.MaxES ?? 0,
+            Mana = life?.CurMana ?? 0,
+            MaxMana = life?.MaxMana ?? 0,
+            Pos = [(float)Math.Round(player.GridPosNum.X), (float)Math.Round(player.GridPosNum.Y)],
+        };
 
         if (pos != null)
-            sb.Append($",\"rotation\":{pos.Rotation:F3}");
+            dto.Rotation = (float)Math.Round(pos.Rotation, 3);
 
-        // Actor data
         if (actor != null)
         {
-            sb.Append($",\"actor\":{{\"actionId\":{actor.ActionId},\"action\":\"{actor.Action}\"");
-            sb.Append($",\"animationId\":{actor.AnimationId},\"animation\":\"{actor.Animation}\"");
-            sb.Append($",\"isMoving\":{Bool(actor.isMoving)},\"isAttacking\":{Bool(actor.isAttacking)}");
-            try
-            {
-                var ca = actor.CurrentAction;
-                if (ca != null)
-                {
-                    sb.Append(",\"currentAction\":{");
-                    sb.Append($"\"skill\":\"{Esc(ca.Skill?.Name)}\"");
-                    sb.Append($",\"destination\":[{ca.Destination.X},{ca.Destination.Y}]");
-                    try { if (ca.Target != null) sb.Append($",\"targetId\":{ca.Target.Id}"); } catch { }
-                    sb.Append('}');
-                }
-            }
-            catch { }
-            sb.Append('}');
+            dto.Actor = BuildActorDto(actor);
+            dto.Skills = BuildSkills(actor);
         }
 
-        // Buffs with enhanced fields
         if (buffs?.BuffsList != null)
-        {
-            sb.Append(",\"buffs\":[");
-            var first = true;
-            foreach (var b in buffs.BuffsList)
-            {
-                if (!first) sb.Append(',');
-                first = false;
-                WriteBuff(sb, b);
-            }
-            sb.Append(']');
-        }
-        if (actor != null)
-            WriteSkills(sb, actor);
-        sb.Append("},");
+            dto.Buffs = buffs.BuffsList.Select(BuildBuff).ToList();
+
+        return dto;
     }
 
-    private void WriteRecordingEntities(StringBuilder sb)
+    private List<EntityDto> BuildRecordingEntities()
     {
         var maxDist = (float)Settings.RecordingEntityRange.Value;
         var maxStats = Settings.RecordingMaxDeepStats.Value;
@@ -1068,242 +1013,102 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             .OrderBy(e => e.DistancePlayer)
             .ToList();
 
-        sb.Append("\"entities\":[");
-        var first = true;
+        var result = new List<EntityDto>();
         foreach (var e in entities)
         {
-            if (!first) sb.Append(',');
-            first = false;
-
             var isElite = autoDeep && (e.Rarity == MonsterRarity.Unique || e.Rarity == MonsterRarity.Rare);
             var hasEffects = e.GetComponent<Beam>() != null
                 || e.GetComponent<GroundEffect>() != null
                 || e.GetComponent<EffectPack>() != null;
 
             if (isElite || hasEffects)
-                WriteDeepEntity(sb, e, maxStats);
+                result.Add(BuildDeepEntityRecording(e, maxStats));
             else
-                WriteShallowEntity(sb, e);
+                result.Add(BuildShallowEntity(e));
         }
-        sb.Append("],");
+        return result;
     }
 
-    private void WriteShallowEntity(StringBuilder sb, Entity e)
-    {
-        var life = e.GetComponent<Life>();
-        var render = e.GetComponent<Render>();
-        sb.Append($"{{\"id\":{e.Id},");
-        sb.Append($"\"type\":\"{e.Type}\",");
-        sb.Append($"\"path\":\"{Esc(e.Path)}\",");
-        sb.Append($"\"name\":\"{Esc(render?.Name)}\",");
-        sb.Append($"\"alive\":{Bool(e.IsAlive)},");
-        sb.Append($"\"hostile\":{Bool(e.IsHostile)},");
-        sb.Append($"\"rarity\":\"{e.Rarity}\",");
-        sb.Append($"\"dist\":{Num(e.DistancePlayer)},");
-        sb.Append($"\"pos\":[{e.GridPosNum.X:F0},{e.GridPosNum.Y:F0}],");
-        sb.Append($"\"hp\":{life?.CurHP ?? 0},\"maxHp\":{life?.MaxHP ?? 0}");
-
-        // Effects on shallow entities (important for visual mechanic entities)
-        WriteEffectComponents(sb, e);
-
-        sb.Append('}');
-    }
-
-    private void WriteDeepEntity(StringBuilder sb, Entity e, int maxStats)
+    private EntityDto BuildDeepEntityRecording(Entity e, int maxStats)
     {
         var life = e.GetComponent<Life>();
         var render = e.GetComponent<Render>();
         var actor = e.GetComponent<ExileCore.PoEMemory.Components.Actor>();
-        var buffs = e.GetComponent<Buffs>();
         var pos = e.GetComponent<Positioned>();
-        var sm = e.GetComponent<StateMachine>();
-        var stats = e.GetComponent<Stats>();
-        var tgt = e.GetComponent<Targetable>();
-        var omp = e.GetComponent<ObjectMagicProperties>();
 
-        sb.Append($"{{\"id\":{e.Id},\"deep\":true,");
-        sb.Append($"\"type\":\"{e.Type}\",");
-        sb.Append($"\"path\":\"{Esc(e.Path)}\",");
-        sb.Append($"\"name\":\"{Esc(render?.Name)}\",");
-        sb.Append($"\"alive\":{Bool(e.IsAlive)},");
-        sb.Append($"\"hostile\":{Bool(e.IsHostile)},");
-        sb.Append($"\"rarity\":\"{e.Rarity}\",");
-        sb.Append($"\"dist\":{Num(e.DistancePlayer)},");
-        sb.Append($"\"pos\":[{e.GridPosNum.X:F0},{e.GridPosNum.Y:F0}],");
+        var dto = new EntityDto
+        {
+            Id = e.Id,
+            Deep = true,
+            Type = e.Type.ToString(),
+            Path = e.Path ?? "",
+            Name = render?.Name,
+            Alive = e.IsAlive,
+            Hostile = e.IsHostile,
+            Rarity = e.Rarity.ToString(),
+            Dist = SafeFloat(e.DistancePlayer),
+            Pos = [(float)Math.Round(e.GridPosNum.X), (float)Math.Round(e.GridPosNum.Y)],
+            End = true,
+        };
 
-        // Life
         if (life != null)
-            sb.Append($"\"life\":{{\"hp\":{life.CurHP},\"maxHp\":{life.MaxHP},\"es\":{life.CurES},\"maxEs\":{life.MaxES}}},");
+        {
+            dto.Life = new LifeDto
+            {
+                Hp = life.CurHP,
+                MaxHp = life.MaxHP,
+                Es = life.CurES,
+                MaxEs = life.MaxES,
+            };
+        }
 
-        // Render
         if (render != null)
-            sb.Append($"\"render\":{{\"pos\":[{render.PosNum.X:F1},{render.PosNum.Y:F1},{render.PosNum.Z:F1}],\"bounds\":[{render.BoundsNum.X:F1},{render.BoundsNum.Y:F1},{render.BoundsNum.Z:F1}]}},");
+        {
+            dto.Render = new RenderDto
+            {
+                Pos = [
+                    (float)Math.Round(render.PosNum.X, 1),
+                    (float)Math.Round(render.PosNum.Y, 1),
+                    (float)Math.Round(render.PosNum.Z, 1)
+                ],
+                Bounds = [
+                    (float)Math.Round(render.BoundsNum.X, 1),
+                    (float)Math.Round(render.BoundsNum.Y, 1),
+                    (float)Math.Round(render.BoundsNum.Z, 1)
+                ],
+            };
+        }
 
-        // Positioned
         if (pos != null)
-            sb.Append($"\"positioned\":{{\"rotation\":{pos.Rotation:F3},\"travelProgress\":{pos.TravelProgress:F3}}},");
+        {
+            dto.Positioned = new PositionedDto
+            {
+                Rotation = (float)Math.Round(pos.Rotation, 3),
+                TravelProgress = (float)Math.Round(pos.TravelProgress, 3),
+            };
+        }
 
-        // Actor
         if (actor != null)
-        {
-            sb.Append($"\"actor\":{{\"actionId\":{actor.ActionId},\"action\":\"{actor.Action}\"");
-            sb.Append($",\"animationId\":{actor.AnimationId},\"animation\":\"{actor.Animation}\"");
-            sb.Append($",\"isMoving\":{Bool(actor.isMoving)},\"isAttacking\":{Bool(actor.isAttacking)}");
-            try
-            {
-                var ca = actor.CurrentAction;
-                if (ca != null)
-                {
-                    sb.Append(",\"currentAction\":{");
-                    sb.Append($"\"skill\":\"{Esc(ca.Skill?.Name)}\"");
-                    sb.Append($",\"destination\":[{ca.Destination.X},{ca.Destination.Y}]");
-                    try { if (ca.Target != null) sb.Append($",\"targetId\":{ca.Target.Id}"); } catch { }
-                    sb.Append('}');
-                }
-            }
-            catch { }
-            sb.Append("},");
-        }
+            dto.Actor = BuildActorDto(actor);
 
-        // Buffs
-        if (buffs?.BuffsList != null && buffs.BuffsList.Count > 0)
-        {
-            sb.Append("\"buffs\":[");
-            var bf = true;
-            foreach (var b in buffs.BuffsList)
-            {
-                if (!bf) sb.Append(',');
-                bf = false;
-                WriteBuff(sb, b);
-            }
-            sb.Append("],");
-        }
+        PopulateBuffs(dto, e);
+        PopulateStateMachine(dto, e, includeTargetFlags: false);
 
-        // StateMachine
-        if (sm != null)
-        {
-            try
-            {
-                var sts = sm.States;
-                if (sts != null && sts.Count > 0)
-                {
-                    sb.Append("\"stateMachine\":{\"states\":{");
-                    var smf = true;
-                    foreach (var s in sts)
-                    {
-                        if (!smf) sb.Append(',');
-                        smf = false;
-                        sb.Append($"\"{Esc(s.Name)}\":{s.Value}");
-                    }
-                    sb.Append("}},");
-                }
-            }
-            catch { }
-        }
-
-        // Targetable
+        var tgt = e.GetComponent<Targetable>();
         if (tgt != null)
-            sb.Append($"\"targetable\":{{\"isTargetable\":{Bool(tgt.isTargetable)},\"isTargeted\":{Bool(tgt.isTargeted)}}},");
-
-        // ObjectMagicProperties
-        if (omp != null)
         {
-            sb.Append($"\"omp\":{{\"rarity\":\"{omp.Rarity}\"");
-            try
+            dto.Targetable = new TargetableDto
             {
-                var mods = omp.Mods;
-                if (mods != null && mods.Count > 0)
-                    sb.Append($",\"mods\":[{string.Join(",", mods.Select(m => $"\"{Esc(m)}\""))}]");
-            }
-            catch { }
-            sb.Append("},");
+                IsTargetable = tgt.isTargetable,
+                IsTargeted = tgt.isTargeted,
+            };
         }
 
-        // Stats
-        if (stats != null)
-        {
-            try
-            {
-                var sd = stats.StatDictionary;
-                if (sd != null && sd.Count > 0)
-                {
-                    sb.Append("\"stats\":{");
-                    var sf = true;
-                    foreach (var kv in sd.Take(maxStats))
-                    {
-                        if (!sf) sb.Append(',');
-                        sf = false;
-                        sb.Append($"\"{kv.Key}\":{kv.Value}");
-                    }
-                    if (sd.Count > maxStats) sb.Append($",\"_truncated\":{sd.Count}");
-                    sb.Append("},");
-                }
-            }
-            catch { }
-        }
+        PopulateOmp(dto, e);
+        PopulateStats(dto, e, maxStats);
+        PopulateEffectComponents(dto, e);
 
-        // Visual effect components
-        WriteEffectComponents(sb, e);
-
-        sb.Append("\"_end\":true}");
-    }
-
-    /// <summary>
-    /// Writes visual effect components (Beam, GroundEffect, EffectPack, AnimationController)
-    /// for any entity. These capture spell visuals, ground markers, beams, and animation
-    /// state -- critical for mechanics like Maven memory game where the game communicates
-    /// sequences through visual effects rather than entity state.
-    /// </summary>
-    private void WriteEffectComponents(StringBuilder sb, Entity e)
-    {
-        // Beam: directional effects with start/end world positions (laser beams, tethers)
-        try
-        {
-            var beam = e.GetComponent<Beam>();
-            if (beam != null)
-            {
-                var bs = beam.BeamStartNum;
-                var be = beam.BeamEndNum;
-                sb.Append($",\"beam\":{{\"start\":[{bs.X:F1},{bs.Y:F1},{bs.Z:F1}],\"end\":[{be.X:F1},{be.Y:F1},{be.Z:F1}]}}");
-            }
-        }
-        catch { }
-
-        // GroundEffect: ground degens, markers, AoE zones with duration tracking
-        try
-        {
-            var ge = e.GetComponent<GroundEffect>();
-            if (ge != null)
-            {
-                sb.Append($",\"groundEffect\":{{\"duration\":{ge.Duration:F2},\"maxDuration\":{ge.MaxDuration:F2}");
-                sb.Append($",\"scale\":{ge.Scale},\"sizeIncrease\":{ge.SizeIncreaseOverTime}}}");
-            }
-        }
-        catch { }
-
-        // EffectPack: presence indicates visual effects on this entity
-        // (Effects list is private in compiled DLL, so we flag presence only)
-        try
-        {
-            var ep = e.GetComponent<EffectPack>();
-            if (ep != null)
-                sb.Append(",\"hasEffectPack\":true");
-        }
-        catch { }
-
-        // AnimationController: animation progress, speed, timing for visual sequences
-        try
-        {
-            var ac = e.GetComponent<AnimationController>();
-            if (ac != null)
-            {
-                sb.Append($",\"animController\":{{\"animId\":{ac.CurrentAnimationId}");
-                sb.Append($",\"stage\":{ac.CurrentAnimationStage}");
-                sb.Append($",\"progress\":{ac.AnimationProgress:F3}");
-                sb.Append($",\"speed\":{ac.AnimationSpeed:F3}}}");
-            }
-        }
-        catch { }
+        return dto;
     }
 
     private void CaptureSnapshot()
@@ -1312,7 +1117,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         try
         {
             var snapshot = BuildSnapshot();
-            _recordingWriter.WriteLine(snapshot);
+            _recordingWriter.WriteLine(Serialize(snapshot));
             _frameCount++;
             if (_frameCount % 25 == 0) _recordingWriter.Flush();
         }
@@ -1351,12 +1156,12 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
     private string ReadFrame(int n)
     {
         if (_loadedRecordingPath == null || _loadedFrameOffsets == null || n < 0 || n >= _loadedFrameOffsets.Count)
-            return "{\"error\":\"Invalid frame\"}";
+            return Serialize(new ErrorResponse { Error = "Invalid frame" });
 
         using var fs = new FileStream(_loadedRecordingPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         fs.Seek(_loadedFrameOffsets[n], SeekOrigin.Begin);
         using var sr = new StreamReader(fs, System.Text.Encoding.UTF8);
-        return sr.ReadLine() ?? "{\"error\":\"Empty frame\"}";
+        return sr.ReadLine() ?? Serialize(new ErrorResponse { Error = "Empty frame" });
     }
 
     private List<int> SearchFrames(string term)
@@ -1379,7 +1184,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
     private string SummarizeRecording()
     {
         if (_loadedRecordingPath == null || _loadedFrameOffsets == null)
-            return "{\"error\":\"No recording loaded\"}";
+            return Serialize(new ErrorResponse { Error = "No recording loaded" });
 
         var entityPaths = new HashSet<string>();
         var buffNames = new HashSet<string>();
@@ -1434,99 +1239,287 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             }
         }
 
-        var sb = new StringBuilder("{");
-        sb.Append($"\"file\":\"{Esc(Path.GetFileName(_loadedRecordingPath))}\",");
-        sb.Append($"\"totalFrames\":{totalFrames},");
-        sb.Append($"\"firstTimestamp\":\"{Esc(firstTimestamp)}\",");
-        sb.Append($"\"lastTimestamp\":\"{Esc(lastTimestamp)}\",");
-
-        sb.Append("\"uniqueEntityPaths\":[");
-        sb.Append(string.Join(",", entityPaths.OrderBy(p => p).Select(p => $"\"{Esc(p)}\"")));
-        sb.Append("],");
-
-        sb.Append("\"uniqueBuffNames\":[");
-        sb.Append(string.Join(",", buffNames.OrderBy(n => n).Select(n => $"\"{Esc(n)}\"")));
-        sb.Append("]");
-
-        sb.Append('}');
-        return sb.ToString();
+        return Serialize(new RecordingSummaryDto
+        {
+            File = Path.GetFileName(_loadedRecordingPath),
+            TotalFrames = totalFrames,
+            FirstTimestamp = firstTimestamp,
+            LastTimestamp = lastTimestamp,
+            UniqueEntityPaths = entityPaths.OrderBy(p => p).ToList(),
+            UniqueBuffNames = buffNames.OrderBy(n => n).ToList(),
+        });
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────
+    // ── Shared builders ─────────────────────────────────────────────
 
-    private void WriteSkills(StringBuilder sb, ExileCore.PoEMemory.Components.Actor actor)
+    private ActorDto BuildActorDto(ExileCore.PoEMemory.Components.Actor actor)
+    {
+        var dto = new ActorDto
+        {
+            ActionId = actor.ActionId,
+            Action = actor.Action.ToString(),
+            AnimationId = actor.AnimationId,
+            Animation = actor.Animation.ToString(),
+            IsMoving = actor.isMoving,
+            IsAttacking = actor.isAttacking,
+        };
+
+        try
+        {
+            var ca = actor.CurrentAction;
+            if (ca != null)
+            {
+                dto.CurrentAction = new CurrentActionDto
+                {
+                    Skill = ca.Skill?.Name,
+                    Destination = [ca.Destination.X, ca.Destination.Y],
+                };
+                try { if (ca.Target != null) dto.CurrentAction.TargetId = ca.Target.Id; } catch { }
+            }
+        }
+        catch { }
+
+        return dto;
+    }
+
+    private List<SkillDto>? BuildSkills(ExileCore.PoEMemory.Components.Actor actor)
     {
         try
         {
             var skills = actor.ActorSkills;
-            if (skills == null || skills.Count == 0) return;
-            sb.Append(",\"skills\":[");
-            var first = true;
-            foreach (var s in skills)
-            {
-                if (!first) sb.Append(',');
-                first = false;
-                sb.Append($"{{\"id\":{s.Id},\"name\":\"{Esc(s.Name)}\"");
+            if (skills == null || skills.Count == 0) return null;
 
-                // Resolve name through full chain (bypasses Name property bug for granted skills)
+            return skills.Select(s =>
+            {
+                var dto = new SkillDto
+                {
+                    Id = s.Id,
+                    Name = s.Name ?? "",
+                    CanBeUsed = s.CanBeUsed,
+                    IsOnSkillBar = s.IsOnSkillBar,
+                    Cooldown = SafeFloat((float)s.Cooldown),
+                    IsUsing = s.IsUsing,
+                };
+
                 try
                 {
                     var activeSkill = s.EffectsPerLevel?.SkillGemWrapper?.ActiveSkill;
                     if (activeSkill != null)
                     {
                         var iname = activeSkill.InternalName;
-                        if (!string.IsNullOrEmpty(iname))
-                            sb.Append($",\"internalName\":\"{Esc(iname)}\"");
+                        if (!string.IsNullOrEmpty(iname)) dto.InternalName = iname;
                         var dname = activeSkill.DisplayName;
-                        if (!string.IsNullOrEmpty(dname))
-                            sb.Append($",\"displayName\":\"{Esc(dname)}\"");
+                        if (!string.IsNullOrEmpty(dname)) dto.DisplayName = dname;
                     }
                 }
                 catch { }
 
-                sb.Append($",\"canBeUsed\":{Bool(s.CanBeUsed)}");
-                sb.Append($",\"isOnSkillBar\":{Bool(s.IsOnSkillBar)}");
-                sb.Append($",\"cooldown\":{Num((float)s.Cooldown)}");
-                sb.Append($",\"isUsing\":{Bool(s.IsUsing)}");
-                try { sb.Append($",\"isUserSkill\":{Bool(s.IsUserSkill)}"); } catch { }
-                try { sb.Append($",\"isMine\":{Bool(s.IsMine)}"); } catch { }
-                try { sb.Append($",\"totalUses\":{s.TotalUses}"); } catch { }
-                try { sb.Append($",\"cost\":{s.Cost}"); } catch { }
+                try { dto.IsUserSkill = s.IsUserSkill; } catch { }
+                try { dto.IsMine = s.IsMine; } catch { }
+                try { dto.TotalUses = s.TotalUses; } catch { }
+                try { dto.Cost = s.Cost; } catch { }
 
-                sb.Append('}');
-            }
-            sb.Append(']');
+                return dto;
+            }).ToList();
         }
-        catch { }
+        catch { return null; }
     }
 
-    private void WriteBuff(StringBuilder sb, Buff b)
+    private static BuffDto BuildBuff(Buff b)
     {
-        sb.Append($"{{\"name\":\"{Esc(b.Name)}\",\"charges\":{b.BuffCharges},\"timer\":{Num(b.Timer)}");
-        sb.Append($",\"displayName\":\"{Esc(b.DisplayName)}\"");
+        var dto = new BuffDto
+        {
+            Name = b.Name ?? "",
+            Charges = b.BuffCharges,
+            Timer = SafeFloat(b.Timer),
+            DisplayName = b.DisplayName ?? "",
+            Stacks = b.BuffStacks,
+            MaxTime = SafeFloat(b.MaxTime),
+            SourceEntityId = b.SourceEntityId,
+            SourceSkillId = b.SourceSkillId,
+        };
+
         var desc = b.Description;
         if (!string.IsNullOrEmpty(desc))
-            sb.Append($",\"description\":\"{Esc(Trunc(desc, 200))}\"");
-        sb.Append($",\"stacks\":{b.BuffStacks},\"maxTime\":{Num(b.MaxTime)},\"sourceEntityId\":{b.SourceEntityId},\"sourceSkillId\":{b.SourceSkillId}");
+            dto.Description = Trunc(desc, 200);
+
         try
         {
             var src = b.SourceEntityId != 0 ? b.SourceEntity : null;
             var srcName = src?.GetComponent<Render>()?.Name;
             if (!string.IsNullOrEmpty(srcName))
-                sb.Append($",\"sourceName\":\"{Esc(srcName)}\"");
+                dto.SourceName = srcName;
         }
         catch { }
-        sb.Append('}');
+
+        return dto;
     }
 
-    private static string Esc(string? s)
-        => s?.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "").Replace("\r", "") ?? "";
+    // ── Shared entity populators ────────────────────────────────────
 
-    private static string Bool(bool v) => v ? "true" : "false";
+    private static void PopulateEffectComponents(EntityDto dto, Entity e)
+    {
+        try
+        {
+            var beam = e.GetComponent<Beam>();
+            if (beam != null)
+            {
+                var bs = beam.BeamStartNum;
+                var be = beam.BeamEndNum;
+                dto.Beam = new BeamDto
+                {
+                    Start = [(float)Math.Round(bs.X, 1), (float)Math.Round(bs.Y, 1), (float)Math.Round(bs.Z, 1)],
+                    End = [(float)Math.Round(be.X, 1), (float)Math.Round(be.Y, 1), (float)Math.Round(be.Z, 1)],
+                };
+            }
+        }
+        catch { }
+
+        try
+        {
+            var ge = e.GetComponent<GroundEffect>();
+            if (ge != null)
+            {
+                dto.GroundEffect = new GroundEffectDto
+                {
+                    Duration = (float)Math.Round(ge.Duration, 2),
+                    MaxDuration = (float)Math.Round(ge.MaxDuration, 2),
+                    Scale = ge.Scale,
+                    SizeIncrease = ge.SizeIncreaseOverTime,
+                };
+            }
+        }
+        catch { }
+
+        try
+        {
+            var ep = e.GetComponent<EffectPack>();
+            if (ep != null)
+                dto.HasEffectPack = true;
+        }
+        catch { }
+
+        try
+        {
+            var ac = e.GetComponent<AnimationController>();
+            if (ac != null)
+            {
+                dto.AnimController = new AnimControllerDto
+                {
+                    AnimId = ac.CurrentAnimationId,
+                    Stage = ac.CurrentAnimationStage,
+                    Progress = (float)Math.Round(ac.AnimationProgress, 3),
+                    Speed = (float)Math.Round(ac.AnimationSpeed, 3),
+                };
+            }
+        }
+        catch { }
+    }
+
+    private static void PopulateBuffs(EntityDto dto, Entity e)
+    {
+        var buffs = e.GetComponent<Buffs>();
+        if (buffs?.BuffsList != null && buffs.BuffsList.Count > 0)
+            dto.Buffs = buffs.BuffsList.Select(BuildBuff).ToList();
+    }
+
+    private static void PopulateStats(EntityDto dto, Entity e, int maxStats)
+    {
+        var stats = e.GetComponent<Stats>();
+        if (stats == null) return;
+        try
+        {
+            var sd = stats.StatDictionary;
+            if (sd != null && sd.Count > 0)
+            {
+                var statsDto = new StatsDto();
+                foreach (var kv in sd.Take(maxStats))
+                    statsDto.Values[kv.Key.ToString()] = kv.Value;
+                if (sd.Count > maxStats)
+                    statsDto.Truncated = sd.Count;
+                dto.Stats = statsDto;
+            }
+        }
+        catch { }
+    }
+
+    private static void PopulateStateMachine(EntityDto dto, Entity e, bool includeTargetFlags)
+    {
+        var sm = e.GetComponent<StateMachine>();
+        if (sm == null) return;
+        try
+        {
+            var sts = sm.States;
+            if (sts != null && sts.Count > 0)
+            {
+                var smDto = new StateMachineDto();
+                if (includeTargetFlags)
+                {
+                    smDto.CanBeTarget = sm.CanBeTarget;
+                    smDto.InTarget = sm.InTarget;
+                }
+                foreach (var s in sts)
+                    smDto.States[s.Name ?? ""] = (int)s.Value;
+                dto.StateMachine = smDto;
+            }
+        }
+        catch { dto.StateMachine = new StateMachineDto { Error = true }; }
+    }
+
+    private static void PopulateChest(EntityDto dto, Entity e)
+    {
+        var chest = e.GetComponent<Chest>();
+        if (chest != null)
+        {
+            dto.Chest = new ChestDto
+            {
+                IsOpened = chest.IsOpened,
+                IsLocked = chest.IsLocked,
+                IsStrongbox = chest.IsStrongbox,
+                DestroyAfterOpen = chest.DestroyingAfterOpen,
+                IsLarge = chest.IsLarge,
+                Stompable = chest.Stompable,
+                OpenOnDamage = chest.OpenOnDamage,
+            };
+        }
+    }
+
+    private static void PopulateOmp(EntityDto dto, Entity e)
+    {
+        var omp = e.GetComponent<ObjectMagicProperties>();
+        if (omp != null)
+        {
+            var ompDto = new OmpDto { Rarity = omp.Rarity.ToString() };
+            try
+            {
+                var mods = omp.Mods;
+                if (mods != null && mods.Count > 0)
+                    ompDto.Mods = mods.ToList();
+            }
+            catch { }
+            dto.Omp = ompDto;
+        }
+    }
+
+    private static void PopulateMinimapIcon(EntityDto dto, Entity e)
+    {
+        var mi = e.GetComponent<MinimapIcon>();
+        if (mi != null)
+        {
+            dto.MinimapIcon = new MinimapIconDto
+            {
+                Name = mi.Name ?? "",
+                IsVisible = mi.IsVisible,
+                IsHide = mi.IsHide,
+            };
+        }
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────
 
     private static string Trunc(string s, int max)
         => s.Length > max ? s[..max] : s;
 
-    private static string Num(float v)
-        => float.IsInfinity(v) || float.IsNaN(v) ? "999999" : v.ToString("F1");
+    private static float SafeFloat(float v)
+        => float.IsInfinity(v) || float.IsNaN(v) ? 999999f : (float)Math.Round(v, 1);
 }
