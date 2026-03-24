@@ -197,6 +197,8 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         if (ql.StartsWith("record:") || ql == "snapshot" || ql.StartsWith("recording:"))
             return ProcessRecordingCommand(ql, query);
 
+        var incPlayerStats = ql == "playerstats";
+
         var isDeep = ql.StartsWith("deep:");
         var incPlayer = ql == "all" || ql == "player";
         var incArea = ql == "all" || ql == "area";
@@ -206,6 +208,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         var incUi = ql == "ui";
         var incStash = ql == "stash";
 
+        if (incPlayerStats) WritePlayerStats(sb);
         if (incPlayer) WritePlayer(sb);
         if (incArea) WriteArea(sb);
         if (incNpcDialog) WriteNpcDialog(sb);
@@ -241,9 +244,30 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             {
                 if (!first) sb.Append(',');
                 first = false;
-                sb.Append($"{{\"name\":\"{Esc(b.Name)}\",\"charges\":{b.BuffCharges},\"timer\":{Num(b.Timer)}}}");
+                WriteBuff(sb, b);
             }
             sb.Append(']');
+        }
+        var actor = player.GetComponent<ExileCore.PoEMemory.Components.Actor>();
+        if (actor != null)
+            WriteSkills(sb, actor);
+        sb.Append("},");
+    }
+
+    // ── PLAYER STATS (full dump, no truncation) ────────────────────
+
+    private void WritePlayerStats(StringBuilder sb)
+    {
+        var player = GameController.Player;
+        var stats = player?.GetComponent<Stats>();
+        if (stats?.StatDictionary == null) return;
+        sb.Append("\"stats\":{");
+        var first = true;
+        foreach (var kv in stats.StatDictionary)
+        {
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append($"\"{kv.Key}\":{kv.Value}");
         }
         sb.Append("},");
     }
@@ -439,7 +463,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
     //   color        - RGB tab color
     //   isPremium, isPublic, isRemoveOnly, isHidden, isMapSeries - flag booleans
     //   rawFlags     - raw InventoryTabFlags byte for debugging
-    // Note: Tab affinity data is not yet exposed by the API.
+    // Tab affinity is available via tab.Affinity (InventoryTabAffinity flags enum).
 
     private void WriteStash(StringBuilder sb)
     {
@@ -468,7 +492,8 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                     sb.Append($"\"isRemoveOnly\":{Bool(tab.RemoveOnly)},");
                     sb.Append($"\"isHidden\":{Bool(tab.IsHidden)},");
                     sb.Append($"\"isMapSeries\":{Bool((flags & InventoryTabFlags.MapSeries) != 0)},");
-                    sb.Append($"\"rawFlags\":{(byte)flags}");
+                    sb.Append($"\"rawFlags\":{(byte)flags},");
+                    sb.Append($"\"affinity\":{(uint)tab.Affinity}");
                     sb.Append('}');
                 }
             }
@@ -651,8 +676,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                 {
                     if (!bf) sb.Append(',');
                     bf = false;
-                    sb.Append($"{{\"name\":\"{Esc(b.Name)}\",\"charges\":{b.BuffCharges},\"timer\":{Num(b.Timer)}}}");
-
+                    WriteBuff(sb, b);
                 }
                 sb.Append("],");
             }
@@ -902,11 +926,12 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             {
                 if (!first) sb.Append(',');
                 first = false;
-                sb.Append($"{{\"name\":\"{Esc(b.Name)}\",\"charges\":{b.BuffCharges},\"timer\":{Num(b.Timer)}");
-                sb.Append($",\"stacks\":{b.BuffStacks},\"maxTime\":{Num(b.MaxTime)},\"sourceEntityId\":{b.SourceEntityId}}}");
+                WriteBuff(sb, b);
             }
             sb.Append(']');
         }
+        if (actor != null)
+            WriteSkills(sb, actor);
         sb.Append("},");
     }
 
@@ -1028,8 +1053,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             {
                 if (!bf) sb.Append(',');
                 bf = false;
-                sb.Append($"{{\"name\":\"{Esc(b.Name)}\",\"charges\":{b.BuffCharges},\"timer\":{Num(b.Timer)}");
-                sb.Append($",\"stacks\":{b.BuffStacks},\"maxTime\":{Num(b.MaxTime)},\"sourceEntityId\":{b.SourceEntityId}}}");
+                WriteBuff(sb, b);
             }
             sb.Append("],");
         }
@@ -1308,6 +1332,56 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
     }
 
     // ── Helpers ──────────────────────────────────────────────────────
+
+    private void WriteSkills(StringBuilder sb, ExileCore.PoEMemory.Components.Actor actor)
+    {
+        try
+        {
+            var skills = actor.ActorSkills;
+            if (skills == null || skills.Count == 0) return;
+            sb.Append(",\"skills\":[");
+            var first = true;
+            foreach (var s in skills)
+            {
+                if (!first) sb.Append(',');
+                first = false;
+                sb.Append($"{{\"id\":{s.Id},\"name\":\"{Esc(s.Name)}\"");
+                try
+                {
+                    var iname = s.InternalName;
+                    if (!string.IsNullOrEmpty(iname))
+                        sb.Append($",\"internalName\":\"{Esc(iname)}\"");
+                }
+                catch { }
+                sb.Append($",\"canBeUsed\":{Bool(s.CanBeUsed)}");
+                sb.Append($",\"isOnSkillBar\":{Bool(s.IsOnSkillBar)}");
+                sb.Append($",\"cooldown\":{Num((float)s.Cooldown)}");
+                sb.Append($",\"isUsing\":{Bool(s.IsUsing)}");
+                sb.Append('}');
+            }
+            sb.Append(']');
+        }
+        catch { }
+    }
+
+    private void WriteBuff(StringBuilder sb, Buff b)
+    {
+        sb.Append($"{{\"name\":\"{Esc(b.Name)}\",\"charges\":{b.BuffCharges},\"timer\":{Num(b.Timer)}");
+        sb.Append($",\"displayName\":\"{Esc(b.DisplayName)}\"");
+        var desc = b.Description;
+        if (!string.IsNullOrEmpty(desc))
+            sb.Append($",\"description\":\"{Esc(Trunc(desc, 200))}\"");
+        sb.Append($",\"stacks\":{b.BuffStacks},\"maxTime\":{Num(b.MaxTime)},\"sourceEntityId\":{b.SourceEntityId},\"sourceSkillId\":{b.SourceSkillId}");
+        try
+        {
+            var src = b.SourceEntityId != 0 ? b.SourceEntity : null;
+            var srcName = src?.GetComponent<Render>()?.Name;
+            if (!string.IsNullOrEmpty(srcName))
+                sb.Append($",\"sourceName\":\"{Esc(srcName)}\"");
+        }
+        catch { }
+        sb.Append('}');
+    }
 
     private static string Esc(string? s)
         => s?.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "").Replace("\r", "") ?? "";
