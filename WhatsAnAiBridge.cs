@@ -8,6 +8,7 @@ using ExileCore;
 using ExileCore.PoEMemory.Components;
 using ExileCore.PoEMemory.MemoryObjects;
 using ExileCore.Shared.Enums;
+using GameOffsets.Native;
 using SharpDX;
 using Vector2N = System.Numerics.Vector2;
 using Color = SharpDX.Color;
@@ -198,6 +199,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             return ProcessRecordingCommand(ql, query);
 
         var incPlayerStats = ql == "playerstats";
+        var incBuffProbe = ql == "buffprobe";
 
         var isDeep = ql.StartsWith("deep:");
         var incPlayer = ql == "all" || ql == "player";
@@ -209,6 +211,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         var incStash = ql == "stash";
 
         if (incPlayerStats) WritePlayerStats(sb);
+        if (incBuffProbe) WriteBuffProbe(sb);
         if (incPlayer) WritePlayer(sb);
         if (incArea) WriteArea(sb);
         if (incNpcDialog) WriteNpcDialog(sb);
@@ -270,6 +273,124 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             sb.Append($"\"{kv.Key}\":{kv.Value}");
         }
         sb.Append("},");
+    }
+
+    // ── BUFF PROBE (memory dump for reverse-engineering) ────────────
+
+    private void WriteBuffProbe(StringBuilder sb)
+    {
+        var mem = GameController.Memory;
+        var player = GameController.Player;
+        var buffs = player?.GetComponent<Buffs>()?.BuffsList;
+        if (buffs == null) return;
+
+        sb.Append("\"buffProbe\":[");
+        var first = true;
+        foreach (var b in buffs)
+        {
+            if (b.Name != "stolen_mods_buff" && b.Name != "herald_of_ice") continue;
+            if (!first) sb.Append(',');
+            first = false;
+
+            sb.Append($"{{\"name\":\"{Esc(b.Name)}\",\"timer\":{Num(b.Timer)},\"address\":\"{b.Address:X}\"");
+
+            // Raw memory: 0x48 to 0x100
+            sb.Append(",\"raw\":{");
+            for (int off = 0x48; off <= 0x100; off += 8)
+            {
+                if (off > 0x48) sb.Append(',');
+                try { sb.Append($"\"0x{off:X2}\":\"{mem.Read<long>(b.Address + off):X16}\""); }
+                catch { sb.Append($"\"0x{off:X2}\":\"ERROR\""); }
+            }
+            sb.Append('}');
+
+            // Read StdVector at 0x80: {First, Last, End}
+            try
+            {
+                var svFirst = mem.Read<long>(b.Address + 0x80);
+                var svLast = mem.Read<long>(b.Address + 0x88);
+                var dataSize = svLast - svFirst;
+                sb.Append($",\"sv80\":{{\"first\":\"{svFirst:X}\",\"last\":\"{svLast:X}\",\"dataSize\":{dataSize}");
+
+                if (svFirst > 0x10000 && dataSize > 0 && dataSize < 1000)
+                {
+                    // Read the raw data as ints
+                    sb.Append(",\"dataInts\":[");
+                    for (long addr = svFirst; addr < svLast && addr < svFirst + 64; addr += 4)
+                    {
+                        if (addr > svFirst) sb.Append(',');
+                        try { sb.Append(mem.Read<int>(addr)); }
+                        catch { sb.Append("\"ERR\""); }
+                    }
+                    sb.Append(']');
+
+                    // Read as (GameStat, int) pairs if size is multiple of 8
+                    if (dataSize % 8 == 0 && dataSize >= 8)
+                    {
+                        sb.Append(",\"statPairs\":[");
+                        for (long addr = svFirst; addr < svLast; addr += 8)
+                        {
+                            if (addr > svFirst) sb.Append(',');
+                            try
+                            {
+                                var stat = mem.Read<int>(addr);
+                                var val = mem.Read<int>(addr + 4);
+                                sb.Append($"{{\"statId\":{stat},\"stat\":\"{(GameStat)stat}\",\"val\":{val}}}");
+                            }
+                            catch { sb.Append("\"ERR\""); }
+                        }
+                        sb.Append(']');
+                    }
+                }
+                sb.Append('}');
+            }
+            catch { }
+
+            // Also try following tree nodes at ptr80 - read first few nodes
+            try
+            {
+                var ptr80 = mem.Read<long>(b.Address + 0x80);
+                if (ptr80 > 0x10000 && ptr80 < long.MaxValue / 2)
+                {
+                    // Each tree node likely has: left(8), parent(8), right(8), color(1-8), key(4), value(4)
+                    // Try reading key/value at various offsets within the node
+                    sb.Append(",\"treeNode0\":{");
+                    for (int off = 0; off <= 0x38; off += 4)
+                    {
+                        if (off > 0) sb.Append(',');
+                        try
+                        {
+                            var v = mem.Read<int>(ptr80 + off);
+                            sb.Append($"\"0x{off:X2}\":{v}");
+                        }
+                        catch { sb.Append($"\"0x{off:X2}\":\"ERR\""); }
+                    }
+                    sb.Append("}");
+
+                    // Follow first child pointer and read that node too
+                    var child = mem.Read<long>(ptr80);
+                    if (child > 0x10000 && child < long.MaxValue / 2)
+                    {
+                        sb.Append(",\"treeNode1\":{");
+                        for (int off = 0; off <= 0x38; off += 4)
+                        {
+                            if (off > 0) sb.Append(',');
+                            try
+                            {
+                                var v = mem.Read<int>(child + off);
+                                sb.Append($"\"0x{off:X2}\":{v}");
+                            }
+                            catch { sb.Append($"\"0x{off:X2}\":\"ERR\""); }
+                        }
+                        sb.Append("}");
+                    }
+                }
+            }
+            catch { }
+
+            sb.Append('}');
+        }
+        sb.Append("],");
     }
 
     // ── AREA ────────────────────────────────────────────────────────
@@ -1346,17 +1467,32 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                 if (!first) sb.Append(',');
                 first = false;
                 sb.Append($"{{\"id\":{s.Id},\"name\":\"{Esc(s.Name)}\"");
+
+                // Resolve name through full chain (bypasses Name property bug for granted skills)
                 try
                 {
-                    var iname = s.InternalName;
-                    if (!string.IsNullOrEmpty(iname))
-                        sb.Append($",\"internalName\":\"{Esc(iname)}\"");
+                    var activeSkill = s.EffectsPerLevel?.SkillGemWrapper?.ActiveSkill;
+                    if (activeSkill != null)
+                    {
+                        var iname = activeSkill.InternalName;
+                        if (!string.IsNullOrEmpty(iname))
+                            sb.Append($",\"internalName\":\"{Esc(iname)}\"");
+                        var dname = activeSkill.DisplayName;
+                        if (!string.IsNullOrEmpty(dname))
+                            sb.Append($",\"displayName\":\"{Esc(dname)}\"");
+                    }
                 }
                 catch { }
+
                 sb.Append($",\"canBeUsed\":{Bool(s.CanBeUsed)}");
                 sb.Append($",\"isOnSkillBar\":{Bool(s.IsOnSkillBar)}");
                 sb.Append($",\"cooldown\":{Num((float)s.Cooldown)}");
                 sb.Append($",\"isUsing\":{Bool(s.IsUsing)}");
+                try { sb.Append($",\"isUserSkill\":{Bool(s.IsUserSkill)}"); } catch { }
+                try { sb.Append($",\"isMine\":{Bool(s.IsMine)}"); } catch { }
+                try { sb.Append($",\"totalUses\":{s.TotalUses}"); } catch { }
+                try { sb.Append($",\"cost\":{s.Cost}"); } catch { }
+
                 sb.Append('}');
             }
             sb.Append(']');
