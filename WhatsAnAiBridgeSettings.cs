@@ -11,6 +11,11 @@ public class WhatsAnAiBridgeSettings : ISettings
     public TextNode BridgeDirectory { get; set; } = new("claude-bridge");
     public RangeNode<int> PollIntervalMs { get; set; } = new(250, 50, 2000);
 
+    // TCP Server
+    public ToggleNode EnableTcp { get; set; } = new(true);
+    public RangeNode<int> TcpPort { get; set; } = new(50900, 49152, 65535);
+    public ToggleNode EnableFileIpc { get; set; } = new(true);
+
     // Status HUD
     public ToggleNode ShowStatusHud { get; set; } = new(true);
     public RangeNode<int> HudX { get; set; } = new(10, 0, 3840);

@@ -9,6 +9,7 @@ using ExileCore.PoEMemory.MemoryObjects;
 using ExileCore.Shared.Enums;
 using GameOffsets.Native;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using SharpDX;
 using Vector2N = System.Numerics.Vector2;
 using Color = SharpDX.Color;
@@ -67,6 +68,9 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
     private const int MaxLogEntries = 50;
     private WhatsAnAiBridgeSettingsUi? _settingsUi;
 
+    // TCP server
+    private TcpBridgeServer? _tcpServer;
+
     // Recording state
     private bool _isRecording;
     private DateTime _recordingStart;
@@ -82,8 +86,107 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
 
     public override bool Initialise()
     {
+        Force = true;
         UpdatePaths();
+
+        if (Settings.EnableTcp.Value)
+            StartTcpServer();
+
         return true;
+    }
+
+    private void StartTcpServer()
+    {
+        try
+        {
+            _tcpServer?.Dispose();
+            _tcpServer = new TcpBridgeServer(
+                msg => LogMessage($"[TCP] {msg}"),
+                msg => LogError($"[TCP] {msg}")
+            );
+            _tcpServer.Start(Settings.TcpPort.Value, _bridgeDir);
+        }
+        catch (Exception ex)
+        {
+            LogError($"[TCP] Failed to start server: {ex.Message}");
+        }
+    }
+
+    public override void OnClose()
+    {
+        _tcpServer?.Dispose();
+        _tcpServer = null;
+        _recordingWriter?.Dispose();
+        _recordingWriter = null;
+    }
+
+    public override void OnPluginDestroyForHotReload()
+    {
+        _tcpServer?.Dispose();
+        _tcpServer = null;
+        _recordingWriter?.Dispose();
+        _recordingWriter = null;
+    }
+
+    // ── Tick: process TCP requests on main thread ────────────────────
+
+    public override Job Tick()
+    {
+        if (_tcpServer == null) return default;
+
+        var sw = Stopwatch.StartNew();
+
+        // Drain up to 5 requests per tick to stay under 200ms
+        int processed = 0;
+        while (processed < 5 && sw.ElapsedMilliseconds < 150 && _tcpServer.PendingRequests.TryDequeue(out var request))
+        {
+            processed++;
+            try
+            {
+                var result = ProcessTcpRequest(request.Method, request.Params);
+                request.Response.TrySetResult(result);
+
+                _status.TotalQueries++;
+                _status.LastQueryType = request.Method;
+                _status.LastQueryTimestamp = DateTime.UtcNow;
+                _status.LastResponseTime = sw.Elapsed.TotalMilliseconds;
+                _status.LastResponseSize = result.Length;
+                _status.LastError = "";
+            }
+            catch (Exception ex)
+            {
+                request.Response.TrySetResult(Serialize(new ErrorResponse { Error = ex.Message }));
+                _status.LastError = ex.Message;
+            }
+        }
+
+        return default;
+    }
+
+    private string ProcessTcpRequest(string method, JToken? parameters)
+    {
+        // Map JSON-RPC method to query string
+        var query = method switch
+        {
+            "query" => parameters?["type"]?.Value<string>() ?? "all",
+            _ => method, // Allow raw query strings as method names too
+        };
+
+        // Handle parameterized queries
+        if (query == "entities" && parameters?["range"] != null)
+            query = $"entities:{parameters["range"]!.Value<int>()}";
+        else if (query == "deep" && parameters?["filter"] != null)
+        {
+            var filter = parameters["filter"]!.Value<string>();
+            var range = parameters["range"]?.Value<int>();
+            query = range.HasValue ? $"deep:{filter}:{range}" : $"deep:{filter}";
+        }
+        else if (query.StartsWith("record:") || query.StartsWith("recording:") || query == "snapshot")
+        {
+            // Pass through recording commands directly
+        }
+
+        return ProcessQuery(query);
     }
 
     private void UpdatePaths()
@@ -99,8 +202,10 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
 
     public override void Render()
     {
-        // Poll for requests at configurable interval
         var now = DateTime.UtcNow;
+
+        // File IPC: poll for requests at configurable interval (legacy, behind toggle)
+        if (!Settings.EnableFileIpc.Value) goto hud;
         if ((now - _lastCheck).TotalMilliseconds < Settings.PollIntervalMs.Value) goto hud;
         _lastCheck = now;
         _status.PollIntervalMs = Settings.PollIntervalMs.Value;
@@ -175,16 +280,20 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         float x = Settings.HudX.Value;
         float y = Settings.HudY.Value;
 
-        var bgRect = new RectangleF(x, y, 180, 22);
+        var bgRect = new RectangleF(x, y, 220, 22);
         Graphics.DrawBox(bgRect, new Color(10, 10, 14, 200));
 
-        var statusColor = _status.State == "idle" ? new Color(0, 206, 209) : new Color(255, 200, 50);
-        var dotPos = new Vector2N(x + 10, y + 11);
+        var tcpClients = _tcpServer?.ConnectedClients ?? 0;
+        var hasTcp = _tcpServer?.IsRunning == true;
+        var statusColor = _status.State == "idle"
+            ? (hasTcp ? new Color(0, 206, 209) : new Color(100, 100, 100))
+            : new Color(255, 200, 50);
         Graphics.DrawBox(new RectangleF(x + 5, y + 6, 10, 10), statusColor);
 
+        var tcpTag = hasTcp ? $" TCP:{tcpClients}" : "";
         var text = _status.TotalQueries == 0
-            ? "Bridge: idle"
-            : $"Bridge: {_status.TotalQueries} queries";
+            ? $"Bridge: idle{tcpTag}"
+            : $"Bridge: {_status.TotalQueries} queries{tcpTag}";
         Graphics.DrawText(text, new Vector2N(x + 20, y + 3), new Color(200, 200, 200));
 
         Graphics.DrawFrame(bgRect, new Color(0, 130, 133, 80), 1);
@@ -207,6 +316,20 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         // Recording commands
         if (ql.StartsWith("record:") || ql == "snapshot" || ql.StartsWith("recording:"))
             return ProcessRecordingCommand(ql, query);
+
+        // Eval/describe commands (case-sensitive, use original query)
+        if (query.StartsWith("eval:"))
+        {
+            var expr = query.Substring(5);
+            var walker = new ExpressionWalker(GameController);
+            return walker.Evaluate(expr);
+        }
+        if (query.StartsWith("describe:"))
+        {
+            var expr = query.Substring(9);
+            var walker = new ExpressionWalker(GameController);
+            return walker.DescribeType(expr);
+        }
 
         var incPlayerStats = ql == "playerstats";
         var incBuffProbe = ql == "buffprobe";
