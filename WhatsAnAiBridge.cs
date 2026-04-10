@@ -86,6 +86,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
 
     public override bool Initialise()
     {
+        Name = "Whats An AI Bridge";
         Force = true;
         UpdatePaths();
 
