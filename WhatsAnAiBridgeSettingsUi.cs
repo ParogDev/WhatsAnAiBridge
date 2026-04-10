@@ -86,7 +86,8 @@ public class WhatsAnAiBridgeSettingsUi
         float pulse = (float)(0.4 + 0.3 * Math.Sin(ImGui.GetTime() * 1.8));
         cdl.AddRect(cMin, cMin + cSz, WithAlpha(Accent, pulse * 0.18f), 3f, ImDrawFlags.None, 1f);
 
-        float y = cMin.Y + 10;
+        float scrollY = ImGui.GetScrollY();
+        float y = cMin.Y + 10 - scrollY;
         float x = cMin.X + 12;
         float cx = cMin.X + cSz.X * 0.50f;
         float sw = cSz.X * 0.40f;
