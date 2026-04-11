@@ -107,6 +107,7 @@ the project.
 
 | Plugin | Description |
 |--------|-------------|
+| [What's a Blade Vortex?](https://github.com/ParogDev/WhatsABladeVortex) | Blade Vortex stack tracker with Minion Pact snapshot detection |
 | [What's a Breakpoint?](https://github.com/ParogDev/WhatsABreakpoint) | Kinetic Fusillade attack speed breakpoint visualizer |
 | [What's a Crowd Control?](https://github.com/ParogDev/WhatsACrowdControl) | OmniCC-style CC effect overlay with timers |
 | [What's a Mirage?](https://github.com/ParogDev/WhatsAMirage) | League mechanic overlay for spawners, chests, and wishes |
