@@ -1,6 +1,6 @@
 # What's an AI Bridge?
 
-> Give your AI eyes into your game -- live Path of Exile 2 game state as callable tools for Claude Code, VS Code Copilot, or any MCP-compatible client.
+> Give your AI eyes into your game -- live Path of Exile game state as callable tools for Claude Code, VS Code Copilot, or any MCP-compatible client.
 
 Part of the **WhatsA** plugin family for ExileApi.
 
@@ -54,7 +54,7 @@ See the [ExileApiMcp README](https://github.com/ParogDev/ExileApiMcp) for full s
 
 Once the plugin is running and the MCP server is configured, paste this into your AI to verify everything works:
 
-> I have ExileApiMcp configured as an MCP server. It connects to Path of Exile 2 via the ExileApi HUD overlay. Use the `get_bridge_status` tool to check the connection, then `get_all` to see my current game state. If tools hang or return errors, the HUD might not be in the foreground -- remind me to enable "Force Foreground" in ExileApi's Core settings.
+> I have ExileApiMcp configured as an MCP server. It connects to Path of Exile via the ExileApi HUD overlay. Use the `get_bridge_status` tool to check the connection, then `get_all` to see my current game state. If tools hang or return errors, the HUD might not be in the foreground -- remind me to enable "Force Foreground" in ExileApi's Core settings.
 
 From there, the AI can see your character, inspect entities, explore the object graph, and help you build plugins with live data.
 
