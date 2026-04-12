@@ -1,17 +1,17 @@
 # What's an AI Bridge?
 
-> Development infrastructure for AI-assisted plugin development -- exposes live game state to Claude Code (and any MCP-compatible client) as callable tools.
+> Give your AI eyes into your game -- live Path of Exile 2 game state as callable tools for Claude Code, VS Code Copilot, or any MCP-compatible client.
 
 Part of the **WhatsA** plugin family for ExileApi.
 
+This started as a private tool for building plugins with AI. It turns out giving an AI assistant direct access to game state is useful for anyone getting started with ExileApi -- so it's going public. If you've ever wanted an AI to help you build a plugin but got stuck explaining what's on screen, this is for you.
+
 ## What It Does
 
-- Hosts a TCP JSON-RPC 2.0 server on localhost that the game plugin answers on the main thread
-- Ships with a companion **MCP server** ([ExileApiMcp](https://github.com/ParogDev/ExileApiMcp)) that exposes game state as Model Context Protocol tools so Claude Code can call them directly (`get_player`, `get_entities`, `deep_scan`, `eval_path`, etc.)
-- Supports queries for player vitals, stats, entities, buffs, UI panels, NPC dialog, stash tabs, map data, and deep component dumps
-- Includes a reflection-based expression walker (`eval_path` / `describe_type`) for ad-hoc object graph exploration without writing a plugin
-- Records gameplay snapshots to JSONL files for offline analysis, with frame seek, search, and summary tools
-- Shows a status HUD (TCP client count, query totals) and keeps a rotating query log
+- Lets your AI query your character, nearby monsters, items, UI panels, stash tabs, and NPC dialog in real time
+- Includes a reflection walker so the AI can explore the full ExileApi object graph without writing code
+- Records gameplay snapshots for offline analysis -- useful for debugging when you can't reproduce a situation
+- Shows a status HUD on screen so you can see what the AI is asking and when
 
 ## Getting Started
 
@@ -21,12 +21,18 @@ Part of the **WhatsA** plugin family for ExileApi.
 3. Enable in the plugin list
 4. On start the plugin writes `bridge-port.txt` and `bridge-token.txt` into the bridge directory (default `claude-bridge/` under the HUD install)
 
-### 2. Wire up the MCP server (recommended)
-The companion MCP server is a separate project: **[ExileApiMcp](https://github.com/ParogDev/ExileApiMcp)**. Clone it, then point your MCP client at it:
+> **Important:** The plugin runs on the game's main thread. If ExileApi is not in the foreground, the game thread may be throttled or paused, which means queries won't be answered and game state won't update. Either keep ExileApi in the foreground while querying, or enable **Core > Force Foreground** in ExileApi's settings.
+
+### 2. Set up the MCP server
+The companion MCP server is a separate project: **[ExileApiMcp](https://github.com/ParogDev/ExileApiMcp)**. It translates between MCP tools and the plugin's TCP server.
 
 ```bash
 git clone https://github.com/ParogDev/ExileApiMcp.git
 ```
+
+You'll need the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) (preview) to build it.
+
+Then add to your MCP client config (e.g. `.mcp.json` in your project root for Claude Code):
 
 ```json
 {
@@ -35,36 +41,35 @@ git clone https://github.com/ParogDev/ExileApiMcp.git
       "command": "dotnet",
       "args": ["run", "--project", "C:\\path\\to\\ExileApiMcp"],
       "env": {
-        "BRIDGE_DIR": "C:\\Users\\You\\Documents\\PoeHelper\\claude-bridge"
+        "BRIDGE_DIR": "C:\\path\\to\\your\\HUD\\claude-bridge"
       }
     }
   }
 }
 ```
 
-The MCP server reads the actual port from `bridge-port.txt` (written by the plugin on startup). Auth tokens are read from `bridge-token.txt` automatically. See the [ExileApiMcp README](https://github.com/ParogDev/ExileApiMcp) for full setup details.
+See the [ExileApiMcp README](https://github.com/ParogDev/ExileApiMcp) for full setup, VS Code config, and troubleshooting.
 
-### 3. (Legacy) File IPC
-File IPC is still supported behind the `Enable File IPC` toggle. AI tools write a query string to `request.txt` and the plugin writes the response to `response.json`. Prefer the MCP/TCP path for new work -- it's lower latency, supports concurrent requests, and doesn't race on file handles.
+### 3. Give your AI this prompt
+
+Once the plugin is running and the MCP server is configured, paste this into your AI to verify everything works:
+
+> I have ExileApiMcp configured as an MCP server. It connects to Path of Exile 2 via the ExileApi HUD overlay. Use the `get_bridge_status` tool to check the connection, then `get_all` to see my current game state. If tools hang or return errors, the HUD might not be in the foreground -- remind me to enable "Force Foreground" in ExileApi's Core settings.
+
+From there, the AI can see your character, inspect entities, explore the object graph, and help you build plugins with live data.
 
 ## Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Bridge Directory | `claude-bridge` | Path where token/port/request/response files live |
-| Enable TCP | On | Start the JSON-RPC 2.0 TCP server |
-| TCP Port | 50900 | Localhost port (49152-65535). Actual port is written to `bridge-port.txt` |
-| Enable File IPC | On | Legacy request.txt/response.json polling |
-| Poll Interval | 250ms | How often file IPC checks for new queries |
-| Show Status HUD | On | Display bridge status indicator on screen |
-| HUD Position X / Y | 10 / 200 | Status indicator screen position |
-| Max Entity Range | 200 | Default distance limit for entity queries |
-| Max Deep Stats | 80 | Cap on GameStat entries included per entity in `deep:` queries |
-| Max UI Children | 300 | Cap on child elements walked during `ui` scans |
-| Recording Interval | 200ms | Time between snapshot captures |
-| Recording Entity Range | 200 | Distance limit for entities captured in recordings |
-| Auto Deep Scan Bosses | On | Full component dump for Unique/Rare entities during recording |
-| Recording Max Deep Stats | 200 | Deep-stat cap used while recording (higher than live default) |
+| Bridge Directory | `claude-bridge` | Where token, port, and IPC files are stored |
+| Enable TCP | On | Start the TCP server for MCP connections |
+| TCP Port | 50900 | Localhost port for the TCP server |
+| Show Status HUD | On | Display connection status and query activity on screen |
+| HUD Position X / Y | 10 / 200 | Screen position for the status indicator |
+| Max Entity Range | 200 | How far to scan for entities (grid units) |
+| Recording Interval | 200ms | Time between snapshot captures during recording |
+| Auto Deep Scan Bosses | On | Automatically capture full component data for Unique/Rare entities |
 
 <details>
 <summary>MCP Tools</summary>
@@ -135,6 +140,16 @@ Recordings are JSONL (one JSON object per line) so frames can be streamed and se
 - Grey dot: TCP disabled
 - Trailing `TCP:N` shows connected client count
 
+### Additional settings
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Enable File IPC | On | Legacy request.txt/response.json polling |
+| Poll Interval | 250ms | How often file IPC checks for new queries |
+| Max Deep Stats | 80 | Cap on GameStat entries per entity in deep queries |
+| Max UI Children | 300 | Cap on child elements walked during UI scans |
+| Recording Entity Range | 200 | Distance limit for entities captured in recordings |
+| Recording Max Deep Stats | 200 | Deep-stat cap used while recording |
+
 </details>
 
 ## About This Project
@@ -161,7 +176,7 @@ the project.
 | [What's a Mirage?](https://github.com/ParogDev/WhatsAMirage) | League mechanic overlay for spawners, chests, and wishes |
 | [What's a Tincture?](https://github.com/ParogDev/WhatsATincture) | Automated tincture management with burn stack tracking |
 | [What's a Tooltip?](https://github.com/ParogDev/WhatsATooltip) | Shared rich tooltip service for WhatsA plugins |
-| **What's an AI Bridge?** | MCP + TCP JSON-RPC bridge for AI-assisted plugin development |
+| **What's an AI Bridge?** | Live game state bridge for AI-assisted plugin development |
 | [What's an Unbound Avatar?](https://github.com/ParogDev/WhatsAnUnboundAvatar) | Auto-activation for Avatar of the Wilds at 100 fury |
 
 Built with ExileApiScaffolding (private development workspace)
