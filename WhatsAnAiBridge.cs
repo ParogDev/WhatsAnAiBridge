@@ -740,7 +740,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             entities = entities.Where(e => e.Type == EntityType.WorldItem);
 
         return entities.OrderBy(e => e.DistancePlayer)
-            .Take(200)
+            .Take(150)
             .Select(e => BuildShallowEntity(e))
             .ToList();
     }
@@ -764,7 +764,6 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             MaxHp = life?.MaxHP ?? 0,
         };
 
-        PopulateEffectComponents(dto, e);
         return dto;
     }
 
