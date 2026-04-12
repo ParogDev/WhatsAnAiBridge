@@ -352,7 +352,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
 
         if (incPlayerStats) response.Stats = BuildPlayerStats();
         if (incBuffProbe) response.BuffProbe = BuildBuffProbe();
-        if (incPlayer) response.Player = BuildPlayer();
+        if (incPlayer) response.Player = BuildPlayerFull();
         if (incArea) response.Area = BuildArea();
         if (incNpcDialog) response.NpcDialog = BuildNpcDialog();
         if (incMapData) response.MapData = BuildMapData();
@@ -987,7 +987,22 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                 _frameCount++;
                 if (_frameCount % 25 == 0) _recordingWriter.Flush();
             }
-            return json;
+
+            var recDir = Path.Combine(_bridgeDir, "recordings");
+            Directory.CreateDirectory(recDir);
+            var filename = $"snap_{DateTime.UtcNow:yyyyMMdd_HHmmss}.jsonl";
+            var filepath = Path.Combine(recDir, filename);
+            File.WriteAllText(filepath, json);
+
+            return Serialize(new SnapshotCaptureResponse
+            {
+                File = filename,
+                SizeBytes = json.Length,
+                Frame = _frameCount,
+                Timestamp = snapshot.Timestamp,
+                EntityCount = snapshot.Entities?.Count ?? 0,
+                Message = "Snapshot saved. Use recording_load + recording_frame to inspect, or get_all for interactive queries.",
+            });
         }
 
         if (ql == "recording:list")

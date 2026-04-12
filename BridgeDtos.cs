@@ -769,6 +769,27 @@ public class SnapshotResponse
     public bool End { get; set; } = true;
 }
 
+public class SnapshotCaptureResponse
+{
+    [JsonProperty("file")]
+    public string File { get; set; } = "";
+
+    [JsonProperty("sizeBytes")]
+    public long SizeBytes { get; set; }
+
+    [JsonProperty("frame")]
+    public int Frame { get; set; }
+
+    [JsonProperty("timestamp")]
+    public string Timestamp { get; set; } = "";
+
+    [JsonProperty("entityCount")]
+    public int EntityCount { get; set; }
+
+    [JsonProperty("message")]
+    public string Message { get; set; } = "";
+}
+
 // ── Recording command responses ──────────────────────────────────────
 
 public class RecordingStartResponse
