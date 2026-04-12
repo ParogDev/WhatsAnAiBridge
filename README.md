@@ -7,7 +7,7 @@ Part of the **WhatsA** plugin family for ExileApi.
 ## What It Does
 
 - Hosts a TCP JSON-RPC 2.0 server on localhost that the game plugin answers on the main thread
-- Ships with a companion **MCP server** (`ExileBridgeMcp`) that exposes game state as Model Context Protocol tools so Claude Code can call them directly (`get_player`, `get_entities`, `deep_scan`, `eval_path`, etc.)
+- Ships with a companion **MCP server** ([ExileApiMcp](https://github.com/ParogDev/ExileApiMcp)) that exposes game state as Model Context Protocol tools so Claude Code can call them directly (`get_player`, `get_entities`, `deep_scan`, `eval_path`, etc.)
 - Supports queries for player vitals, stats, entities, buffs, UI panels, NPC dialog, stash tabs, map data, and deep component dumps
 - Includes a reflection-based expression walker (`eval_path` / `describe_type`) for ad-hoc object graph exploration without writing a plugin
 - Records gameplay snapshots to JSONL files for offline analysis, with frame seek, search, and summary tools
@@ -22,16 +22,19 @@ Part of the **WhatsA** plugin family for ExileApi.
 4. On start the plugin writes `bridge-port.txt` and `bridge-token.txt` into the bridge directory (default `claude-bridge/` under the HUD install)
 
 ### 2. Wire up the MCP server (recommended)
-The MCP server lives at `ExileBridgeMcp/` in the scaffolding workspace. Point your MCP client at it with a config like:
+The companion MCP server is a separate project: **[ExileApiMcp](https://github.com/ParogDev/ExileApiMcp)**. Clone it, then point your MCP client at it:
+
+```bash
+git clone https://github.com/ParogDev/ExileApiMcp.git
+```
 
 ```json
 {
   "mcpServers": {
     "exileapi": {
       "command": "dotnet",
-      "args": ["run", "--project", "ExileBridgeMcp"],
+      "args": ["run", "--project", "C:\\path\\to\\ExileApiMcp"],
       "env": {
-        "BRIDGE_PORT": "50900",
         "BRIDGE_DIR": "C:\\Users\\You\\Documents\\PoeHelper\\claude-bridge"
       }
     }
@@ -39,7 +42,7 @@ The MCP server lives at `ExileBridgeMcp/` in the scaffolding workspace. Point yo
 }
 ```
 
-`BRIDGE_PORT` is the fallback; the MCP server prefers the actual port written to `bridge-port.txt` by the plugin (useful when you run ephemeral ports or multiple HUD instances). Auth tokens are read from `bridge-token.txt` automatically.
+The MCP server reads the actual port from `bridge-port.txt` (written by the plugin on startup). Auth tokens are read from `bridge-token.txt` automatically. See the [ExileApiMcp README](https://github.com/ParogDev/ExileApiMcp) for full setup details.
 
 ### 3. (Legacy) File IPC
 File IPC is still supported behind the `Enable File IPC` toggle. AI tools write a query string to `request.txt` and the plugin writes the response to `response.json`. Prefer the MCP/TCP path for new work -- it's lower latency, supports concurrent requests, and doesn't race on file handles.
