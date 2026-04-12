@@ -740,6 +740,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             entities = entities.Where(e => e.Type == EntityType.WorldItem);
 
         return entities.OrderBy(e => e.DistancePlayer)
+            .Take(200)
             .Select(e => BuildShallowEntity(e))
             .ToList();
     }
