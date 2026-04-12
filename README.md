@@ -24,7 +24,24 @@ This started as a private tool for building plugins with AI. It turns out giving
 > **Important:** The plugin runs on the game's main thread. If ExileApi is not in the foreground, the game thread may be throttled or paused, which means queries won't be answered and game state won't update. Either keep ExileApi in the foreground while querying, or enable **Core > Force Foreground** in ExileApi's settings.
 
 ### 2. Set up the MCP server
+
 The companion MCP server is a separate project: **[ExileApiMcp](https://github.com/ParogDev/ExileApiMcp)**. It translates between MCP tools and the plugin's TCP server.
+
+#### Automatic setup (Claude Code)
+
+If you're using [Claude Code](https://docs.anthropic.com/en/docs/claude-code), open your project directory and run:
+
+```
+/setup-mcp
+```
+
+This will clone the MCP repo if needed, detect your bridge directory, create `.mcp.json`, build, and tell you when to restart. No manual config editing required.
+
+> **Don't have the skill?** Paste this into Claude Code instead:
+>
+> *Clone https://github.com/ParogDev/ExileApiMcp.git, build it with `dotnet build`, find my ExileApi bridge directory (look for a `claude-bridge` folder containing `bridge-port.txt` in my Documents), and create a `.mcp.json` in my current directory that points to the MCP project and bridge directory. Then tell me to restart Claude Code.*
+
+#### Manual setup
 
 ```bash
 git clone https://github.com/ParogDev/ExileApiMcp.git
@@ -48,13 +65,15 @@ Then add to your MCP client config (e.g. `.mcp.json` in your project root for Cl
 }
 ```
 
-See the [ExileApiMcp README](https://github.com/ParogDev/ExileApiMcp) for full setup, VS Code config, and troubleshooting.
+See the [ExileApiMcp README](https://github.com/ParogDev/ExileApiMcp) for VS Code config and troubleshooting.
 
-### 3. Give your AI this prompt
+### 3. Verify the connection
 
-Once the plugin is running and the MCP server is configured, paste this into your AI to verify everything works:
+After restarting your AI client, ask it:
 
-> I have ExileApiMcp configured as an MCP server. It connects to Path of Exile via the ExileApi HUD overlay. Use the `get_bridge_status` tool to check the connection, then `get_all` to see my current game state. If tools hang or return errors, the HUD might not be in the foreground -- remind me to enable "Force Foreground" in ExileApi's Core settings.
+> Use `get_bridge_status` to check the connection, then `get_all` to see my current game state.
+
+If tools hang or return errors, the HUD might not be in the foreground -- enable **Core > Force Foreground** in ExileApi's settings.
 
 From there, the AI can see your character, inspect entities, explore the object graph, and help you build plugins with live data.
 
