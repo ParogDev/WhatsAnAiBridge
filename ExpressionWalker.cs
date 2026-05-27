@@ -5,7 +5,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
-using ExileCore;
+using ExileCore2;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -24,11 +24,10 @@ public class ExpressionWalker
 
     private static readonly HashSet<string> AllowedNamespaces = new(StringComparer.OrdinalIgnoreCase)
     {
-        "ExileCore",
-        "GameOffsets",
+        "ExileCore2",
+        "GameOffsets2",
         "System.Collections.Generic",
         "System",
-        "SharpDX",
     };
 
     private static readonly HashSet<string> AllowedMethods = new(StringComparer.Ordinal)

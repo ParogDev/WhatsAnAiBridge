@@ -3,16 +3,16 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using ExileCore;
-using ExileCore.PoEMemory.Components;
-using ExileCore.PoEMemory.MemoryObjects;
-using ExileCore.Shared.Enums;
-using GameOffsets.Native;
+using ExileCore2;
+using ExileCore2.PoEMemory.Components;
+using ExileCore2.PoEMemory.MemoryObjects;
+using ExileCore2.Shared.Enums;
+using GameOffsets2.Native;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using SharpDX;
 using Vector2N = System.Numerics.Vector2;
-using Color = SharpDX.Color;
+using Color = System.Drawing.Color;
+using RectangleF = ExileCore2.Shared.RectangleF;
 
 namespace WhatsAnAiBridge;
 
@@ -131,9 +131,9 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
 
     // ── Tick: process TCP requests on main thread ────────────────────
 
-    public override Job Tick()
+    public override void Tick()
     {
-        if (_tcpServer == null) return default;
+        if (_tcpServer == null) return;
 
         var sw = Stopwatch.StartNew();
 
@@ -160,8 +160,6 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                 _status.LastError = ex.Message;
             }
         }
-
-        return default;
     }
 
     private string ProcessTcpRequest(string method, JToken? parameters)
@@ -282,22 +280,22 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         float y = Settings.HudY.Value;
 
         var bgRect = new RectangleF(x, y, 220, 22);
-        Graphics.DrawBox(bgRect, new Color(10, 10, 14, 200));
+        Graphics.DrawBox(bgRect, Color.FromArgb(200, 10, 10, 14));
 
         var tcpClients = _tcpServer?.ConnectedClients ?? 0;
         var hasTcp = _tcpServer?.IsRunning == true;
         var statusColor = _status.State == "idle"
-            ? (hasTcp ? new Color(0, 206, 209) : new Color(100, 100, 100))
-            : new Color(255, 200, 50);
+            ? (hasTcp ? Color.FromArgb(0, 206, 209) : Color.FromArgb(100, 100, 100))
+            : Color.FromArgb(255, 200, 50);
         Graphics.DrawBox(new RectangleF(x + 5, y + 6, 10, 10), statusColor);
 
         var tcpTag = hasTcp ? $" TCP:{tcpClients}" : "";
         var text = _status.TotalQueries == 0
             ? $"Bridge: idle{tcpTag}"
             : $"Bridge: {_status.TotalQueries} queries{tcpTag}";
-        Graphics.DrawText(text, new Vector2N(x + 20, y + 3), new Color(200, 200, 200));
+        Graphics.DrawText(text, new Vector2N(x + 20, y + 3), Color.FromArgb(200, 200, 200));
 
-        Graphics.DrawFrame(bgRect, new Color(0, 130, 133, 80), 1);
+        Graphics.DrawFrame(bgRect, Color.FromArgb(80, 0, 130, 133), 1);
     }
 
     // ── Settings UI ─────────────────────────────────────────────────
@@ -381,13 +379,13 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             MaxEs = life?.MaxES ?? 0,
             Mana = life?.CurMana ?? 0,
             MaxMana = life?.MaxMana ?? 0,
-            Pos = [(float)Math.Round(player.GridPosNum.X), (float)Math.Round(player.GridPosNum.Y)],
+            Pos = [(float)Math.Round(player.GridPos.X), (float)Math.Round(player.GridPos.Y)],
         };
 
         if (buffs?.BuffsList != null)
             dto.Buffs = buffs.BuffsList.Select(BuildBuff).ToList();
 
-        var actor = player.GetComponent<ExileCore.PoEMemory.Components.Actor>();
+        var actor = player.GetComponent<ExileCore2.PoEMemory.Components.Actor>();
         if (actor != null)
             dto.Skills = BuildSkills(actor);
 
@@ -412,6 +410,11 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
 
     private List<BuffProbeDto>? BuildBuffProbe()
     {
+        // TODO(poe2): disabled for the EC2 port. The raw offsets below (0x48..0x100, StdVector at
+        // 0x80, tree-node walks) were reverse-engineered against PoE1 memory layout and are
+        // meaningless on PoE2. Re-RE against the live PoE2 process before re-enabling.
+        return null;
+
         var mem = GameController.Memory;
         var player = GameController.Player;
         var buffs = player?.GetComponent<Buffs>()?.BuffsList;
@@ -504,7 +507,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         return result;
     }
 
-    private static Dictionary<string, object> ReadTreeNode(ExileCore.Shared.Interfaces.IMemory mem, long ptr)
+    private static Dictionary<string, object> ReadTreeNode(ExileCore2.Shared.Interfaces.IMemory mem, long ptr)
     {
         var node = new Dictionary<string, object>();
         for (int off = 0; off <= 0x38; off += 4)
@@ -615,13 +618,16 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             dto.NpcDialog = ui.NpcDialog?.IsVisible == true;
             dto.PurchaseWindow = ui.PurchaseWindow?.IsVisible == true;
             dto.SellWindow = ui.SellWindow?.IsVisible == true;
-            dto.MapDeviceWindow = ui.MapDeviceWindow?.IsVisible == true;
             dto.TradeWindow = ui.TradeWindow?.IsVisible == true;
             dto.PopUpWindow = ui.PopUpWindow?.IsVisible == true;
             dto.RitualWindow = ui.RitualWindow?.IsVisible == true;
-            dto.VillageRewardWindow = ui.VillageRewardWindow?.IsVisible == true;
-            dto.MercenaryEncounterWindow = ui.MercenaryEncounterWindow?.IsVisible == true;
-            dto.ZanaMissionChoice = ui.ZanaMissionChoice?.IsVisible == true;
+            // TODO(poe2): MapDeviceWindow / VillageRewardWindow (Settlers) / MercenaryEncounterWindow /
+            // ZanaMissionChoice do not exist on EC2 IngameUIElements. Re-map to PoE2 equivalents once
+            // identified live. DTO fields kept so the response shape stays stable.
+            dto.MapDeviceWindow = false;
+            dto.VillageRewardWindow = false;
+            dto.MercenaryEncounterWindow = false;
+            dto.ZanaMissionChoice = false;
 
             try
             {
@@ -713,7 +719,8 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                         IsHidden = tab.IsHidden,
                         IsMapSeries = (flags & InventoryTabFlags.MapSeries) != 0,
                         RawFlags = (byte)flags,
-                        Affinity = (uint)tab.Affinity,
+                        // TODO(poe2): ServerStashTab has no Affinity in EC2; default 0 until re-mapped.
+                        Affinity = 0,
                     });
                 }
             }
@@ -759,7 +766,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             Hostile = e.IsHostile,
             Rarity = e.Rarity.ToString(),
             Dist = SafeFloat(e.DistancePlayer),
-            Pos = [(float)Math.Round(e.GridPosNum.X), (float)Math.Round(e.GridPosNum.Y)],
+            Pos = [(float)Math.Round(e.GridPos.X), (float)Math.Round(e.GridPos.Y)],
             Hp = life?.CurHP ?? 0,
             MaxHp = life?.MaxHP ?? 0,
         };
@@ -805,7 +812,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             Hostile = e.IsHostile,
             Rarity = e.Rarity.ToString(),
             Dist = SafeFloat(e.DistancePlayer),
-            Pos = [(float)Math.Round(e.GridPosNum.X), (float)Math.Round(e.GridPosNum.Y)],
+            Pos = [(float)Math.Round(e.GridPos.X), (float)Math.Round(e.GridPos.Y)],
             Hp = life?.CurHP ?? 0,
             MaxHp = life?.MaxHP ?? 0,
             IsValid = e.IsValid,
@@ -822,14 +829,14 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             {
                 Name = render.Name,
                 Pos = [
-                    (float)Math.Round(render.PosNum.X, 1),
-                    (float)Math.Round(render.PosNum.Y, 1),
-                    (float)Math.Round(render.PosNum.Z, 1)
+                    (float)Math.Round(render.Pos.X, 1),
+                    (float)Math.Round(render.Pos.Y, 1),
+                    (float)Math.Round(render.Pos.Z, 1)
                 ],
                 Bounds = [
-                    (float)Math.Round(render.BoundsNum.X, 1),
-                    (float)Math.Round(render.BoundsNum.Y, 1),
-                    (float)Math.Round(render.BoundsNum.Z, 1)
+                    (float)Math.Round(render.Bounds.X, 1),
+                    (float)Math.Round(render.Bounds.Y, 1),
+                    (float)Math.Round(render.Bounds.Z, 1)
                 ],
             };
         }
@@ -1110,7 +1117,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         var player = GameController.Player;
         var life = player.GetComponent<Life>();
         var buffs = player.GetComponent<Buffs>();
-        var actor = player.GetComponent<ExileCore.PoEMemory.Components.Actor>();
+        var actor = player.GetComponent<ExileCore2.PoEMemory.Components.Actor>();
         var pos = player.GetComponent<Positioned>();
 
         var dto = new PlayerDto
@@ -1122,7 +1129,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             MaxEs = life?.MaxES ?? 0,
             Mana = life?.CurMana ?? 0,
             MaxMana = life?.MaxMana ?? 0,
-            Pos = [(float)Math.Round(player.GridPosNum.X), (float)Math.Round(player.GridPosNum.Y)],
+            Pos = [(float)Math.Round(player.GridPos.X), (float)Math.Round(player.GridPos.Y)],
         };
 
         if (pos != null)
@@ -1172,7 +1179,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
     {
         var life = e.GetComponent<Life>();
         var render = e.GetComponent<Render>();
-        var actor = e.GetComponent<ExileCore.PoEMemory.Components.Actor>();
+        var actor = e.GetComponent<ExileCore2.PoEMemory.Components.Actor>();
         var pos = e.GetComponent<Positioned>();
 
         var dto = new EntityDto
@@ -1186,7 +1193,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             Hostile = e.IsHostile,
             Rarity = e.Rarity.ToString(),
             Dist = SafeFloat(e.DistancePlayer),
-            Pos = [(float)Math.Round(e.GridPosNum.X), (float)Math.Round(e.GridPosNum.Y)],
+            Pos = [(float)Math.Round(e.GridPos.X), (float)Math.Round(e.GridPos.Y)],
             End = true,
         };
 
@@ -1206,14 +1213,14 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             dto.Render = new RenderDto
             {
                 Pos = [
-                    (float)Math.Round(render.PosNum.X, 1),
-                    (float)Math.Round(render.PosNum.Y, 1),
-                    (float)Math.Round(render.PosNum.Z, 1)
+                    (float)Math.Round(render.Pos.X, 1),
+                    (float)Math.Round(render.Pos.Y, 1),
+                    (float)Math.Round(render.Pos.Z, 1)
                 ],
                 Bounds = [
-                    (float)Math.Round(render.BoundsNum.X, 1),
-                    (float)Math.Round(render.BoundsNum.Y, 1),
-                    (float)Math.Round(render.BoundsNum.Z, 1)
+                    (float)Math.Round(render.Bounds.X, 1),
+                    (float)Math.Round(render.Bounds.Y, 1),
+                    (float)Math.Round(render.Bounds.Z, 1)
                 ],
             };
         }
@@ -1391,7 +1398,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
 
     // ── Shared builders ─────────────────────────────────────────────
 
-    private ActorDto BuildActorDto(ExileCore.PoEMemory.Components.Actor actor)
+    private ActorDto BuildActorDto(ExileCore2.PoEMemory.Components.Actor actor)
     {
         var dto = new ActorDto
         {
@@ -1421,7 +1428,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         return dto;
     }
 
-    private List<SkillDto>? BuildSkills(ExileCore.PoEMemory.Components.Actor actor)
+    private List<SkillDto>? BuildSkills(ExileCore2.PoEMemory.Components.Actor actor)
     {
         try
         {
@@ -1440,18 +1447,9 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                     IsUsing = s.IsUsing,
                 };
 
-                try
-                {
-                    var activeSkill = s.EffectsPerLevel?.SkillGemWrapper?.ActiveSkill;
-                    if (activeSkill != null)
-                    {
-                        var iname = activeSkill.InternalName;
-                        if (!string.IsNullOrEmpty(iname)) dto.InternalName = iname;
-                        var dname = activeSkill.DisplayName;
-                        if (!string.IsNullOrEmpty(dname)) dto.DisplayName = dname;
-                    }
-                }
-                catch { }
+                // TODO(poe2): GrantedEffectPerLevel has no SkillGemWrapper in EC2. Find the PoE2 path
+                // to the active skill's internal/display name (introspect live via describe_type) and
+                // restore InternalName/DisplayName population.
 
                 try { dto.IsUserSkill = s.IsUserSkill; } catch { }
                 try { dto.IsMine = s.IsMine; } catch { }
@@ -1503,13 +1501,9 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             var beam = e.GetComponent<Beam>();
             if (beam != null)
             {
-                var bs = beam.BeamStartNum;
-                var be = beam.BeamEndNum;
-                dto.Beam = new BeamDto
-                {
-                    Start = [(float)Math.Round(bs.X, 1), (float)Math.Round(bs.Y, 1), (float)Math.Round(bs.Z, 1)],
-                    End = [(float)Math.Round(be.X, 1), (float)Math.Round(be.Y, 1), (float)Math.Round(be.Z, 1)],
-                };
+                // TODO(poe2): EC2 Beam has no BeamStartNum/BeamEndNum. Confirm the PoE2 vector
+                // property names (likely BeamStart/BeamEnd) live via describe_type, then repopulate.
+                dto.Beam = new BeamDto();
             }
         }
         catch { }

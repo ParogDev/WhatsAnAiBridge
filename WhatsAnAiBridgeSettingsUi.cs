@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
-using ExileCore.Shared.Nodes;
+using ExileCore2.Shared.Nodes;
 using ImGuiNET;
 
 namespace WhatsAnAiBridge;

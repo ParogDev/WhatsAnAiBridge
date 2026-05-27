@@ -1,5 +1,5 @@
-using ExileCore.Shared.Interfaces;
-using ExileCore.Shared.Nodes;
+using ExileCore2.Shared.Interfaces;
+using ExileCore2.Shared.Nodes;
 
 namespace WhatsAnAiBridge;
 
