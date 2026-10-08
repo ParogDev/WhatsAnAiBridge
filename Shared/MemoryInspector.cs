@@ -419,7 +419,7 @@ public partial class WhatsAnAiBridge
         // Not a pointer: two int32s or floats, whichever reads more plausibly.
         int lo = BitConverter.ToInt32(b, off), hi = BitConverter.ToInt32(b, off + 4);
         float flo = BitConverter.ToSingle(b, off), fhi = BitConverter.ToSingle(b, off + 4);
-        if (Plausible(flo) && Plausible(fhi) && (Math.Abs(lo) > 100_000 || Math.Abs(hi) > 100_000))
+        if (Plausible(flo) && Plausible(fhi) && (Math.Abs((long)lo) > 100_000 || Math.Abs((long)hi) > 100_000)) // long: Math.Abs(int.MinValue) throws
         { o["kind"] = "float"; o["value"] = $"{Num(flo)}, {Num(fhi)}"; }
         else if (Text(b.AsSpan(off, 8).ToArray()) is { } t8) { o["kind"] = "text"; o["text"] = t8; }
         else

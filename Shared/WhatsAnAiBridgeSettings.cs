@@ -47,4 +47,8 @@ public class WhatsAnAiBridgeSettings : ISettings
     public ToggleNode StatsPanelResistsOpen { get; set; } = new(true);
     public ToggleNode StatsPanelPinnedOpen { get; set; } = new(true);
     public ToggleNode StatsPanelShowKeys { get; set; } = new(false);
+
+    // In-HUD agent guide (Shared\AgentGuide.cs, GuidePanel.cs): the agent's current instruction for the user and its log.
+    public ToggleNode ShowAgentGuide { get; set; } = new(true);
+    public ToggleNode GuideLogOpen { get; set; } = new(true);   // panel-only: the log section's collapse state
 }
