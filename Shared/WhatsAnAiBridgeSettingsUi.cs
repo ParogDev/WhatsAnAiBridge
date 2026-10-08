@@ -189,6 +189,10 @@ public class WhatsAnAiBridgeSettingsUi
         IntSlider("cb_uc", s.MaxUiChildren, dl, x, cx, ref y, sw,
             "UI Scan Depth", "How many UI children to scan in 'ui' queries");
 
+        SectionHeader(dl, x, ref y, "Dev Loop");
+        Toggle("cb_rl", s.AllowPluginReload, dl, x, cx, ref y,
+            "Allow Plugin Reload Requests", "Let bridge clients recompile a source plugin in place, like its Reload button");
+
         SectionHeader(dl, x, ref y, "Recording");
         IntSlider("cb_ri", s.RecordingIntervalMs, dl, x, cx, ref y, sw,
             "Recording Interval (ms)", "Time between snapshot captures during recording");

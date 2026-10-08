@@ -30,6 +30,10 @@ public class WhatsAnAiBridgeSettings : ISettings
     public ToggleNode AutoDeepScanBosses { get; set; } = new(true);
     public RangeNode<int> RecordingMaxDeepStats { get; set; } = new(200, 10, 500);
 
+    // Dev loop: let bridge clients (agents) recompile a source plugin in place, like the menu's
+    // Reload button (hud.reload_plugin). The HUD pauses while the plugin compiles.
+    public ToggleNode AllowPluginReload { get; set; } = new(true);
+
     // Player-stats view state shared with the MCP App / agents (pins, filter, selection, sort).
     // Persisted here so it survives HUD restarts; Rev keeps increasing across restarts.
     public StatsUiState StatsUi { get; set; } = new();
