@@ -3,21 +3,20 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using ExileCore;
-using ExileCore.PoEMemory.Components;
-using ExileCore.PoEMemory.MemoryObjects;
-using ExileCore.Shared.Enums;
-using GameOffsets.Native;
+using System.Reflection;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using SharpDX;
-using Vector2N = System.Numerics.Vector2;
-using Color = SharpDX.Color;
 
 namespace WhatsAnAiBridge;
 
-public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
+// Game-agnostic part of the plugin. ExileCore/ExileCore2 namespaces come from the per-game
+// GlobalUsings.cs; anything whose API or game knowledge differs lives in the per-game partial
+// (Poe1/WhatsAnAiBridge.Poe1.cs, Poe2/WhatsAnAiBridge.Poe2.cs).
+public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
 {
+    /// <summary>Version of the TCP bridge contract (bump on breaking response changes).</summary>
+    internal const int BridgeProtocolVersion = 2;
+
     // ── Public types for UI ──────────────────────────────────────────
 
     public class BridgeStatus
@@ -130,10 +129,11 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
     }
 
     // ── Tick: process TCP requests on main thread ────────────────────
+    // Tick() itself is declared in the per-game partial (PoE1 returns Job, PoE2 returns void).
 
-    public override Job Tick()
+    private void ProcessPendingRequests()
     {
-        if (_tcpServer == null) return default;
+        if (_tcpServer == null) return;
 
         var sw = Stopwatch.StartNew();
 
@@ -160,8 +160,6 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                 _status.LastError = ex.Message;
             }
         }
-
-        return default;
     }
 
     private string ProcessTcpRequest(string method, JToken? parameters)
@@ -282,22 +280,22 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         float y = Settings.HudY.Value;
 
         var bgRect = new RectangleF(x, y, 220, 22);
-        Graphics.DrawBox(bgRect, new Color(10, 10, 14, 200));
+        Graphics.DrawBox(bgRect, Rgba(10, 10, 14, 200));
 
         var tcpClients = _tcpServer?.ConnectedClients ?? 0;
         var hasTcp = _tcpServer?.IsRunning == true;
         var statusColor = _status.State == "idle"
-            ? (hasTcp ? new Color(0, 206, 209) : new Color(100, 100, 100))
-            : new Color(255, 200, 50);
+            ? (hasTcp ? Rgba(0, 206, 209) : Rgba(100, 100, 100))
+            : Rgba(255, 200, 50);
         Graphics.DrawBox(new RectangleF(x + 5, y + 6, 10, 10), statusColor);
 
         var tcpTag = hasTcp ? $" TCP:{tcpClients}" : "";
         var text = _status.TotalQueries == 0
             ? $"Bridge: idle{tcpTag}"
             : $"Bridge: {_status.TotalQueries} queries{tcpTag}";
-        Graphics.DrawText(text, new Vector2N(x + 20, y + 3), new Color(200, 200, 200));
+        Graphics.DrawText(text, new Vector2N(x + 20, y + 3), Rgba(200, 200, 200));
 
-        Graphics.DrawFrame(bgRect, new Color(0, 130, 133, 80), 1);
+        Graphics.DrawFrame(bgRect, Rgba(0, 130, 133, 80), 1);
     }
 
     // ── Settings UI ─────────────────────────────────────────────────
@@ -310,9 +308,19 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
 
     // ── Query processor ─────────────────────────────────────────────
 
+    // Features the current request touched that this game's HUD cannot provide. Requests are
+    // processed one at a time on the main thread, so a single static set is safe.
+    private static readonly HashSet<string> RequestUnsupported = new();
+
+    private static void MarkUnsupported(string feature) => RequestUnsupported.Add(feature);
+
     private string ProcessQuery(string query)
     {
+        RequestUnsupported.Clear();
         var ql = query.ToLower();
+
+        if (ql == "hello")
+            return Serialize(BuildHello());
 
         // Recording commands
         if (ql.StartsWith("record:") || ql == "snapshot" || ql.StartsWith("recording:"))
@@ -361,7 +369,29 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         if (incEntities) response.Entities = BuildEntities(ql);
         if (isDeep) BuildDeep(response, query);
 
+        response.Game = GameId;
+        if (RequestUnsupported.Count > 0)
+            response.Unsupported = RequestUnsupported.OrderBy(x => x).ToList();
+
         return Serialize(response);
+    }
+
+    // ── HELLO (handshake: which game/HUD is on the other end) ──────────
+
+    private HelloDto BuildHello()
+    {
+        var hudAssembly = typeof(GameController).Assembly;
+        return new HelloDto
+        {
+            Game = GameId,
+            ProtocolVersion = BridgeProtocolVersion,
+            Hud = hudAssembly.GetName().Name ?? "",
+            HudBuild = hudAssembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                       ?? hudAssembly.GetName().Version?.ToString() ?? "",
+            BridgeBuild = typeof(WhatsAnAiBridge).Assembly.GetName().Version?.ToString() ?? "",
+            InGame = GameController.InGame,
+            Unsupported = UnsupportedFeatures.ToList(),
+        };
     }
 
     // ── PLAYER ──────────────────────────────────────────────────────
@@ -381,13 +411,13 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             MaxEs = life?.MaxES ?? 0,
             Mana = life?.CurMana ?? 0,
             MaxMana = life?.MaxMana ?? 0,
-            Pos = [(float)Math.Round(player.GridPosNum.X), (float)Math.Round(player.GridPosNum.Y)],
+            Pos = GridXY(player),
         };
 
         if (buffs?.BuffsList != null)
             dto.Buffs = buffs.BuffsList.Select(BuildBuff).ToList();
 
-        var actor = player.GetComponent<ExileCore.PoEMemory.Components.Actor>();
+        var actor = player.GetComponent<Actor>();
         if (actor != null)
             dto.Skills = BuildSkills(actor);
 
@@ -406,113 +436,6 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         foreach (var kv in stats.StatDictionary)
             result[kv.Key.ToString()] = kv.Value;
         return result;
-    }
-
-    // ── BUFF PROBE (memory dump for reverse-engineering) ────────────
-
-    private List<BuffProbeDto>? BuildBuffProbe()
-    {
-        var mem = GameController.Memory;
-        var player = GameController.Player;
-        var buffs = player?.GetComponent<Buffs>()?.BuffsList;
-        if (buffs == null) return null;
-
-        var result = new List<BuffProbeDto>();
-        foreach (var b in buffs)
-        {
-            if (b.Name != "stolen_mods_buff" && b.Name != "herald_of_ice") continue;
-
-            var probe = new BuffProbeDto
-            {
-                Name = b.Name ?? "",
-                Timer = SafeFloat(b.Timer),
-                Address = b.Address.ToString("X"),
-            };
-
-            // Raw memory: 0x48 to 0x100
-            for (int off = 0x48; off <= 0x100; off += 8)
-            {
-                try { probe.Raw[$"0x{off:X2}"] = mem.Read<long>(b.Address + off).ToString("X16"); }
-                catch { probe.Raw[$"0x{off:X2}"] = "ERROR"; }
-            }
-
-            // Read StdVector at 0x80: {First, Last, End}
-            try
-            {
-                var svFirst = mem.Read<long>(b.Address + 0x80);
-                var svLast = mem.Read<long>(b.Address + 0x88);
-                var dataSize = svLast - svFirst;
-                var sv = new StdVectorDto
-                {
-                    First = svFirst.ToString("X"),
-                    Last = svLast.ToString("X"),
-                    DataSize = dataSize,
-                };
-
-                if (svFirst > 0x10000 && dataSize > 0 && dataSize < 1000)
-                {
-                    // Read the raw data as ints
-                    sv.DataInts = new List<object>();
-                    for (long addr = svFirst; addr < svLast && addr < svFirst + 64; addr += 4)
-                    {
-                        try { sv.DataInts.Add(mem.Read<int>(addr)); }
-                        catch { sv.DataInts.Add("ERR"); }
-                    }
-
-                    // Read as (GameStat, int) pairs if size is multiple of 8
-                    if (dataSize % 8 == 0 && dataSize >= 8)
-                    {
-                        sv.StatPairs = new List<object>();
-                        for (long addr = svFirst; addr < svLast; addr += 8)
-                        {
-                            try
-                            {
-                                var stat = mem.Read<int>(addr);
-                                var val = mem.Read<int>(addr + 4);
-                                sv.StatPairs.Add(new StatPairDto
-                                {
-                                    StatId = stat,
-                                    Stat = ((GameStat)stat).ToString(),
-                                    Val = val,
-                                });
-                            }
-                            catch { sv.StatPairs.Add("ERR"); }
-                        }
-                    }
-                }
-                probe.Sv80 = sv;
-            }
-            catch { }
-
-            // Also try following tree nodes at ptr80 - read first few nodes
-            try
-            {
-                var ptr80 = mem.Read<long>(b.Address + 0x80);
-                if (ptr80 > 0x10000 && ptr80 < long.MaxValue / 2)
-                {
-                    probe.TreeNode0 = ReadTreeNode(mem, ptr80);
-
-                    var child = mem.Read<long>(ptr80);
-                    if (child > 0x10000 && child < long.MaxValue / 2)
-                        probe.TreeNode1 = ReadTreeNode(mem, child);
-                }
-            }
-            catch { }
-
-            result.Add(probe);
-        }
-        return result;
-    }
-
-    private static Dictionary<string, object> ReadTreeNode(ExileCore.Shared.Interfaces.IMemory mem, long ptr)
-    {
-        var node = new Dictionary<string, object>();
-        for (int off = 0; off <= 0x38; off += 4)
-        {
-            try { node[$"0x{off:X2}"] = mem.Read<int>(ptr + off); }
-            catch { node[$"0x{off:X2}"] = "ERR"; }
-        }
-        return node;
     }
 
     // ── AREA ────────────────────────────────────────────────────────
@@ -615,13 +538,10 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             dto.NpcDialog = ui.NpcDialog?.IsVisible == true;
             dto.PurchaseWindow = ui.PurchaseWindow?.IsVisible == true;
             dto.SellWindow = ui.SellWindow?.IsVisible == true;
-            dto.MapDeviceWindow = ui.MapDeviceWindow?.IsVisible == true;
             dto.TradeWindow = ui.TradeWindow?.IsVisible == true;
             dto.PopUpWindow = ui.PopUpWindow?.IsVisible == true;
             dto.RitualWindow = ui.RitualWindow?.IsVisible == true;
-            dto.VillageRewardWindow = ui.VillageRewardWindow?.IsVisible == true;
-            dto.MercenaryEncounterWindow = ui.MercenaryEncounterWindow?.IsVisible == true;
-            dto.ZanaMissionChoice = ui.ZanaMissionChoice?.IsVisible == true;
+            PopulateGamePanels(dto, ui);
 
             try
             {
@@ -713,7 +633,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                         IsHidden = tab.IsHidden,
                         IsMapSeries = (flags & InventoryTabFlags.MapSeries) != 0,
                         RawFlags = (byte)flags,
-                        Affinity = (uint)tab.Affinity,
+                        Affinity = StashAffinity(tab),
                     });
                 }
             }
@@ -759,7 +679,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             Hostile = e.IsHostile,
             Rarity = e.Rarity.ToString(),
             Dist = SafeFloat(e.DistancePlayer),
-            Pos = [(float)Math.Round(e.GridPosNum.X), (float)Math.Round(e.GridPosNum.Y)],
+            Pos = GridXY(e),
             Hp = life?.CurHP ?? 0,
             MaxHp = life?.MaxHP ?? 0,
         };
@@ -805,7 +725,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             Hostile = e.IsHostile,
             Rarity = e.Rarity.ToString(),
             Dist = SafeFloat(e.DistancePlayer),
-            Pos = [(float)Math.Round(e.GridPosNum.X), (float)Math.Round(e.GridPosNum.Y)],
+            Pos = GridXY(e),
             Hp = life?.CurHP ?? 0,
             MaxHp = life?.MaxHP ?? 0,
             IsValid = e.IsValid,
@@ -821,16 +741,8 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             dto.Render = new RenderDto
             {
                 Name = render.Name,
-                Pos = [
-                    (float)Math.Round(render.PosNum.X, 1),
-                    (float)Math.Round(render.PosNum.Y, 1),
-                    (float)Math.Round(render.PosNum.Z, 1)
-                ],
-                Bounds = [
-                    (float)Math.Round(render.BoundsNum.X, 1),
-                    (float)Math.Round(render.BoundsNum.Y, 1),
-                    (float)Math.Round(render.BoundsNum.Z, 1)
-                ],
+                Pos = RenderPos(render),
+                Bounds = RenderBounds(render),
             };
         }
 
@@ -1110,7 +1022,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         var player = GameController.Player;
         var life = player.GetComponent<Life>();
         var buffs = player.GetComponent<Buffs>();
-        var actor = player.GetComponent<ExileCore.PoEMemory.Components.Actor>();
+        var actor = player.GetComponent<Actor>();
         var pos = player.GetComponent<Positioned>();
 
         var dto = new PlayerDto
@@ -1122,7 +1034,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             MaxEs = life?.MaxES ?? 0,
             Mana = life?.CurMana ?? 0,
             MaxMana = life?.MaxMana ?? 0,
-            Pos = [(float)Math.Round(player.GridPosNum.X), (float)Math.Round(player.GridPosNum.Y)],
+            Pos = GridXY(player),
         };
 
         if (pos != null)
@@ -1172,7 +1084,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
     {
         var life = e.GetComponent<Life>();
         var render = e.GetComponent<Render>();
-        var actor = e.GetComponent<ExileCore.PoEMemory.Components.Actor>();
+        var actor = e.GetComponent<Actor>();
         var pos = e.GetComponent<Positioned>();
 
         var dto = new EntityDto
@@ -1186,7 +1098,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
             Hostile = e.IsHostile,
             Rarity = e.Rarity.ToString(),
             Dist = SafeFloat(e.DistancePlayer),
-            Pos = [(float)Math.Round(e.GridPosNum.X), (float)Math.Round(e.GridPosNum.Y)],
+            Pos = GridXY(e),
             End = true,
         };
 
@@ -1205,16 +1117,8 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         {
             dto.Render = new RenderDto
             {
-                Pos = [
-                    (float)Math.Round(render.PosNum.X, 1),
-                    (float)Math.Round(render.PosNum.Y, 1),
-                    (float)Math.Round(render.PosNum.Z, 1)
-                ],
-                Bounds = [
-                    (float)Math.Round(render.BoundsNum.X, 1),
-                    (float)Math.Round(render.BoundsNum.Y, 1),
-                    (float)Math.Round(render.BoundsNum.Z, 1)
-                ],
+                Pos = RenderPos(render),
+                Bounds = RenderBounds(render),
             };
         }
 
@@ -1391,7 +1295,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
 
     // ── Shared builders ─────────────────────────────────────────────
 
-    private ActorDto BuildActorDto(ExileCore.PoEMemory.Components.Actor actor)
+    private ActorDto BuildActorDto(Actor actor)
     {
         var dto = new ActorDto
         {
@@ -1421,7 +1325,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         return dto;
     }
 
-    private List<SkillDto>? BuildSkills(ExileCore.PoEMemory.Components.Actor actor)
+    private List<SkillDto>? BuildSkills(Actor actor)
     {
         try
         {
@@ -1440,18 +1344,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
                     IsUsing = s.IsUsing,
                 };
 
-                try
-                {
-                    var activeSkill = s.EffectsPerLevel?.SkillGemWrapper?.ActiveSkill;
-                    if (activeSkill != null)
-                    {
-                        var iname = activeSkill.InternalName;
-                        if (!string.IsNullOrEmpty(iname)) dto.InternalName = iname;
-                        var dname = activeSkill.DisplayName;
-                        if (!string.IsNullOrEmpty(dname)) dto.DisplayName = dname;
-                    }
-                }
-                catch { }
+                try { PopulateSkillNames(dto, s); } catch { }
 
                 try { dto.IsUserSkill = s.IsUserSkill; } catch { }
                 try { dto.IsMine = s.IsMine; } catch { }
@@ -1502,15 +1395,7 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
         {
             var beam = e.GetComponent<Beam>();
             if (beam != null)
-            {
-                var bs = beam.BeamStartNum;
-                var be = beam.BeamEndNum;
-                dto.Beam = new BeamDto
-                {
-                    Start = [(float)Math.Round(bs.X, 1), (float)Math.Round(bs.Y, 1), (float)Math.Round(bs.Z, 1)],
-                    End = [(float)Math.Round(be.X, 1), (float)Math.Round(be.Y, 1), (float)Math.Round(be.Z, 1)],
-                };
-            }
+                dto.Beam = BuildBeam(beam);
         }
         catch { }
 
@@ -1661,4 +1546,6 @@ public class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSettings>
 
     private static float SafeFloat(float v)
         => float.IsInfinity(v) || float.IsNaN(v) ? 999999f : (float)Math.Round(v, 1);
+
+    private static float Round1(float v) => MathF.Round(v, 1);
 }

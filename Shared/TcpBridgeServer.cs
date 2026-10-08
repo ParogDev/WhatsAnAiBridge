@@ -179,11 +179,12 @@ public class TcpBridgeServer : IDisposable
         if (string.IsNullOrEmpty(method))
             return JsonRpcError(id, -32600, "Invalid request: missing method");
 
-        // Auth check (skip for ping)
-        if (method != "ping" && _authToken != null)
+        // Auth check - every method, including ping/status. Loopback is reachable by every local
+        // account (e.g. the separate "gaming" user), so the token file is the only boundary.
+        if (_authToken != null)
         {
             var token = msg["token"]?.Value<string>() ?? msg["params"]?["token"]?.Value<string>();
-            if (token != _authToken)
+            if (!TokenMatches(token))
                 return JsonRpcError(id, -32001, "Authentication failed: invalid or missing token");
         }
 
@@ -232,6 +233,13 @@ public class TcpBridgeServer : IDisposable
         {
             return JsonRpcError(id, -32603, $"Internal error: {ex.Message}");
         }
+    }
+
+    private bool TokenMatches(string? token)
+    {
+        if (token == null || _authToken == null) return false;
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(token), Encoding.UTF8.GetBytes(_authToken));
     }
 
     private static string JsonRpcResult(JToken? id, JToken result)

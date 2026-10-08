@@ -5,7 +5,6 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
-using ExileCore;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -22,14 +21,10 @@ public class ExpressionWalker
     private const int MaxResultSizeBytes = 65536;
     private const int TimeoutMs = 150;
 
-    private static readonly HashSet<string> AllowedNamespaces = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "ExileCore",
-        "GameOffsets",
-        "System.Collections.Generic",
-        "System",
-        "SharpDX",
-    };
+    // Game API namespaces come from the per-game partial (ExileCore/GameOffsets[/SharpDX] or ExileCore2/GameOffsets2).
+    private static readonly HashSet<string> AllowedNamespaces = new(
+        WhatsAnAiBridge.ApiNamespaces.Concat(["System.Collections.Generic", "System"]),
+        StringComparer.OrdinalIgnoreCase);
 
     private static readonly HashSet<string> AllowedMethods = new(StringComparer.Ordinal)
     {

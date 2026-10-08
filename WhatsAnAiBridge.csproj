@@ -1,35 +1,66 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!-- One project for both games. $(Game) is decided in Directory.Build.props (poe1 | poe2).
+       Shared\ is game-agnostic; Poe1\ / Poe2\ hold each game's partial class and global usings.
+       The HUD's Plugins\Source\Whats An AI Bridge must point at THIS (repo root) folder. -->
+  <!-- No <TargetFramework> here on purpose: it is set per game in Directory.Build.props
+       (the PoE2 HUD rewrites any TargetFramework it finds in a plugin .csproj). -->
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
     <OutputType>Library</OutputType>
     <UseWindowsForms>true</UseWindowsForms>
     <PlatformTarget>x64</PlatformTarget>
     <RootNamespace>WhatsAnAiBridge</RootNamespace>
+    <AssemblyName>WhatsAnAiBridge</AssemblyName>
     <LangVersion>latest</LangVersion>
     <DebugType>embedded</DebugType>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
+    <DefineConstants Condition="'$(Game)' == 'poe1'">$(DefineConstants);POE1</DefineConstants>
+    <DefineConstants Condition="'$(Game)' == 'poe2'">$(DefineConstants);POE2</DefineConstants>
     <PathMap>$(MSBuildProjectDirectory)=$(MSBuildProjectName)</PathMap>
     <EmbedAllSources>true</EmbedAllSources>
     <!--Don't bother setting anything to do with the output path, HUD will do it for you if you put the source code inside Plugins/Source-->
   </PropertyGroup>
+  <!-- Reference the HUD we're sitting in; fall back to the env var for dev builds outside a HUD. -->
+  <PropertyGroup Condition="'$(Game)' == 'poe1'">
+    <GameRefDir Condition="Exists('$(HudDir)\ExileCore.dll')">$(HudDir)</GameRefDir>
+    <GameRefDir Condition="'$(GameRefDir)' == ''">$(exapiPackage)</GameRefDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Game)' == 'poe2'">
+    <GameRefDir Condition="Exists('$(HudDir)\ExileCore2.dll')">$(HudDir)</GameRefDir>
+    <GameRefDir Condition="'$(GameRefDir)' == ''">$(exilecore2Package)</GameRefDir>
+  </PropertyGroup>
+  <!-- Compile Shared\ plus only this game's folder (default glob picks up everything). -->
   <ItemGroup>
-    <!--Rather than replacing this with absolute or relative paths, you should create an environment variable for wherever your HUD folder is-->
+    <Compile Remove="obj\**" />
+    <Compile Remove="Poe2\**" Condition="'$(Game)' == 'poe1'" />
+    <Compile Remove="Poe1\**" Condition="'$(Game)' == 'poe2'" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Game)' == 'poe1'">
     <Reference Include="ExileCore">
-      <HintPath>$(exapiPackage)\ExileCore.dll</HintPath>
+      <HintPath>$(GameRefDir)\ExileCore.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="GameOffsets">
-      <HintPath>$(exapiPackage)\GameOffsets.dll</HintPath>
+      <HintPath>$(GameRefDir)\GameOffsets.dll</HintPath>
       <Private>False</Private>
     </Reference>
-    <Reference Include="Newtonsoft.Json">
-      <HintPath>$(exapiPackage)\Newtonsoft.Json.dll</HintPath>
+    <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Game)' == 'poe2'">
+    <Reference Include="ExileCore2">
+      <HintPath>$(GameRefDir)\ExileCore2.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="GameOffsets2">
+      <HintPath>$(GameRefDir)\GameOffsets2.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(GameRefDir)\Newtonsoft.Json.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <PackageReference Include="ImGui.NET" Version="1.90.0.1" />
-    <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
   </ItemGroup>
 </Project>

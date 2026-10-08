@@ -1,0 +1,25 @@
+<Project>
+  <!-- Decide which game this build is for, BEFORE the SDK sets up obj/ paths.
+
+       Inside a HUD the plugin lives at <HUD>\Plugins\Source\<Name>\ (cloned by PluginUpdater or
+       junctioned in for development), so the HUD folder is three levels up and tells us the game:
+       ExileCore2.dll => PoE2 (ExileCore2, net8), ExileCore.dll => PoE1 (ExileCore, net10).
+       Outside a HUD (dev builds), pass -p:Game=poe1|poe2 (default poe1); references then come
+       from the exapiPackage / exilecore2Package environment variables. -->
+  <PropertyGroup>
+    <HudDir>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..'))</HudDir>
+    <Game Condition="'$(Game)' == '' and Exists('$(HudDir)\ExileCore2.dll')">poe2</Game>
+    <Game Condition="'$(Game)' == '' and Exists('$(HudDir)\ExileCore.dll')">poe1</Game>
+    <Game Condition="'$(Game)' == ''">poe1</Game>
+
+    <!-- Both HUDs may build this same folder: keep their restore/obj output apart. -->
+    <BaseIntermediateOutputPath>obj\$(Game)\</BaseIntermediateOutputPath>
+
+    <!-- TargetFramework lives HERE, not in the .csproj: the PoE2 HUD (ExileCore2) rewrites every
+         <TargetFramework> in a plugin .csproj to net8.0-windows when it compiles it, which would
+         break the PoE1 (net10) build. It does not touch Directory.Build.props. -->
+    <TargetFramework Condition="'$(Game)' == 'poe1'">net10.0-windows</TargetFramework>
+    <!-- The ExileCore2 host runs on .NET 8 - a net10 plugin will not load in PoE2. -->
+    <TargetFramework Condition="'$(Game)' == 'poe2'">net8.0-windows</TargetFramework>
+  </PropertyGroup>
+</Project>
