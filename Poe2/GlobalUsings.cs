@@ -11,3 +11,4 @@ global using Actor = ExileCore2.PoEMemory.Components.Actor;
 global using Color = System.Drawing.Color;
 global using RectangleF = ExileCore2.Shared.RectangleF;
 global using Vector2N = System.Numerics.Vector2;
+global using FileInMemory = ExileCore2.PoEMemory.FileInMemory;
