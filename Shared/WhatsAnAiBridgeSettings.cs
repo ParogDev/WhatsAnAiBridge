@@ -41,4 +41,10 @@ public class WhatsAnAiBridgeSettings : ISettings
     // Player-stats view state shared with the MCP App / agents (pins, filter, selection, sort).
     // Persisted here so it survives HUD restarts; Rev keeps increasing across restarts.
     public StatsUiState StatsUi { get; set; } = new();
+
+    // In-HUD stats panel (Shared\StatsPanel.cs): panel-only preferences, not part of the shared view.
+    public ToggleNode StatsPanelVitalsOpen { get; set; } = new(true);
+    public ToggleNode StatsPanelResistsOpen { get; set; } = new(true);
+    public ToggleNode StatsPanelPinnedOpen { get; set; } = new(true);
+    public ToggleNode StatsPanelShowKeys { get; set; } = new(false);
 }
