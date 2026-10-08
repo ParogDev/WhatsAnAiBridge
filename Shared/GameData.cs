@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 
 namespace WhatsAnAiBridge;
@@ -11,6 +13,8 @@ namespace WhatsAnAiBridge;
 /// slot that points at UTF-16 text decoded, so string-keyed tables read naturally without a schema.
 ///   data.files {filter?, limit?}                       file names (AllFiles keys) containing filter
 ///   data.read  {file, offset?, limit?, find?}           rows: index, hex, strings (+slot:text), ints (+slot:int32)
+///   data.find_value {values, size?, filter?, minHits?}  starts a background scan: which table column holds these values?
+///   data.find_result {id}                               that scan's status / ranked columns
 /// Uses the HUD's own FileInMemory record bounds (same on ExileCore and ExileCore2).
 /// </summary>
 public partial class WhatsAnAiBridge
@@ -27,8 +31,139 @@ public partial class WhatsAnAiBridge
     {
         "data.files" => SafeMemory(() => DataFiles(p)),
         "data.read" => SafeMemory(() => DataRead(p)),
+        "data.find_value" => SafeMemory(() => DataFindValue(p)),
+        "data.find_result" => SafeMemory(() =>
+            _dataJobs.TryGetValue(p?["id"]?.ToString() ?? "", out var job) ? job : Err("unknown_id", "No such scan (results are kept for the last 20 scans).")),
         _ => null,
     };
+
+    // ── data.find_value ──────────────────────────────────────────────
+    // Ids found in memory are often a column of some table (a row's hash, key or index). Scanning every loaded table
+    // for a handful of them names the column: the one that holds most of the values wins. Full scans take seconds, so
+    // they run on a worker (memory reads are thread-safe); the table list is taken on the main thread.
+
+    private static readonly ConcurrentDictionary<string, JObject> _dataJobs = new();
+    private static readonly ConcurrentQueue<string> _dataJobOrder = new();
+
+    private JObject DataFindValue(JToken? p)
+    {
+        var values = new HashSet<ulong>();
+        foreach (var v in p?["values"] as JArray ?? (p?["value"] != null ? new JArray(p["value"]!) : new JArray()))
+            if (ParseValue(v) is { } u) values.Add(u);
+        if (values.Count == 0) return Err("missing_values", "Pass values: numbers or \"0x...\" strings, e.g. one id per stash page.");
+        int size = p?["size"]?.Value<int>() ?? 0;
+        if (size == 0) { var max = values.Max(); size = max <= 0xFF ? 1 : max <= 0xFFFF ? 2 : max <= 0xFFFF_FFFF ? 4 : 8; }
+        if (size is not (1 or 2 or 4 or 8)) return Err("bad_size", "size is 1, 2, 4 or 8 bytes (default: the smallest that holds the largest value).");
+        var minHits = Math.Clamp(p?["minHits"]?.Value<int>() ?? Math.Min(3, values.Count), 1, values.Count);
+        var filter = p?["filter"]?.ToString();
+
+        var m = GameController.Memory;
+        var tables = new List<(string file, long first, int count, int len)>();
+        foreach (var (name, info) in GameController.Files.AllFiles)
+        {
+            if (!name.EndsWith(".dat", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!string.IsNullOrEmpty(filter) && !name.Contains(filter, StringComparison.OrdinalIgnoreCase)) continue;
+            try
+            {
+                var d = new RawDatFile(m, () => info.Ptr);
+                int c = d.Count, l = (int)d.Length;
+                if (c > 0 && l > 0 && (long)c * l <= 64_000_000) tables.Add((name, d.First, c, l));
+            }
+            catch { }
+        }
+
+        var id = Guid.NewGuid().ToString("N")[..12];
+        var job = new JObject { ["id"] = id, ["status"] = "running", ["values"] = values.Count, ["size"] = size, ["minHits"] = minHits, ["tables"] = tables.Count };
+        _dataJobs[id] = job;
+        _dataJobOrder.Enqueue(id);
+        while (_dataJobOrder.Count > 20 && _dataJobOrder.TryDequeue(out var old)) _dataJobs.TryRemove(old, out _);
+        Task.Run(() =>
+        {
+            try { _dataJobs[id] = ScanTables(m, tables, values, size, minHits, id); }
+            catch (Exception ex) { _dataJobs[id] = new JObject { ["id"] = id, ["status"] = "failed", ["error"] = "scan_failed", ["message"] = ex.Message }; }
+        });
+        return job;
+    }
+
+    /// <summary>A number, or a "0x..." / decimal string; negative int32s are taken as their unsigned 32-bit pattern.</summary>
+    private static ulong? ParseValue(JToken v)
+    {
+        var s = v.ToString().Trim();
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            return ulong.TryParse(s[2..], System.Globalization.NumberStyles.HexNumber, null, out var h) ? h : null;
+        if (ulong.TryParse(s, out var u)) return u;
+        if (long.TryParse(s, out var l)) return l >= int.MinValue ? (uint)(int)l : (ulong)l;
+        return null;
+    }
+
+    private JObject ScanTables(IMemory m, List<(string file, long first, int count, int len)> tables, HashSet<ulong> values, int size, int minHits, string id)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        // (table, column) -> value -> first row holding it, and how many rows matched at all
+        var columns = new List<(string file, int count, int len, long first, int offset, Dictionary<ulong, int> found, int rows)>();
+        foreach (var (file, first, count, len) in tables)
+        {
+            var found = new Dictionary<int, Dictionary<ulong, int>>();
+            var rowsMatched = new Dictionary<int, int>();
+            const int chunkRows = 8192;
+            for (int r0 = 0; r0 < count; r0 += chunkRows)
+            {
+                int n = Math.Min(chunkRows, count - r0);
+                var bytes = m.ReadBytes(first + (long)r0 * len, n * len);
+                if (bytes == null || bytes.Length < n * len) break;
+                for (int r = 0; r < n; r++)
+                for (int o = 0; o + size <= len; o++)
+                {
+                    int at = r * len + o;
+                    ulong v = size switch { 1 => bytes[at], 2 => BitConverter.ToUInt16(bytes, at), 4 => BitConverter.ToUInt32(bytes, at), _ => BitConverter.ToUInt64(bytes, at) };
+                    if (!values.Contains(v)) continue;
+                    if (!found.TryGetValue(o, out var map)) found[o] = map = new Dictionary<ulong, int>();
+                    map.TryAdd(v, r0 + r);
+                    rowsMatched[o] = rowsMatched.GetValueOrDefault(o) + 1;
+                }
+            }
+            foreach (var (o, map) in found)
+                if (map.Count >= minHits) columns.Add((file, count, len, first, o, map, rowsMatched[o]));
+        }
+
+        // Most values found first; among equals, columns where the values are rare (keys, hashes) beat constant-ish ones.
+        var ranked = columns.OrderByDescending(c => c.found.Count).ThenBy(c => (double)c.rows / c.found.Count).Take(15).ToList();
+        var result = new JArray();
+        foreach (var c in ranked)
+        {
+            var matches = new JArray();
+            foreach (var (v, row) in c.found.OrderBy(kv => kv.Value).Take(30))
+            {
+                var label = RowLabel(m, c.first + (long)row * c.len);
+                matches.Add(new JObject { ["value"] = v, ["row"] = row, ["label"] = label });
+            }
+            result.Add(new JObject
+            {
+                ["file"] = c.file, ["offset"] = c.offset, ["size"] = size, ["found"] = c.found.Count, ["rowsMatched"] = c.rows,
+                ["rowCount"] = c.count, ["recordLength"] = c.len, ["matches"] = matches,
+            });
+        }
+        return new JObject
+        {
+            ["id"] = id, ["status"] = "done", ["values"] = values.Count, ["size"] = size, ["minHits"] = minHits, ["tables"] = tables.Count,
+            ["ms"] = sw.ElapsedMilliseconds, ["columns"] = result,
+            ["missing"] = ranked.Count > 0 ? new JArray(values.Where(v => !ranked[0].found.ContainsKey(v)).Take(30)) : new JArray(values.Take(30)),
+            ["note"] = "Columns are scanned at every byte offset, so small values (1-2 bytes) give chance hits: trust a column when it holds " +
+                       "(nearly) all values and rowsMatched is close to found. A value packed with flags must be unpacked first (e.g. q >> 5).",
+        };
+    }
+
+    /// <summary>The row's first text field, if any (same idea as RowAt's label).</summary>
+    private static string RowLabel(IMemory m, long rowAddress)
+    {
+        try
+        {
+            var first = m.Read<long>(rowAddress);
+            if (first > 0x10000 && first < 0x7FFF_FFFF_FFFF && m.ReadStringU(first, 96) is { } t && LooksLikeText(t)) return t;
+        }
+        catch { }
+        return "";
+    }
 
     private JObject DataFiles(JToken? p)
     {
