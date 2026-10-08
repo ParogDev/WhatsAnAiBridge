@@ -71,6 +71,10 @@ public class ExpressionWalker
     internal object? Resolve(string expression, out string? error)
     {
         error = null;
+        // The first GetComponent<T> scans every loaded assembly for component types; that one-off
+        // cost must not count against the path's deadline (it timed out the first call after a HUD start).
+        if (_componentTypeCache == null && expression.Contains("Component<", StringComparison.Ordinal))
+            ResolveComponentType("Life");
         var deadline = DateTime.UtcNow.AddMilliseconds(TimeoutMs);
         var segments = ParseExpression(expression);
         if (segments.Count == 0) { error = "Empty expression"; return null; }
