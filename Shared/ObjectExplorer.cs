@@ -116,7 +116,8 @@ public partial class WhatsAnAiBridge
             foreach (var (name, declared, read) in members)
             {
                 var childPath = $"{path}.{name}";
-                var childCs = $"{csharp}?.{name}";
+                // Members of a struct take '.': inside a ?. chain the struct isn't nullable, and '?.' on it is CS0023.
+                var childCs = type.IsValueType ? $"{csharp}.{name}" : $"{csharp}?.{name}";
                 if (sw.ElapsedMilliseconds > ExploreBudgetMs) { skipped.Add(name); continue; }
                 if (!ExpressionWalker.IsTypeAllowed(declared) && !declared.IsPrimitive && declared != typeof(string) && !declared.IsEnum)
                 {
