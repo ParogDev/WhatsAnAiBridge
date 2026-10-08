@@ -169,7 +169,7 @@ public partial class WhatsAnAiBridge
             job.Result.Ok = state.Exception == null;
             if (state.Exception != null) SetException(job, state.Exception);
             var ret = state.ReturnValue;
-            job.Result.ReturnType = ret?.GetType().FullName;
+            job.Result.ReturnType = ret == null ? null : FriendlyTypeName(ret.GetType());
             job.Result.Value = ExpressionWalker.ToJson(ret);
             job.Result.Log = (state.GetVariable("__out")?.Value as List<string>)?.Take(200).ToList();
         }
@@ -180,6 +180,21 @@ public partial class WhatsAnAiBridge
         }
         job.Result.RunMs = sw.ElapsedMilliseconds;
         job.Status = "done";
+    }
+
+    /// <summary>
+    /// C#-style type name: "List&lt;Entity&gt;", "anonymous { inGame, hp }" - not the assembly-qualified
+    /// FullName, which for script types is hundreds of characters of noise.
+    /// </summary>
+    private static string FriendlyTypeName(Type t)
+    {
+        if (t.Name.Contains("AnonymousType"))
+            return "anonymous { " + string.Join(", ", t.GetProperties().Select(p => p.Name)) + " }";
+        if (t.IsArray) return FriendlyTypeName(t.GetElementType()!) + "[]";
+        if (!t.IsGenericType) return t.Namespace is { } ns && (ns == "System" || ns.StartsWith("System.")) ? t.Name : t.FullName ?? t.Name;
+        var name = t.Name[..t.Name.IndexOf('`')];
+        if (name == "Nullable") return FriendlyTypeName(t.GetGenericArguments()[0]) + "?";
+        return name + "<" + string.Join(", ", t.GetGenericArguments().Select(FriendlyTypeName)) + ">";
     }
 
     private void SetException(ScriptJob job, Exception ex)

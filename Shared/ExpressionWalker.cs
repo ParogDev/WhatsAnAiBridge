@@ -561,7 +561,8 @@ public class ExpressionWalker
 
         // Object: enumerate public properties
         var type = obj.GetType();
-        var result = new JObject { ["_type"] = type.Name };
+        // Compiler-generated anonymous types (script results) have unreadable names; omit them.
+        var result = type.Name.Contains("AnonymousType") ? new JObject() : new JObject { ["_type"] = type.Name };
 
         var props = type.GetProperties(BindingFlags.Public | BindingFlags.Instance);
         foreach (var prop in props.Take(50))
