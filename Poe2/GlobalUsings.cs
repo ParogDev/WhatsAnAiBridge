@@ -1,8 +1,9 @@
-// PoE2 (ExileCore2) namespaces and type aliases for the shared sources in ..\Shared.
+﻿// PoE2 (ExileCore2) namespaces and type aliases for the shared sources in ..\Shared.
 // Shared files must not import ExileCore/ExileCore2 directly - only through these.
 global using ExileCore2;
 global using ExileCore2.PoEMemory.Components;
 global using ExileCore2.PoEMemory.MemoryObjects;
+global using ExileCore2.PoEMemory.FilesInMemory;
 global using ExileCore2.Shared.Enums;
 global using ExileCore2.Shared.Interfaces;
 global using ExileCore2.Shared.Nodes;

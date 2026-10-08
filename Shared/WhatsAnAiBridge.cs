@@ -164,6 +164,10 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     private string ProcessTcpRequest(string method, JToken? parameters)
     {
+        // Structured methods (named params, stateless): stats.* and recording.*
+        var structured = ProcessStatsMethod(method, parameters) ?? ProcessRecordingMethod(method, parameters);
+        if (structured != null) return structured;
+
         // Map JSON-RPC method to query string
         var query = method switch
         {
@@ -940,11 +944,10 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         if (ql.StartsWith("recording:load:"))
         {
             var fileName = query.Substring("recording:load:".Length).Trim();
-            var recDir = Path.Combine(_bridgeDir, "recordings");
-            var filePath = Path.Combine(recDir, fileName);
-            if (!File.Exists(filePath))
-                return Serialize(new ErrorResponse { Error = "File not found", File = fileName });
-            LoadRecording(filePath);
+            if (!TryResolveRecording(fileName, out var filePath, out var resolveError))
+                return Serialize(new ErrorResponse { Error = resolveError, File = fileName });
+            _loadedRecordingPath = filePath;
+            _loadedFrameOffsets = GetFrameIndex(filePath);
             return Serialize(new RecordingLoadResponse
             {
                 File = fileName,

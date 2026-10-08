@@ -29,4 +29,8 @@ public class WhatsAnAiBridgeSettings : ISettings
     public RangeNode<int> RecordingEntityRange { get; set; } = new(200, 50, 9999);
     public ToggleNode AutoDeepScanBosses { get; set; } = new(true);
     public RangeNode<int> RecordingMaxDeepStats { get; set; } = new(200, 10, 500);
+
+    // Player-stats view state shared with the MCP App / agents (pins, filter, selection, sort).
+    // Persisted here so it survives HUD restarts; Rev keeps increasing across restarts.
+    public StatsUiState StatsUi { get; set; } = new();
 }
