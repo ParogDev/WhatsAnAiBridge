@@ -43,7 +43,8 @@ public partial class WhatsAnAiBridge
         int px = player != null ? (int)player.Value.X : -1, py = player != null ? (int)player.Value.Y : -1;
 
         // Crop (grid cells around the player), then scale down to maxSize.
-        var crop = new System.Drawing.Rectangle(0, 0, source.Width, source.Height);
+        // Default: trim to the painted terrain (areas are mostly empty margin), keeping the player inside.
+        var crop = ContentBounds(source, px, py, margin: 24);
         if (cropRadius > 0 && px >= 0)
         {
             crop = System.Drawing.Rectangle.Intersect(crop,
@@ -63,7 +64,7 @@ public partial class WhatsAnAiBridge
             if (markPlayer && px >= 0 && crop.Contains(px, py))
             {
                 float mx = (float)((px - crop.X) * scale), my = (float)((py - crop.Y) * scale);
-                float r = Math.Max(4f, outW / 120f);
+                float r = Math.Max(7f, outW / 90f);
                 using var ring = new System.Drawing.Pen(System.Drawing.Color.FromArgb(255, 255, 215, 0), Math.Max(2f, r / 2.5f));
                 using var dot = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(255, 255, 64, 64));
                 g.FillEllipse(dot, mx - r / 2, my - r / 2, r, r);
@@ -73,6 +74,42 @@ public partial class WhatsAnAiBridge
         using var outStream = new MemoryStream();
         output.Save(outStream, System.Drawing.Imaging.ImageFormat.Png);
 
+        return MapResult(outStream, outW, outH, px, py, crop, scale, source, includeRoutes);
+    }
+
+    /// <summary>Bounding box of non-transparent pixels (+margin, always containing the player), via LockBits.</summary>
+    private static System.Drawing.Rectangle ContentBounds(System.Drawing.Bitmap bmp, int px, int py, int margin)
+    {
+        var full = new System.Drawing.Rectangle(0, 0, bmp.Width, bmp.Height);
+        var data = bmp.LockBits(full, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        int minX = int.MaxValue, minY = int.MaxValue, maxX = -1, maxY = -1;
+        try
+        {
+            var row = new byte[data.Stride];
+            // Skip an 8-pixel frame: Radar draws a border line along the image edge (anti-aliased).
+            for (int y = 8; y < bmp.Height - 8; y++)
+            {
+                System.Runtime.InteropServices.Marshal.Copy(data.Scan0 + y * data.Stride, row, 0, data.Stride);
+                for (int x = 8; x < bmp.Width - 8; x++)
+                {
+                    if (row[x * 4 + 3] == 0) continue; // alpha
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+        finally { bmp.UnlockBits(data); }
+        if (maxX < 0) return full;
+        if (px >= 0) { minX = Math.Min(minX, px); maxX = Math.Max(maxX, px); minY = Math.Min(minY, py); maxY = Math.Max(maxY, py); }
+        return System.Drawing.Rectangle.Intersect(full,
+            System.Drawing.Rectangle.FromLTRB(minX - margin, minY - margin, maxX + margin + 1, maxY + margin + 1));
+    }
+
+    private JObject MapResult(MemoryStream outStream, int outW, int outH, int px, int py,
+        System.Drawing.Rectangle crop, double scale, System.Drawing.Bitmap source, bool includeRoutes)
+    {
         return new JObject
         {
             ["area"] = GameController.Area?.CurrentArea?.Name,
