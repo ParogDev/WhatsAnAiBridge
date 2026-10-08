@@ -193,6 +193,10 @@ public class WhatsAnAiBridgeSettingsUi
         ToggleBool("cb_spk", s.StatsPanelShowKeys.Value, v => s.StatsPanelShowKeys.Value = v, dl, x, cx, ref y,
             "Panel Shows Stat Keys", "List Stats.dat keys instead of in-game text in the panel's table");
 
+        SectionHeader(dl, x, ref y, "Agent Guide");
+        Toggle("cb_ag", s.ShowAgentGuide, dl, x, cx, ref y,
+            "Show Agent Guide", "In-game card with what the agent asks you to do next, plus its log. Hides itself when idle");
+
         SectionHeader(dl, x, ref y, "Query Limits");
         IntSlider("cb_er", s.MaxEntityRange, dl, x, cx, ref y, sw,
             "Default Entity Range", "Default max distance for entity queries");
