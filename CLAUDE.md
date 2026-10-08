@@ -36,4 +36,11 @@ Poe2\                    PoE2 partial class + GlobalUsings (ExileCore2, System.D
   - **Reloading changed code needs the HUD setting Core → Plugin Settings → "Avoid locking plugin dlls" turned on.** It is off by default on both HUDs, and takes effect for plugins loaded after it is turned on, so restart the HUD once after ticking it.
     - When it's off, the HUD loads each plugin DLL from its file and keeps it locked. A recompile then can't replace the DLL, and the HUD has already unloaded the plugin, so it stays off until a restart.
     - So `hud.reload_plugin` refuses with `dll_locked` while the setting is off; `force=true` overrides that when the code didn't change. `hud.plugins` reports the setting as `avoidLockingDllFiles`.
+- `script.run {code, thread: main|worker, timeoutMs}` and `script.result {id}` run C# inside the HUD using the Roslyn scripting DLLs both HUDs ship (`Shared/ScriptRunner.cs`).
+  - **Off by default** (setting *Allow C# Scripts*): it's arbitrary code in the HUD process.
+  - **Compile and run:** compiling happens on a worker; the run happens at the start of `Render` (main thread) or on the worker. A running script can't be aborted.
+  - **What scripts get:** a prelude (`GameController`, `Log(object)`) and the game namespaces present in this build. The last expression is the result, serialized like `eval:` results.
+  - **No globals type:** Roslyn needs a file-backed assembly for one, and plugin assemblies load from memory when the HUD avoids locking DLLs.
+  - **Caching:** identical code reuses its compiled script.
+  - **CI:** the runner's reference set includes the Roslyn DLLs (scaffolding `tools/ci/sync-hud-refs.ps1`).
 - Quick manual test: `tools\bridge-query.ps1 -Game poe2 hello player` (in the scaffolding repo).
