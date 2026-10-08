@@ -16,6 +16,12 @@ public class WhatsAnAiBridgeSettingsUi
     private int _activeTab;
     private readonly Dictionary<string, float> _anims = new();
 
+    /// <summary>
+    /// Opens/closes the in-HUD stats panel through the shared view's mutator (StatsUiState.PanelOpen),
+    /// so the Claude app and agents see the toggle too. Set by the plugin.
+    /// </summary>
+    public Action<bool>? SetStatsPanelOpen { get; set; }
+
     private static readonly string[] Tabs = { "Status", "Settings", "Query Log", "Recording", "Guide" };
 
     // ── Palette ─────────────────────────────────────────────────────
@@ -180,6 +186,12 @@ public class WhatsAnAiBridgeSettingsUi
             "HUD X", "Horizontal position of the status HUD");
         IntSlider("cb_hy", s.HudY, dl, x, cx, ref y, sw,
             "HUD Y", "Vertical position of the status HUD");
+
+        SectionHeader(dl, x, ref y, "Stats Panel");
+        ToggleBool("cb_sp", s.StatsUi.PanelOpen, v => SetStatsPanelOpen?.Invoke(v), dl, x, cx, ref y,
+            "Show Player Stats Panel", "In-game panel of the shared stats view: pins, filter and selection sync with the Claude app");
+        ToggleBool("cb_spk", s.StatsPanelShowKeys.Value, v => s.StatsPanelShowKeys.Value = v, dl, x, cx, ref y,
+            "Panel Shows Stat Keys", "List Stats.dat keys instead of in-game text in the panel's table");
 
         SectionHeader(dl, x, ref y, "Query Limits");
         IntSlider("cb_er", s.MaxEntityRange, dl, x, cx, ref y, sw,
@@ -425,6 +437,21 @@ public class WhatsAnAiBridgeSettingsUi
         _anims.TryGetValue(key, out float a);
         if (PillToggle($"##{key}", ref v, ref a))
             node.Value = v;
+        _anims[key] = a;
+        y += Row;
+    }
+
+    /// <summary>Same pill toggle as <see cref="Toggle"/>, for a bool that is not a ToggleNode (writes go through <paramref name="set"/>).</summary>
+    private void ToggleBool(string key, bool value, Action<bool> set, ImDrawListPtr dl,
+        float x, float cx, ref float y, string label, string desc)
+    {
+        dl.AddText(new Vector2(x + 6, y + 1), Label, label);
+        dl.AddText(new Vector2(x + 6, y + 16), Desc, desc);
+        ImGui.SetCursorScreenPos(new Vector2(cx, y + 5));
+        var v = value;
+        _anims.TryGetValue(key, out float a);
+        if (PillToggle($"##{key}", ref v, ref a))
+            set(v);
         _anims[key] = a;
         y += Row;
     }

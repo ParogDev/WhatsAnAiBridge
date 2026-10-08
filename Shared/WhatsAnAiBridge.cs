@@ -343,6 +343,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         _status.RecordingFile = _currentRecordingPath ?? "";
 
         DrawStatusHud();
+        DrawStatsPanel();
     }
 
     // ── Status HUD ──────────────────────────────────────────────────
@@ -377,7 +378,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void DrawSettings()
     {
-        _settingsUi ??= new WhatsAnAiBridgeSettingsUi();
+        _settingsUi ??= new WhatsAnAiBridgeSettingsUi { SetStatsPanelOpen = open => SetStatsView(null, null, open) };
         _settingsUi.Draw(Settings, _status, _queryLog);
     }
 

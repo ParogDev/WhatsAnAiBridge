@@ -23,6 +23,15 @@ Poe2\                    PoE2 partial class + GlobalUsings (ExileCore2, System.D
 - **Anything with a different API or different game knowledge goes in the per-game partial** (`Poe1/WhatsAnAiBridge.Poe1.cs`, `Poe2/WhatsAnAiBridge.Poe2.cs`), and the two must declare the same members.
 - **No fake values for what a game lacks.** Omit the field (nullable DTO property), call `MarkUnsupported("feature")`, and list it in `UnsupportedFeatures`. Responses carry `game` and `unsupported`, and `hello` reports both.
 
+## In-HUD stats panel (`Shared\StatsPanel.cs`)
+
+- An ImGui window ("Player Stats", id `###bridge_stats_panel`) drawn from `Render()`. It is one surface over the **shared stats view** (`StatsUiState` in the settings: pins, filter, category, selection, sort, `PanelOpen`), the same state the MCP App and agents use.
+- **Reads** the state every frame and the 250 ms stats snapshot (`GetStatsSnapshot`); **writes only through the mutators** in `Shared\StatsFeature.cs` (`SetStatPinned`, `SetStatsFilter`, `SelectStat`, `SetStatsView`). Never add a second copy of the view state.
+- Sync detection: the panel remembers the rev its own writes produced; any other rev change is "remote" (app/agent). A remote selection scrolls the row into view and pulses it; the header pill shows "Synced: <what>" for ~2.5 s.
+- `PanelOpen` is the open flag: closing the window calls `SetStatsView(panelOpen: false)`; agents toggle it with `set_stats_view`; the settings UI has a "Show Player Stats Panel" pill. No hotkey.
+- Panel-only preferences (section collapse, "Keys" label mode) are `StatsPanel*` ToggleNodes in the settings, not part of the shared view. Window position/size come from the HUD's `imgui.ini`.
+- ASCII only in strings (the HUD font has no glyphs beyond it); icons are drawn with the draw list. Card fills derive from the live ImGui style (`SurfaceFill`); life/ES/mana and element hues are fixed. Filter/sort rows are rebuilt only when the snapshot or the view inputs change, and the table draws only the visible rows.
+
 ## Bridge protocol (v2)
 
 - Newline-delimited JSON-RPC 2.0 on `127.0.0.1:<port>`. The port and a per-launch random token are written to `<HUD>\<BridgeDirectory>\bridge-port.txt` / `bridge-token.txt` (default `claude-bridge`).
