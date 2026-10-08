@@ -1,12 +1,14 @@
 using System;
 using System.IO;
+using System.Linq;
 using Newtonsoft.Json.Linq;
 
 namespace WhatsAnAiBridge;
 
 /// <summary>
-/// map.image: the current area's terrain as a PNG, from the Radar plugin's PluginBridge method
-/// "Radar.GetMapImage" (Radar must be loaded), with the player marked - so an AI agent can look at the map.
+/// map.image: the current area's terrain as a PNG with the player marked - so an AI agent can look at the map.
+/// Source: the Radar plugin's PluginBridge method "Radar.GetMapImage" when a Radar build exposes it (PoE2's),
+/// otherwise the bridge's own drawing of IngameData.RawPathfindingData (both games, no plugin needed).
 ///
 /// Radar's image is the area grid at 1 pixel per grid cell, same orientation as GridPos (pixel x,y = grid
 /// x,y; verified on PoE2 against IngameData.RawPathfindingData: 70% of painted pixels lie on walkable
@@ -28,17 +30,35 @@ public partial class WhatsAnAiBridge
 
     private JObject MapImage(bool includeRoutes, bool markPlayer, int cropRadius, int maxSize)
     {
+        // Radar's image when a Radar build exposes it (PoE2's does; PoE1's Radar registers only LookForRoute and
+        // ClusterTarget), otherwise the bridge draws the area itself from the pathfinding grid - so this works on
+        // both games with or without Radar.
         var getImage = GameController.PluginBridge.GetMethod<Func<bool, byte[]>>("Radar.GetMapImage");
-        if (getImage == null)
-            return new JObject { ["error"] = "radar_unavailable", ["message"] = "The Radar plugin isn't loaded (no PluginBridge method Radar.GetMapImage)." };
-        byte[]? png;
-        try { png = getImage(includeRoutes); }
-        catch (Exception ex) { return new JObject { ["error"] = "radar_failed", ["message"] = ex.Message }; }
-        if (png == null || png.Length == 0)
-            return new JObject { ["error"] = "no_map", ["message"] = "Radar has no map for this area yet." };
+        byte[]? png = null;
+        string? radarNote = null;
+        if (getImage != null)
+        {
+            try { png = getImage(includeRoutes); }
+            catch (Exception ex) { radarNote = $"Radar failed ({ex.Message}); drawn from the pathfinding grid instead."; }
+        }
+        else if (includeRoutes) radarNote = "Routes need a Radar build that exposes Radar.GetMapImage; drawn from the pathfinding grid without routes.";
 
-        using var input = new MemoryStream(png);
-        using var source = new System.Drawing.Bitmap(input);
+        System.Drawing.Bitmap source;
+        string sourceName;
+        if (png is { Length: > 0 })
+        {
+            using var input = new MemoryStream(png);
+            source = new System.Drawing.Bitmap(input);
+            sourceName = "radar";
+        }
+        else
+        {
+            source = TerrainBitmap()!;
+            if (source == null)
+                return new JObject { ["error"] = "no_map", ["message"] = "No terrain data for this area yet (loading, or not in game)." };
+            sourceName = "pathfinding";
+        }
+        using var _ = source;
         var player = GameController.Player?.GridPos;
         int px = player != null ? (int)player.Value.X : -1, py = player != null ? (int)player.Value.Y : -1;
 
@@ -74,7 +94,47 @@ public partial class WhatsAnAiBridge
         using var outStream = new MemoryStream();
         output.Save(outStream, System.Drawing.Imaging.ImageFormat.Png);
 
-        return MapResult(outStream, outW, outH, px, py, crop, scale, source, includeRoutes);
+        var result = MapResult(outStream, outW, outH, px, py, crop, scale, source, includeRoutes && sourceName == "radar", sourceName);
+        if (radarNote != null) result["note"] = radarNote;
+        return result;
+    }
+
+    /// <summary>
+    /// The area from IngameData.RawPathfindingData, indexed [y][x] in grid cells (verified on PoE1: the player's
+    /// cell is walkable as [y][x], blocked as [x][y]). 0 = blocked (transparent); 1-4 = walkable near a wall,
+    /// drawn light, so edges read like Radar's walls; 5 = open floor, drawn dim.
+    /// </summary>
+    private System.Drawing.Bitmap? TerrainBitmap()
+    {
+        int[][]? grid;
+        try { grid = GameController.IngameState?.Data?.RawPathfindingData; } catch { grid = null; }
+        if (grid == null || grid.Length == 0 || grid[0] == null || grid[0].Length == 0) return null;
+        int h = grid.Length, w = grid.Max(r => r?.Length ?? 0);
+        var bmp = new System.Drawing.Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        var data = bmp.LockBits(new System.Drawing.Rectangle(0, 0, w, h), System.Drawing.Imaging.ImageLockMode.WriteOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        try
+        {
+            var row = new byte[data.Stride];
+            for (int y = 0; y < h; y++)
+            {
+                Array.Clear(row);
+                var src = grid[y];
+                for (int x = 0; src != null && x < src.Length; x++)
+                {
+                    var v = src[x];
+                    if (v <= 0) continue;
+                    // BGRA. Near-wall cells light grey, open floor a dim blue-grey.
+                    byte c = v >= 5 ? (byte)70 : (byte)(200 - (v - 1) * 25);
+                    row[x * 4] = (byte)Math.Min(255, c + (v >= 5 ? 14 : 0));
+                    row[x * 4 + 1] = c;
+                    row[x * 4 + 2] = c;
+                    row[x * 4 + 3] = 255;
+                }
+                System.Runtime.InteropServices.Marshal.Copy(row, 0, data.Scan0 + y * data.Stride, data.Stride);
+            }
+        }
+        finally { bmp.UnlockBits(data); }
+        return bmp;
     }
 
     /// <summary>Bounding box of non-transparent pixels (+margin, always containing the player), via LockBits.</summary>
@@ -108,10 +168,11 @@ public partial class WhatsAnAiBridge
     }
 
     private JObject MapResult(MemoryStream outStream, int outW, int outH, int px, int py,
-        System.Drawing.Rectangle crop, double scale, System.Drawing.Bitmap source, bool includeRoutes)
+        System.Drawing.Rectangle crop, double scale, System.Drawing.Bitmap source, bool includeRoutes, string sourceName)
     {
         return new JObject
         {
+            ["source"] = sourceName,
             ["area"] = GameController.Area?.CurrentArea?.Name,
             ["pngBase64"] = Convert.ToBase64String(outStream.ToArray()),
             ["width"] = outW,
@@ -119,7 +180,10 @@ public partial class WhatsAnAiBridge
             ["playerGrid"] = px >= 0 ? new JArray(px, py) : null,
             // pixel = (grid - origin) * scale  <=>  grid = pixel / scale + origin
             ["mapping"] = new JObject { ["originGrid"] = new JArray(crop.X, crop.Y), ["scale"] = Math.Round(scale, 6), ["areaGrid"] = new JArray(source.Width, source.Height) },
-            ["legend"] = "Light lines = walls/edges of walkable terrain (Radar). Red dot in a gold ring = player." +
+            ["legend"] = (sourceName == "radar"
+                             ? "Light lines = walls/edges of walkable terrain (Radar)."
+                             : "Dim fill = walkable floor, light = walkable cells next to walls, dark = blocked (pathfinding grid).") +
+                         " Red dot in a gold ring = player." +
                          (includeRoutes ? " Coloured lines = Radar's routes to its targets." : ""),
         };
     }
