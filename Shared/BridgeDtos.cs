@@ -38,6 +38,15 @@ public class BridgeResponse
     [JsonProperty("filter", NullValueHandling = NullValueHandling.Ignore)]
     public string? Filter { get; set; }
 
+    /// <summary>"poe1" or "poe2" - which HUD answered.</summary>
+    [JsonProperty("game", NullValueHandling = NullValueHandling.Ignore)]
+    public string? Game { get; set; }
+
+    /// <summary>Features touched by this request that this game's HUD cannot provide.
+    /// Fields for these are omitted rather than faked as false/0.</summary>
+    [JsonProperty("unsupported", NullValueHandling = NullValueHandling.Ignore)]
+    public List<string>? Unsupported { get; set; }
+
     [JsonProperty("matchCount", NullValueHandling = NullValueHandling.Ignore)]
     public int? MatchCount { get; set; }
 
@@ -339,8 +348,8 @@ public class UiDto
     [JsonProperty("sellWindow")]
     public bool SellWindow { get; set; }
 
-    [JsonProperty("mapDeviceWindow")]
-    public bool MapDeviceWindow { get; set; }
+    [JsonProperty("mapDeviceWindow", NullValueHandling = NullValueHandling.Ignore)]
+    public bool? MapDeviceWindow { get; set; }
 
     [JsonProperty("tradeWindow")]
     public bool TradeWindow { get; set; }
@@ -351,14 +360,14 @@ public class UiDto
     [JsonProperty("ritualWindow")]
     public bool RitualWindow { get; set; }
 
-    [JsonProperty("villageRewardWindow")]
-    public bool VillageRewardWindow { get; set; }
+    [JsonProperty("villageRewardWindow", NullValueHandling = NullValueHandling.Ignore)]
+    public bool? VillageRewardWindow { get; set; }
 
-    [JsonProperty("mercenaryEncounterWindow")]
-    public bool MercenaryEncounterWindow { get; set; }
+    [JsonProperty("mercenaryEncounterWindow", NullValueHandling = NullValueHandling.Ignore)]
+    public bool? MercenaryEncounterWindow { get; set; }
 
-    [JsonProperty("zanaMissionChoice")]
-    public bool ZanaMissionChoice { get; set; }
+    [JsonProperty("zanaMissionChoice", NullValueHandling = NullValueHandling.Ignore)]
+    public bool? ZanaMissionChoice { get; set; }
 
     [JsonProperty("leagueMechanicButtons", NullValueHandling = NullValueHandling.Ignore)]
     public LeagueMechanicButtonsDto? LeagueMechanicButtons { get; set; }
@@ -431,8 +440,8 @@ public class StashTabDto
     [JsonProperty("rawFlags")]
     public byte RawFlags { get; set; }
 
-    [JsonProperty("affinity")]
-    public uint Affinity { get; set; }
+    [JsonProperty("affinity", NullValueHandling = NullValueHandling.Ignore)]
+    public uint? Affinity { get; set; }
 }
 
 public class ColorDto
@@ -927,4 +936,29 @@ public class ErrorResponse
 
     [JsonProperty("totalFrames", NullValueHandling = NullValueHandling.Ignore)]
     public int? TotalFrames { get; set; }
+}
+
+/// <summary>Handshake: identifies the game/HUD behind the bridge and what it cannot do.</summary>
+public class HelloDto
+{
+    [JsonProperty("game")]
+    public string Game { get; set; } = "";
+
+    [JsonProperty("protocolVersion")]
+    public int ProtocolVersion { get; set; }
+
+    [JsonProperty("hud")]
+    public string Hud { get; set; } = "";
+
+    [JsonProperty("hudBuild")]
+    public string HudBuild { get; set; } = "";
+
+    [JsonProperty("bridgeBuild")]
+    public string BridgeBuild { get; set; } = "";
+
+    [JsonProperty("inGame")]
+    public bool InGame { get; set; }
+
+    [JsonProperty("unsupported")]
+    public List<string> Unsupported { get; set; } = new();
 }
