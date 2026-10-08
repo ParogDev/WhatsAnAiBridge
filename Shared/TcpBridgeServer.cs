@@ -247,9 +247,10 @@ public class TcpBridgeServer : IDisposable
             var result = await tcs.Task.WaitAsync(timeoutCts.Token);
             return JsonRpcResult(id, JToken.Parse(result));
         }
-        catch (TimeoutException)
+        catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
         {
-            return JsonRpcError(id, -32002, "Request timed out waiting for main thread processing");
+            // WaitAsync(token) throws TaskCanceledException on timeout, not TimeoutException.
+            return JsonRpcError(id, -32002, "Timed out after 10s waiting for the HUD to process the request (HUD paused, loading, or busy)");
         }
         catch (Exception ex)
         {
