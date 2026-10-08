@@ -230,8 +230,9 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     private string ProcessTcpRequest(string method, JToken? parameters)
     {
-        // Structured methods (named params, stateless): stats.* and recording.*
-        var structured = ProcessStatsMethod(method, parameters) ?? ProcessRecordingMethod(method, parameters);
+        // Structured methods (named params, stateless): stats.*, recording.* and hud.*
+        var structured = ProcessStatsMethod(method, parameters) ?? ProcessRecordingMethod(method, parameters)
+                         ?? ProcessHudMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
@@ -271,6 +272,9 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void Render()
     {
+        // Plugin reloads requested over the bridge run here, on the main thread, like the menu's Reload button.
+        RunPendingReload();
+
         var now = DateTime.UtcNow;
 
         // File IPC: poll for requests at configurable interval (legacy, behind toggle)
