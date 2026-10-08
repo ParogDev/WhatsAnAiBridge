@@ -407,6 +407,8 @@ public partial class WhatsAnAiBridge
         if (v > 0x10000 && v < 0x7FFF_FFFF_FFFF && ctx.Readable(v))
         {
             o["kind"] = "heap";
+            // A pointer at a row of a loaded game data table: name it (StashType.dat[5] "MapStash").
+            if (deep && ctx.DataRow(v) is { } row) { o["kind"] = "data-row"; o["points"] = row; return o; }
             if (deep && ctx.Read(v, 16) is { } peek)
             {
                 var first = BitConverter.ToInt64(peek, 0);
@@ -550,9 +552,17 @@ public partial class WhatsAnAiBridge
         public readonly long ModuleBase, ModuleSize, ImageBase;
         public readonly string ModuleName = "PathOfExile.exe";
         private readonly Dictionary<long, string?> _rtti = new();
+        private readonly WhatsAnAiBridge _plugin;
+
+        /// <summary>"StashType.dat[5] \"MapStash\"" when the address is a row of a loaded game data table.</summary>
+        public string? DataRow(long address)
+        {
+            try { return _plugin.RowAt(address); } catch { return null; }
+        }
 
         public MemoryContext(WhatsAnAiBridge plugin)
         {
+            _plugin = plugin;
             _m = plugin.GameController.Memory;
             try { _handle = (IntPtr)_m.OpenProcessHandle; } catch { _handle = IntPtr.Zero; }
             try { ModuleBase = (long)_m.AddressOfProcess; } catch { }
