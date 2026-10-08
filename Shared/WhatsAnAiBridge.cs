@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -105,6 +106,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                 msg => LogError($"[TCP] {msg}")
             );
             _tcpServer.Start(Settings.TcpPort.Value, _bridgeDir);
+            StartWatchdog();
         }
         catch (Exception ex)
         {
@@ -114,6 +116,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void OnClose()
     {
+        StopWatchdog();
         _tcpServer?.Dispose();
         _tcpServer = null;
         _recordingWriter?.Dispose();
@@ -122,24 +125,87 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void OnPluginDestroyForHotReload()
     {
+        StopWatchdog();
         _tcpServer?.Dispose();
         _tcpServer = null;
         _recordingWriter?.Dispose();
         _recordingWriter = null;
     }
 
-    // ── Tick: process TCP requests on main thread ────────────────────
-    // Tick() itself is declared in the per-game partial (PoE1 returns Job, PoE2 returns void).
+    // ── Request processing: Tick, with a background fallback ─────────
+    // Tick() itself is declared in the per-game partial (PoE1 returns Job, PoE2 returns void) and
+    // calls ProcessPendingRequests(). The PoE1 HUD stops ticking plugins ~150 ms after the game
+    // window loses focus - exactly when you are talking to an AI in another window - so a watchdog
+    // drains the queue on a worker thread once Tick has been silent for TickSilenceMs. A lock keeps
+    // Tick and the watchdog from ever processing at the same time. Bridge queries only read game
+    // memory, which is the same off-render-thread access DevTree-style tools use.
+
+    private const int TickSilenceMs = 300;
+    private readonly object _requestLock = new();
+    private long _lastTickTimestamp = Stopwatch.GetTimestamp();
+    private Timer? _watchdog;
+    private bool _servingFromWatchdog;
+
+    private void StartWatchdog()
+    {
+        _watchdog?.Dispose();
+        _watchdog = new Timer(_ => DrainFromWatchdog(), null, 100, 100);
+    }
+
+    private void StopWatchdog()
+    {
+        _watchdog?.Dispose();
+        _watchdog = null;
+    }
+
+    private void DrainFromWatchdog()
+    {
+        var server = _tcpServer;
+        if (server == null || server.PendingRequests.IsEmpty) return;
+        if (Stopwatch.GetElapsedTime(_lastTickTimestamp).TotalMilliseconds < TickSilenceMs) return;
+        if (!Monitor.TryEnter(_requestLock)) return;
+        try
+        {
+            if (!_servingFromWatchdog)
+            {
+                _servingFromWatchdog = true;
+                LogMessage("[TCP] HUD not ticking (game window in background?) - serving bridge requests from a worker thread");
+            }
+            DrainRequests(server);
+        }
+        catch (Exception ex)
+        {
+            LogError($"[TCP] Watchdog error: {ex.Message}");
+        }
+        finally
+        {
+            Monitor.Exit(_requestLock);
+        }
+    }
 
     private void ProcessPendingRequests()
     {
-        if (_tcpServer == null) return;
+        _lastTickTimestamp = Stopwatch.GetTimestamp();
+        var server = _tcpServer;
+        if (server == null) return;
+        lock (_requestLock)
+        {
+            if (_servingFromWatchdog)
+            {
+                _servingFromWatchdog = false;
+                LogMessage("[TCP] HUD ticking again - serving bridge requests on the main thread");
+            }
+            DrainRequests(server);
+        }
+    }
 
+    private void DrainRequests(TcpBridgeServer server)
+    {
         var sw = Stopwatch.StartNew();
 
         // Drain up to 5 requests per tick to stay under 200ms
         int processed = 0;
-        while (processed < 5 && sw.ElapsedMilliseconds < 150 && _tcpServer.PendingRequests.TryDequeue(out var request))
+        while (processed < 5 && sw.ElapsedMilliseconds < 150 && server.PendingRequests.TryDequeue(out var request))
         {
             processed++;
             try

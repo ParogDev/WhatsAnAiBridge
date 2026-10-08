@@ -27,6 +27,8 @@ public class TcpBridgeServer : IDisposable
         public required TaskCompletionSource<string> Response { get; init; }
     }
 
+    private const int PortFallbackRange = 10;
+
     public ConcurrentQueue<PendingRequest> PendingRequests { get; } = new();
 
     public int ConnectedClients => _clientCount;
@@ -68,14 +70,34 @@ public class TcpBridgeServer : IDisposable
         _tokenFilePath = Path.Combine(bridgeDir, "bridge-token.txt");
         File.WriteAllText(_tokenFilePath, _authToken, Encoding.UTF8);
 
-        // Write port file (for ephemeral port support)
+        // Bind the configured port, or the next free one: the PoE1 and PoE2 HUDs both default to
+        // 50900, so when both run the second bridge moves up. Clients read the actual port from
+        // bridge-port.txt, never from settings.
+        _listener = null;
+        for (var candidate = port; candidate < port + PortFallbackRange && candidate <= IPEndPoint.MaxPort; candidate++)
+        {
+            var listener = new TcpListener(IPAddress.Loopback, candidate);
+            try
+            {
+                listener.Start();
+                _listener = listener;
+                _port = candidate;
+                break;
+            }
+            catch (SocketException)
+            {
+                listener.Stop();
+            }
+        }
+        if (_listener == null)
+            throw new InvalidOperationException($"No free port in {port}..{port + PortFallbackRange - 1}");
+
         var portFilePath = Path.Combine(bridgeDir, "bridge-port.txt");
-        File.WriteAllText(portFilePath, port.ToString(), Encoding.UTF8);
+        File.WriteAllText(portFilePath, _port.ToString(), Encoding.UTF8);
 
-        _listener = new TcpListener(IPAddress.Loopback, port);
-        _listener.Start();
-
-        _log($"TCP Bridge server started on 127.0.0.1:{port}");
+        _log(_port == port
+            ? $"TCP Bridge server started on 127.0.0.1:{_port}"
+            : $"TCP Bridge server started on 127.0.0.1:{_port} (port {port} was busy)");
 
         // Accept clients on background thread
         Task.Run(() => AcceptClientsAsync(_cts.Token), _cts.Token);
@@ -225,9 +247,10 @@ public class TcpBridgeServer : IDisposable
             var result = await tcs.Task.WaitAsync(timeoutCts.Token);
             return JsonRpcResult(id, JToken.Parse(result));
         }
-        catch (TimeoutException)
+        catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
         {
-            return JsonRpcError(id, -32002, "Request timed out waiting for main thread processing");
+            // WaitAsync(token) throws TaskCanceledException on timeout, not TimeoutException.
+            return JsonRpcError(id, -32002, "Timed out after 10s waiting for the HUD to process the request (HUD paused, loading, or busy)");
         }
         catch (Exception ex)
         {
