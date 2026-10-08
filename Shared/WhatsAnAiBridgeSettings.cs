@@ -34,6 +34,10 @@ public class WhatsAnAiBridgeSettings : ISettings
     // Reload button (hud.reload_plugin). The HUD pauses while the plugin compiles.
     public ToggleNode AllowPluginReload { get; set; } = new(true);
 
+    // Dev loop: let bridge clients run C# scripts inside the HUD (script.run). Off by default:
+    // it is arbitrary code in the HUD process. See Shared\ScriptRunner.cs.
+    public ToggleNode AllowCSharpScripts { get; set; } = new(false);
+
     // Player-stats view state shared with the MCP App / agents (pins, filter, selection, sort).
     // Persisted here so it survives HUD restarts; Rev keeps increasing across restarts.
     public StatsUiState StatsUi { get; set; } = new();

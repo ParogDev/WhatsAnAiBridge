@@ -63,4 +63,23 @@
     </Reference>
     <PackageReference Include="ImGui.NET" Version="1.90.0.1" />
   </ItemGroup>
+  <!-- Roslyn scripting for script.run (Shared\ScriptRunner.cs): both HUDs ship these DLLs. -->
+  <ItemGroup>
+    <Reference Include="Microsoft.CodeAnalysis">
+      <HintPath>$(GameRefDir)\Microsoft.CodeAnalysis.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Microsoft.CodeAnalysis.CSharp">
+      <HintPath>$(GameRefDir)\Microsoft.CodeAnalysis.CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Microsoft.CodeAnalysis.Scripting">
+      <HintPath>$(GameRefDir)\Microsoft.CodeAnalysis.Scripting.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Microsoft.CodeAnalysis.CSharp.Scripting">
+      <HintPath>$(GameRefDir)\Microsoft.CodeAnalysis.CSharp.Scripting.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
 </Project>

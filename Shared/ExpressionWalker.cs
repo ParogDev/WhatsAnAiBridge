@@ -581,6 +581,9 @@ public class ExpressionWalker
         return result;
     }
 
+    /// <summary>Any value as JSON with the walker's depth and size limits (used for script results too).</summary>
+    internal static JToken ToJson(object? value) => value == null ? JValue.CreateNull() : SerializeValue(value, 0);
+
     private static JToken SerializeValue(object value, int depth)
     {
         if (value is string s) return s;
