@@ -29,6 +29,7 @@ public partial class WhatsAnAiBridge
     {
         "memory.read" => SafeMemory(() => MemoryRead(p)),
         "memory.layout" => SafeMemory(() => MemoryLayout(p)),
+        "memory.collect" => SafeMemory(() => MemoryCollect(p)),
         "memory.where" => SafeMemory(() =>
         {
             var a = ParseAddress(p?["address"]);
@@ -79,6 +80,88 @@ public partial class WhatsAnAiBridge
         };
         if (offset != 0) o["base"] = Hex(start);
         return o;
+    }
+
+    // ── memory.collect ───────────────────────────────────────────────
+
+    /// <summary>
+    /// The same byte range from every item of a collection (walker path to an IEnumerable of memory objects),
+    /// with optional per-item labels read through dotted property paths (e.g. "Name", "Affinity", "Owner.Path"; no method
+    /// calls). The population for correlating bits with known properties.
+    /// </summary>
+    private JObject MemoryCollect(JToken? p)
+    {
+        var ctx = new MemoryContext(this);
+        var path = p?["path"]?.Value<string>();
+        if (string.IsNullOrWhiteSpace(path)) return Err("missing_path", "Pass path: a walker path to a collection of memory objects.");
+        var coll = new ExpressionWalker(GameController).Resolve(path, out var error);
+        if (error != null) return Err("resolve_failed", error);
+        if (coll is not System.Collections.IEnumerable items || coll is string) return Err("not_a_collection", $"'{path}' is not a collection.");
+        var offset = p?["offset"]?.Value<int>() ?? 0;
+        var limit = Math.Clamp(p?["limit"]?.Value<int>() ?? 500, 1, 2000);
+        var labels = (p?["labels"] as JArray)?.Select(x => x.ToString()).Where(s => s.Length > 0).Take(8).ToList() ?? [];
+
+        int index = -1, size = p?["size"]?.Value<int>() ?? 0;
+        Type? structType = null;
+        var rows = new JArray();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        foreach (var item in items)
+        {
+            index++;
+            if (rows.Count >= limit || sw.ElapsedMilliseconds > 120) break;
+            if (item == null || ReadAddress(item) is not { } addr || addr == 0) continue;
+            if (size <= 0)
+            {
+                structType ??= CachedStructType(item.GetType(), out _);
+                size = structType != null ? SizeOf(structType) : 64;
+            }
+            size = Math.Clamp(size, 1, 1024);
+            var bytes = ctx.Read(addr + offset, size);
+            if (bytes == null) continue;
+            var row = new JObject { ["index"] = index, ["address"] = Hex(addr), ["data"] = Convert.ToBase64String(bytes) };
+            if (labels.Count > 0)
+            {
+                var l = new JObject();
+                foreach (var label in labels) l[label] = LabelValue(item, label);
+                row["labels"] = l;
+            }
+            rows.Add(row);
+        }
+        var o = new JObject
+        {
+            ["path"] = path, ["offset"] = offset, ["size"] = size, ["count"] = rows.Count, ["items"] = rows,
+            ["struct"] = structType?.FullName,
+        };
+        if (sw.ElapsedMilliseconds > 120) o["truncated"] = $"Stopped after {rows.Count} items (time budget); pass a smaller limit or size.";
+        return o;
+    }
+
+    /// <summary>A dotted property path on an item, as a JSON scalar (enums as their number, so bit masks stay usable).</summary>
+    private static JToken LabelValue(object item, string memberPath)
+    {
+        object? cur = item;
+        foreach (var part in memberPath.Split('.'))
+        {
+            if (cur == null) return JValue.CreateNull();
+            var t = cur.GetType();
+            var prop = t.GetProperty(part, BindingFlags.Public | BindingFlags.Instance);
+            try
+            {
+                if (prop != null && prop.GetIndexParameters().Length == 0) cur = prop.GetValue(cur);
+                else if (t.GetField(part, BindingFlags.Public | BindingFlags.Instance) is { } f) cur = f.GetValue(cur);
+                else return $"[no member {part}]";
+            }
+            catch (Exception ex) { return $"[error: {(ex as TargetInvocationException)?.InnerException?.Message ?? ex.Message}]"; }
+        }
+        return cur switch
+        {
+            null => JValue.CreateNull(),
+            Enum e => Convert.ToInt64(e, CultureInfo.InvariantCulture),
+            string s => s,
+            bool b => b,
+            IConvertible c when cur.GetType().IsPrimitive => JToken.FromObject(c),
+            _ => cur.ToString() ?? "",
+        };
     }
 
     // ── memory.layout ────────────────────────────────────────────────
