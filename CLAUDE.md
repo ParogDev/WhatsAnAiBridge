@@ -52,4 +52,10 @@ Poe2\                    PoE2 partial class + GlobalUsings (ExileCore2, System.D
   - **No globals type:** Roslyn needs a file-backed assembly for one, and plugin assemblies load from memory when the HUD avoids locking DLLs.
   - **Caching:** identical code reuses its compiled script.
   - **CI:** the runner's reference set includes the Roslyn DLLs (scaffolding `tools/ci/sync-hud-refs.ps1`).
+- `object.explore {path, offset, limit, csharp?}` (`Shared/ObjectExplorer.cs`) returns one level of the object model at a walker path, for mapping data out:
+  - **For the node and each child:** type, kind, a one-line preview (structs as `X=1 Y=2`, objects with their Name/RenderName and visibility), counts, the walker `path`, and null-safe `csharp`. Dictionaries with enum keys get typed keys (`Stats?[GameStat.MaximumLife]`).
+  - **Entities** also list their components, as `GetComponent<T>()` paths.
+  - **Paging:** collections are paged with `offset`/`limit`.
+  - **Time budget:** reads run on the main thread under a 60 ms budget, and unread members are listed in `skipped`. Getters taking 5 ms or more get `slowMs`.
+  - **Shared resolver:** `ExpressionWalker.Resolve` is the one path resolver behind `eval:`, `describe:` and explore.
 - Quick manual test: `tools\bridge-query.ps1 -Game poe2 hello player` (in the scaffolding repo).

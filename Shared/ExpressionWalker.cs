@@ -49,81 +49,10 @@ public class ExpressionWalker
     /// </summary>
     public string Evaluate(string expression)
     {
-        var deadline = DateTime.UtcNow.AddMilliseconds(TimeoutMs);
-
         try
         {
-            var segments = ParseExpression(expression);
-            if (segments.Count == 0)
-                return Error("Empty expression");
-
-            // Root must be GameController
-            if (segments[0].Name != "GameController")
-                return Error("Expression must start with 'GameController'");
-
-            object? current = _gc;
-            var currentType = _gc.GetType();
-
-            for (int i = 1; i < segments.Count; i++)
-            {
-                if (DateTime.UtcNow > deadline)
-                    return Error($"Evaluation timed out at segment '{segments[i].Name}'");
-
-                if (current == null)
-                    return Error($"Null reference at segment '{segments[i].Name}' (after '{segments[i - 1].Name}')");
-
-                var seg = segments[i];
-                currentType = current.GetType();
-
-                if (!IsTypeAllowed(currentType))
-                    return Error($"Type '{currentType.FullName}' is not in the allowed namespace list");
-
-                if (seg.IsMethodCall)
-                {
-                    current = InvokeMethod(current, currentType, seg, out var error);
-                    if (error != null) return Error(error);
-                }
-                else if (seg.HasIndexer)
-                {
-                    // First resolve the property, then index into it
-                    var prop = currentType.GetProperty(seg.Name, BindingFlags.Public | BindingFlags.Instance);
-                    if (prop != null)
-                    {
-                        current = prop.GetValue(current);
-                        if (current == null)
-                            return Error($"Property '{seg.Name}' returned null");
-                    }
-                    else
-                    {
-                        var field = currentType.GetField(seg.Name, BindingFlags.Public | BindingFlags.Instance);
-                        if (field != null)
-                            current = field.GetValue(current);
-                        else
-                            return Error($"No public property or field '{seg.Name}' on type '{currentType.Name}'");
-                    }
-
-                    current = ApplyIndexer(current, seg.IndexerValue!, out var indexError);
-                    if (indexError != null) return Error(indexError);
-                }
-                else
-                {
-                    var prop = currentType.GetProperty(seg.Name, BindingFlags.Public | BindingFlags.Instance);
-                    if (prop != null)
-                    {
-                        current = prop.GetValue(current);
-                    }
-                    else
-                    {
-                        var field = currentType.GetField(seg.Name, BindingFlags.Public | BindingFlags.Instance);
-                        if (field != null)
-                            current = field.GetValue(current);
-                        else
-                            return Error($"No public property or field '{seg.Name}' on type '{currentType.Name}'");
-                    }
-                }
-            }
-
-            return SerializeResult(current, expression);
+            var current = Resolve(expression, out var error);
+            return error != null ? Error(error) : SerializeResult(current, expression);
         }
         catch (TargetInvocationException ex)
         {
@@ -136,70 +65,63 @@ public class ExpressionWalker
     }
 
     /// <summary>
+    /// Resolve a path to its live object (null is a valid result). Members and indexers on the path are
+    /// read with the same rules as Evaluate; getters may throw (callers catch).
+    /// </summary>
+    internal object? Resolve(string expression, out string? error)
+    {
+        error = null;
+        var deadline = DateTime.UtcNow.AddMilliseconds(TimeoutMs);
+        var segments = ParseExpression(expression);
+        if (segments.Count == 0) { error = "Empty expression"; return null; }
+        // Root must be GameController
+        if (segments[0].Name != "GameController") { error = "Expression must start with 'GameController'"; return null; }
+        if (segments[0].HasIndexer || segments[0].IsMethodCall) { error = "GameController can't be indexed or called"; return null; }
+
+        object? current = _gc;
+        for (int i = 1; i < segments.Count; i++)
+        {
+            var seg = segments[i];
+            if (DateTime.UtcNow > deadline) { error = $"Evaluation timed out at segment '{seg.Name}'"; return null; }
+            if (current == null) { error = $"Null reference at segment '{seg.Name}' (after '{segments[i - 1].Name}')"; return null; }
+
+            var currentType = current.GetType();
+            if (!IsTypeAllowed(currentType)) { error = $"Type '{currentType.FullName}' is not in the allowed namespace list"; return null; }
+
+            if (seg.IsMethodCall)
+            {
+                current = InvokeMethod(current, currentType, seg, out error);
+                if (error != null) return null;
+            }
+            else
+            {
+                var prop = currentType.GetProperty(seg.Name, BindingFlags.Public | BindingFlags.Instance);
+                if (prop != null && prop.GetIndexParameters().Length == 0) current = prop.GetValue(current);
+                else if (currentType.GetField(seg.Name, BindingFlags.Public | BindingFlags.Instance) is { } field) current = field.GetValue(current);
+                else { error = $"No public property or field '{seg.Name}' on type '{currentType.Name}'"; return null; }
+            }
+
+            if (seg.HasIndexer)
+            {
+                if (current == null) { error = $"'{seg.Name}' returned null"; return null; }
+                current = ApplyIndexer(current, seg.IndexerValue!, out error);
+                if (error != null) return null;
+            }
+        }
+        return current;
+    }
+
+    /// <summary>
     /// Describe the public members of the type at a given path expression.
     /// </summary>
     public string DescribeType(string expression)
     {
-        var deadline = DateTime.UtcNow.AddMilliseconds(TimeoutMs);
-
         try
         {
-            Type targetType;
-
-            if (expression == "GameController")
-            {
-                targetType = _gc.GetType();
-            }
-            else
-            {
-                var segments = ParseExpression(expression);
-                if (segments.Count == 0)
-                    return Error("Empty expression");
-
-                if (segments[0].Name != "GameController")
-                    return Error("Expression must start with 'GameController'");
-
-                object? current = _gc;
-
-                for (int i = 1; i < segments.Count; i++)
-                {
-                    if (DateTime.UtcNow > deadline)
-                        return Error("Timed out resolving path");
-
-                    if (current == null)
-                        return Error($"Null reference at '{segments[i].Name}'");
-
-                    var seg = segments[i];
-                    var currentType = current.GetType();
-
-                    if (seg.IsMethodCall)
-                    {
-                        current = InvokeMethod(current, currentType, seg, out var error);
-                        if (error != null) return Error(error);
-                    }
-                    else
-                    {
-                        var prop = currentType.GetProperty(seg.Name, BindingFlags.Public | BindingFlags.Instance);
-                        if (prop != null)
-                            current = prop.GetValue(current);
-                        else
-                        {
-                            var field = currentType.GetField(seg.Name, BindingFlags.Public | BindingFlags.Instance);
-                            if (field != null)
-                                current = field.GetValue(current);
-                            else
-                                return Error($"No public member '{seg.Name}' on '{currentType.Name}'");
-                        }
-                    }
-                }
-
-                if (current == null)
-                    return Error("Terminal value is null");
-
-                targetType = current.GetType();
-            }
-
-            return DescribeTypeMembers(targetType, expression);
+            var current = Resolve(expression, out var error);
+            if (error != null) return Error(error);
+            if (current == null) return Error("Terminal value is null");
+            return DescribeTypeMembers(current.GetType(), expression);
         }
         catch (Exception ex)
         {
@@ -375,7 +297,7 @@ public class ExpressionWalker
         return null;
     }
 
-    private static Type? ResolveComponentType(string typeName)
+    internal static Type? ResolveComponentType(string typeName)
     {
         if (_componentTypeCache == null)
         {
@@ -461,7 +383,7 @@ public class ExpressionWalker
 
     // ── Type safety ────────────────────────────────────────────────────
 
-    private static bool IsTypeAllowed(Type type)
+    internal static bool IsTypeAllowed(Type type)
     {
         var ns = type.Namespace;
         if (ns == null) return false;
@@ -670,7 +592,7 @@ public class ExpressionWalker
         return result.ToString(Formatting.None);
     }
 
-    private static string FormatTypeName(Type type)
+    internal static string FormatTypeName(Type type)
     {
         if (type.IsGenericType)
         {
