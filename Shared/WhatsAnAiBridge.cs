@@ -232,7 +232,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
     {
         // Structured methods (named params, stateless): stats.*, recording.* and hud.*
         var structured = ProcessStatsMethod(method, parameters) ?? ProcessRecordingMethod(method, parameters)
-                         ?? ProcessHudMethod(method, parameters) ?? ProcessScriptMethod(method, parameters);
+                         ?? ProcessHudMethod(method, parameters) ?? ProcessIntrospectionMethod(method, parameters)
+                         ?? ProcessScriptMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
