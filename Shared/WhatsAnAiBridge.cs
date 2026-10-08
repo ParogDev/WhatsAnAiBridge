@@ -234,7 +234,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         var structured = ProcessStatsMethod(method, parameters) ?? ProcessRecordingMethod(method, parameters)
                          ?? ProcessHudMethod(method, parameters) ?? ProcessIntrospectionMethod(method, parameters)
                          ?? ProcessScriptMethod(method, parameters) ?? ProcessMapMethod(method, parameters)
-                         ?? ProcessExploreMethod(method, parameters);
+                         ?? ProcessExploreMethod(method, parameters) ?? ProcessMemoryMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
