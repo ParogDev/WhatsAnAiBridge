@@ -39,7 +39,7 @@ public partial class WhatsAnAiBridge
             case "hud.plugins":
                 return Serialize(ListSourcePlugins());
             case "hud.reload_plugin":
-                return Serialize(QueueReload(p?["name"]?.Value<string>()));
+                return Serialize(QueueReload(p?["name"]?.Value<string>(), p?["force"]?.Value<bool>() == true));
             case "hud.reload_status":
                 return Serialize(new ReloadStatusResponse
                 {
@@ -88,12 +88,21 @@ public partial class WhatsAnAiBridge
                 Error = kv.Value.Length > 4000 ? kv.Value[..4000] + " ..." : kv.Value,
             }).ToList(),
             ReloadEnabled = Settings.AllowPluginReload.Value,
+            AvoidLockingDllFiles = AvoidLockingDllFiles,
         };
     }
 
+    /// <summary>
+    /// HUD core setting "Avoid locking plugin dlls" (Core > Plugin Settings, default off on both HUDs). Off: plugin DLLs are loaded from
+    /// their file, which stays locked, so recompiling changed code can't replace it - and the HUD has
+    /// already unloaded the plugin by then. On: loaded from a memory stream, reloads always work.
+    /// It applies to plugins loaded after it is turned on.
+    /// </summary>
+    private bool AvoidLockingDllFiles => GameController.Settings.CoreSettings.PluginSettings.AvoidLockingDllFiles.Value;
+
     // ── Reloading ────────────────────────────────────────────────────
 
-    private ReloadQueuedResponse QueueReload(string? name)
+    private ReloadQueuedResponse QueueReload(string? name, bool force)
     {
         if (!Settings.AllowPluginReload.Value)
             return new ReloadQueuedResponse { Error = "reload_disabled", Message = "Enable 'Allow plugin reload requests' in the bridge settings." };
@@ -118,6 +127,16 @@ public partial class WhatsAnAiBridge
         if (string.Equals(Path.GetFullPath(DirectoryFullName).TrimEnd('\\'), Path.GetFullPath(Path.Combine(pm.SourcePluginDirectoryPath, folder)).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)
             || Same(folder, Name))
             return new ReloadQueuedResponse { Error = "cannot_reload_self", Message = "The bridge can't reload itself while serving the request; restart the HUD instead." };
+        if (loaded != null && !AvoidLockingDllFiles && !force)
+            return new ReloadQueuedResponse
+            {
+                Error = "dll_locked",
+                Plugin = folder,
+                Message = "The HUD setting Core > Plugin Settings > 'Avoid locking plugin dlls' is off, so this plugin's DLL is locked: " +
+                          "reloading changed code would fail and leave the plugin unloaded until a HUD restart. Turn the setting on " +
+                          "and restart the HUD once (it applies to plugins loaded afterwards), or restart the HUD to pick up the edit. " +
+                          "force=true reloads anyway (fine when the code is unchanged).",
+            };
         if (_pendingReloads.Any(r => r.Folder == folder))
             return new ReloadQueuedResponse { Queued = true, Plugin = folder, Message = "Already queued." };
 
@@ -177,6 +196,8 @@ public class HudPluginsResponse
     [JsonProperty("loaded")] public List<HudPluginDto> Loaded { get; set; } = new();
     [JsonProperty("failed")] public List<HudFailedPluginDto> Failed { get; set; } = new();
     [JsonProperty("reloadEnabled")] public bool ReloadEnabled { get; set; }
+    /// <summary>HUD core setting; reloads of changed code need it on (see WhatsAnAiBridge.AvoidLockingDllFiles).</summary>
+    [JsonProperty("avoidLockingDllFiles")] public bool AvoidLockingDllFiles { get; set; }
     [JsonProperty("error", NullValueHandling = NullValueHandling.Ignore)] public string? Error { get; set; }
 }
 
