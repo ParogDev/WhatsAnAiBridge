@@ -14,11 +14,11 @@ namespace WhatsAnAiBridge;
 ///   hud   = what plugins draw: the HUD's camera snapshot and its cached Render position (Camera.Snapshot, Render.Pos);
 ///   fresh = the same camera matrix and position read from the game right now, bypassing the page cache.
 /// The pixel distance between the two is how far the HUD's drawing is from where the game currently has the target,
-/// split into the camera's share and the position's share. With draw=true it also marks both on screen (fresh: accent
-/// cross, HUD: grey ring) for screenshots.
+/// split into the camera's share and the position's share. With draw=true it also marks both on screen (fresh: cyan
+/// square, HUD: magenta square; pure colours for tools/fidelity) for screenshots. path= tracks other entities.
 /// Offsets are not hard-coded: at start the matrix and the position are located in fresh bytes by matching the HUD's own
 /// values (camera +0x100 and Render +0x138 on PoE2 in 2026-10). If a match is lost the start fails naming that link.
-/// Read-only (game memory reads like any HUD read; nothing patched). tracker.start {durationMs?, entities?, draw?} -> {id};
+/// Read-only (game memory reads like any HUD read; nothing patched). tracker.start {durationMs?, entities?, draw?, path?} -> {id};
 /// tracker.result {id}; tracker.stop.
 /// </summary>
 public partial class WhatsAnAiBridge
@@ -68,7 +68,11 @@ public partial class WhatsAnAiBridge
         using (m.DisableCaching()) camBytes = m.ReadBytes(cam.Address, 0x400);
         var camOff = FindFloats(camBytes, MatrixFloats(snap.Matrix), 1e-3f);
         if (camOff < 0) return Err("calibration_failed", $"Camera matrix not found in the first 0x400 bytes of Camera @0x{cam.Address:X} (does Camera.Snapshot.Matrix still come from the camera struct?)");
-        var players = GameController.EntityListWrapper.ValidEntitiesByType.TryGetValue(EntityType.Player, out var list) ? list : [];
+        // Players by default (they move); path= tracks any entity whose metadata path contains it (static anchors).
+        var pathFilter = p?["path"]?.Value<string>();
+        IEnumerable<Entity> players = string.IsNullOrWhiteSpace(pathFilter)
+            ? GameController.EntityListWrapper.ValidEntitiesByType.TryGetValue(EntityType.Player, out var list) ? list : []
+            : GameController.Entities.Where(e => e.Path?.Contains(pathFilter, StringComparison.OrdinalIgnoreCase) == true);
         var job = new TrackerJob { Id = Guid.NewGuid().ToString("N")[..10], Until = DateTime.UtcNow.AddMilliseconds(duration), Draw = p?["draw"]?.Value<bool>() ?? false, CamOffset = camOff, CamAddress = cam.Address, PosOffset = -1 };
         foreach (var e in players.OrderBy(e => e.DistancePlayer).Take(max))
         {
@@ -84,7 +88,7 @@ public partial class WhatsAnAiBridge
             }
             job.Targets.Add((e, r, e.RenderName ?? e.Path ?? "?"));
         }
-        if (job.Targets.Count == 0) return Err("no_targets", "No players nearby to track (the tracker follows the nearest players, including yours).");
+        if (job.Targets.Count == 0) return Err("no_targets", string.IsNullOrWhiteSpace(pathFilter) ? "No players nearby to track (the tracker follows the nearest players, including yours)." : $"No entity whose path contains '{pathFilter}' is loaded.");
         _tracker = job;
         return new JObject
         {
@@ -140,11 +144,10 @@ public partial class WhatsAnAiBridge
                 job.PositionPart.Add(Vector2.Distance(hud, snap.WorldToScreen(fresh[i].pos)));
                 if (job.Draw)
                 {
-                    dl.AddCircle(hud, 7, ImGui.GetColorU32(new Vector4(0.75f, 0.75f, 0.75f, 0.9f)), 16, 1.5f);
-                    var c = ImGui.GetColorU32(new Vector4(1f, 0.62f, 0.15f, 1f));
-                    dl.AddLine(now - new Vector2(6, 0), now + new Vector2(6, 0), c, 1.5f);
-                    dl.AddLine(now - new Vector2(0, 6), now + new Vector2(0, 6), c, 1.5f);
-                    if (Vector2.Distance(hud, now) > 1.5f) dl.AddLine(hud, now, c, 1f);
+                    // Pure colours a screenshot tool can find: magenta = the HUD's projection 6 px above the point, cyan = fresh 6 px
+                    // below (apart, so neither hides the other; tools/fidelity measures drift relative to the first frame).
+                    dl.AddRectFilled(hud - new Vector2(2, 8), hud + new Vector2(3, -3), ImGui.GetColorU32(new Vector4(1f, 0f, 1f, 1f)));
+                    dl.AddRectFilled(now - new Vector2(2, -4), now + new Vector2(3, 9), ImGui.GetColorU32(new Vector4(0f, 1f, 1f, 1f)));
                 }
             }
             if (anyPosStale) job.FramesPositionStale++;
