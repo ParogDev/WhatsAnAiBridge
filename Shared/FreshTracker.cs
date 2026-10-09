@@ -18,7 +18,7 @@ namespace WhatsAnAiBridge;
 /// square, HUD: magenta square; pure colours for tools/fidelity) for screenshots. path= tracks other entities.
 /// Offsets are not hard-coded: at start the matrix and the position are located in fresh bytes by matching the HUD's own
 /// values (camera +0x100 and Render +0x138 on PoE2 in 2026-10). If a match is lost the start fails naming that link.
-/// Read-only (game memory reads like any HUD read; nothing patched). tracker.start {durationMs?, entities?, draw?, path?, entityId?, delayMs?} -> {id};
+/// Read-only (game memory reads like any HUD read; nothing patched). tracker.start {durationMs?, entities?, draw?, path?, entityId?, delayMs?, delays?: [ms, up to 3]} -> {id};
 /// tracker.result {id}; tracker.stop.
 /// </summary>
 public partial class WhatsAnAiBridge
@@ -29,6 +29,7 @@ public partial class WhatsAnAiBridge
         public DateTime Until;
         public bool Draw;
         public double DelayMs;   // cyan marker shows the fresh state from this long ago (game image latency compensation)
+        public double[] ExtraDelays = [];   // up to 3 more markers (yellow, green, blue) at these delays: one pan calibrates them all
         public readonly List<(long t, Matrix4x4 m, Vector3[] pos)> History = new();
         public int CamOffset, PosOffset;
         public long CamAddress;
@@ -77,7 +78,7 @@ public partial class WhatsAnAiBridge
             : string.IsNullOrWhiteSpace(pathFilter)
             ? GameController.EntityListWrapper.ValidEntitiesByType.TryGetValue(EntityType.Player, out var list) ? list : []
             : GameController.Entities.Where(e => e.Path?.Contains(pathFilter, StringComparison.OrdinalIgnoreCase) == true);
-        var job = new TrackerJob { Id = Guid.NewGuid().ToString("N")[..10], Until = DateTime.UtcNow.AddMilliseconds(duration), Draw = p?["draw"]?.Value<bool>() ?? false, DelayMs = Math.Clamp(p?["delayMs"]?.Value<double>() ?? 0, 0, 100), CamOffset = camOff, CamAddress = cam.Address, PosOffset = -1 };
+        var job = new TrackerJob { Id = Guid.NewGuid().ToString("N")[..10], Until = DateTime.UtcNow.AddMilliseconds(duration), Draw = p?["draw"]?.Value<bool>() ?? false, DelayMs = Math.Clamp(p?["delayMs"]?.Value<double>() ?? 0, 0, 100), ExtraDelays = (p?["delays"] as JArray)?.Select(x => Math.Clamp(x.Value<double>(), 0, 100)).Take(3).ToArray() ?? [], CamOffset = camOff, CamAddress = cam.Address, PosOffset = -1 };
         foreach (var e in players.OrderBy(e => e.DistancePlayer).Take(max))
         {
             var r = e.GetComponent<Render>();
@@ -158,6 +159,15 @@ public partial class WhatsAnAiBridge
                     dl.AddRectFilled(hud - new Vector2(2, 8), hud + new Vector2(3, -3), ImGui.GetColorU32(new Vector4(1f, 0f, 1f, 1f)));
                     var shown = delayedPos == null ? now : Project(delayedM, half, delayedPos[i]);
                     dl.AddRectFilled(shown - new Vector2(2, -4), shown + new Vector2(3, 9), ImGui.GetColorU32(new Vector4(0f, 1f, 1f, 1f)));
+                    // Extra delays: yellow 8 px left, green 8 px right, blue 14 px below (constant offsets: drift is measured
+                    // relative to the first frame).
+                    for (var x = 0; x < job.ExtraDelays.Length; x++)
+                    {
+                        var (xm, xp) = StateAt(job.History, nowT - (long)(job.ExtraDelays[x] * System.Diagnostics.Stopwatch.Frequency / 1000));
+                        var q = Project(xm, half, xp[i]) + (x switch { 0 => new Vector2(-8, 0), 1 => new Vector2(8, 0), _ => new Vector2(0, 14) });
+                        var col = x switch { 0 => new Vector4(1f, 1f, 0f, 1f), 1 => new Vector4(0f, 1f, 0f, 1f), _ => new Vector4(0f, 0f, 1f, 1f) };
+                        dl.AddRectFilled(q - new Vector2(2, 2), q + new Vector2(3, 3), ImGui.GetColorU32(col));
+                    }
                 }
             }
             if (anyPosStale) job.FramesPositionStale++;
