@@ -196,6 +196,8 @@ public class WhatsAnAiBridgeSettingsUi
         SectionHeader(dl, x, ref y, "Agent Guide");
         Toggle("cb_ag", s.ShowAgentGuide, dl, x, cx, ref y,
             "Show Agent Guide", "In-game card with what the agent asks you to do next, plus its log. Hides itself when idle");
+        Hotkey("cb_lk", s.AgentLogHotkey, dl, x, cx, ref y,
+            "Agent Log Hotkey (toggle)", "Opens the recent agent log under the card to select and copy lines. None: the log only shows as toasts");
 
         SectionHeader(dl, x, ref y, "Query Limits");
         IntSlider("cb_er", s.MaxEntityRange, dl, x, cx, ref y, sw,
@@ -493,6 +495,35 @@ public class WhatsAnAiBridgeSettingsUi
 
         ImGui.PopStyleVar(2);
         ImGui.PopStyleColor(3);
+        y += RowText;
+    }
+
+    /// <summary>
+    /// A hotkey row: the HUD's own picker (HotkeyNodeV2.DrawPickerButton: press a key, tick modifiers, Clear, Esc)
+    /// behind a button styled like the text input. The button shows the current key, or "None".
+    /// </summary>
+    private void Hotkey(string key, HotkeyNodeV2 node, ImDrawListPtr dl,
+        float x, float cx, ref float y, string label, string desc)
+    {
+        dl.AddText(new Vector2(x + 6, y + 1), Label, label);
+        dl.AddText(new Vector2(x + 6, y + 16), Desc, desc);
+
+        ImGui.SetCursorScreenPos(new Vector2(cx, y + 3));
+        ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.07f, 0.07f, 0.09f, 1f));
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0f, 0.50f, 0.52f, 0.35f));
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0f, 0.81f, 0.82f, 0.45f));
+        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.88f, 0.88f, 0.88f, 1f));
+        ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(0f, 0.50f, 0.52f, 0.6f));
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 3f);
+        ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f);
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(12, 3));
+
+        // "###" keeps the ImGui id stable while the label (the key name) changes; the picker's popup shares it.
+        var caption = node.Value.Mode == HotkeyNodeV2.HotkeyNodeMode.None ? "None - click to set" : node.Value.ToString();
+        node.DrawPickerButton($"{caption}###{key}");
+
+        ImGui.PopStyleVar(3);
+        ImGui.PopStyleColor(5);
         y += RowText;
     }
 
