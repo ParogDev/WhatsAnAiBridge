@@ -58,8 +58,10 @@ public partial class WhatsAnAiBridge
     {
         if (p?["stop"]?.Value<bool>() == true || p?["steps"] is not JArray steps)
         {
-            lock (_flowLock) { if (_flow.Status == "running") _flow.Status = "stopped"; _flow.Rev++; }
+            bool wasRunning;
+            lock (_flowLock) { wasRunning = _flow.Status == "running"; if (wasRunning) _flow.Status = "stopped"; _flow.Rev++; }
             HighlightSet(new JObject { ["clear"] = true });
+            if (wasRunning) GuideSet(new JObject { ["clear"] = true });   // the card showed the flow: don't leave its instruction behind
             return FlowStateJson();
         }
         var flow = new FlowState { Title = Clip(p["title"]?.ToString(), 80), Goal = p["goal"], Status = "running", StartedAt = DateTime.UtcNow };
