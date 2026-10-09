@@ -51,6 +51,7 @@ public partial class WhatsAnAiBridge
         public DateTime? FinishedAt;
         public string? StartedFrom;        // hud | agent
         public bool Collected;
+        public bool Chain;                 // starts by itself when the previous step of the same experiment is captured
         public string? Error;
         public List<QueuedCapture> Captures = new();
     }
@@ -128,7 +129,7 @@ public partial class WhatsAnAiBridge
         {
             Id = Guid.NewGuid().ToString("N")[..10], Experiment = experiment, Label = Clip(p?["label"]?.ToString(), 40) ?? "step",
             Instruction = instruction!, Title = Clip(p?["title"]?.ToString(), 80), Note = Clip(p?["note"]?.ToString(), 300),
-            By = Clip(p?["by"]?.ToString(), 40), Watch = watch,
+            By = Clip(p?["by"]?.ToString(), 40), Watch = watch, Chain = p?["chain"]?.Value<bool>() == true,
             Repeats = Math.Clamp(p?["repeats"]?.Value<int>() ?? 1, 1, 10),
             SettleMs = Math.Clamp(p?["settleMs"]?.Value<int>() ?? 500, 100, 5000),
             TimeoutMs = Math.Clamp(p?["timeoutMs"]?.Value<int>() ?? 120_000, 5_000, 600_000),
@@ -157,7 +158,7 @@ public partial class WhatsAnAiBridge
     private static JObject StepSummary(QueuedStep s) => new()
     {
         ["id"] = s.Id, ["experiment"] = s.Experiment, ["label"] = s.Label, ["instruction"] = s.Instruction, ["title"] = s.Title,
-        ["note"] = s.Note, ["by"] = s.By, ["watch"] = new JArray(s.Watch), ["repeats"] = s.Repeats, ["status"] = s.Status,
+        ["note"] = s.Note, ["by"] = s.By, ["chain"] = s.Chain, ["watch"] = new JArray(s.Watch), ["repeats"] = s.Repeats, ["status"] = s.Status,
         ["captured"] = s.Captures.Count, ["queuedAt"] = s.QueuedAt.ToString("O"), ["startedAt"] = s.StartedAt?.ToString("O"),
         ["finishedAt"] = s.FinishedAt?.ToString("O"), ["startedFrom"] = s.StartedFrom, ["collected"] = s.Collected, ["error"] = s.Error,
     };
@@ -320,6 +321,11 @@ public partial class WhatsAnAiBridge
         }
         GuideSet(new JObject { ["status"] = status == "captured" ? "captured" : "failed", ["detail"] = detail });
         if (status != "captured") GuideLog(new JObject { ["text"] = $"'{step.Label}': {detail}", ["kind"] = "warn" });
+        if (status != "captured") return;
+        // A chained follow-up of the same experiment starts at once: the user pressed Start once for the whole series.
+        QueuedStep? next;
+        lock (_queueLock) next = Queue().FirstOrDefault(s => s.Status == "queued");
+        if (next is { Chain: true } && next.Experiment == step.Experiment) QueueStart(next.Id, "chain");
     }
 
     /// <summary>One capture of every watch spec: the same responses the MCP gets for eval / memory.read / memory.collect.</summary>
