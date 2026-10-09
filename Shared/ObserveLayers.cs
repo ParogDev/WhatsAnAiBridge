@@ -271,9 +271,12 @@ public partial class WhatsAnAiBridge
         e["off"] = unit; e["len"] = len;
         if (len <= 8)
         {
-            var al = off & ~3;
+            // i64 of the aligned 8 bytes whenever the change fits in them, plus i32 when it fits in an aligned 4: a series
+            // (MCP observe_series) needs one width for every change of a unit, and which bytes change varies.
+            var al = off & ~3; var al8 = off & ~7;
             if (off + len <= al + 4 && al + 4 <= l.Size) e["i32"] = $"{BitConverter.ToInt32(l.Prev, al)} -> {BitConverter.ToInt32(l.Now, al)}";
-            else if (al + 8 <= l.Size && off + len <= al + 8) e["i64"] = $"{BitConverter.ToInt64(l.Prev, al)} -> {BitConverter.ToInt64(l.Now, al)}";
+            if (off + len <= al8 + 8 && al8 + 8 <= l.Size) e["i64"] = $"{BitConverter.ToInt64(l.Prev, al8)} -> {BitConverter.ToInt64(l.Now, al8)}";
+            else if (e["i32"] == null && al + 8 <= l.Size && off + len <= al + 8) e["i64"] = $"{BitConverter.ToInt64(l.Prev, al)} -> {BitConverter.ToInt64(l.Now, al)}";
         }
         Emit(l, e);
     }
