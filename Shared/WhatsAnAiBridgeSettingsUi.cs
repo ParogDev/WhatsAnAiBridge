@@ -212,6 +212,8 @@ public class WhatsAnAiBridgeSettingsUi
             "Allow Plugin Reload Requests", "Let bridge clients recompile a source plugin in place, like its Reload button");
         Toggle("cb_cs", s.AllowCSharpScripts, dl, x, cx, ref y,
             "Allow C# Scripts", "Let bridge clients (AI agents) run C# inside the HUD. Arbitrary code: enable only while you want it");
+        Toggle("cb_hi", s.AllowHudInstrumentation, dl, x, cx, ref y,
+            "Allow HUD Instrumentation", "Let bridge clients time the HUD's render pipeline for a few seconds (patches the HUD's own code, never the game)");
 
         SectionHeader(dl, x, ref y, "Recording");
         IntSlider("cb_ri", s.RecordingIntervalMs, dl, x, cx, ref y, sw,

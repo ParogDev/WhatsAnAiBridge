@@ -62,6 +62,14 @@
       <Private>False</Private>
     </Reference>
     <PackageReference Include="ImGui.NET" Version="1.90.0.1" />
+    <!-- Runtime patching of the HUD's own unprotected managed code for pipeline.trace (Shared\PipelineTrace.cs). MIT. -->
+    <PackageReference Include="Lib.Harmony" Version="2.4.2" GeneratePathProperty="true" />
+  </ItemGroup>
+  <!-- A class library does not copy NuGet assemblies to its output, and the HUDs load a plugin's dependencies from its
+       output folder (<name>.dll next to the plugin): copy 0Harmony there. The other packages ship with the HUDs. -->
+  <ItemGroup Condition="'$(PkgLib_Harmony)' != ''">
+    <None Include="$(PkgLib_Harmony)\lib\$(TargetFramework.Replace('-windows', ''))\0Harmony.dll" Link="0Harmony.dll"
+          CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
   <!-- Roslyn scripting for script.run (Shared\ScriptRunner.cs): both HUDs ship these DLLs. -->
   <ItemGroup>

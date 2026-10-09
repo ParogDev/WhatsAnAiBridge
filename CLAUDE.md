@@ -82,6 +82,10 @@ Offsets move and HUD APIs change with patches. Code that looks things up must sa
   - **No globals type:** Roslyn needs a file-backed assembly for one, and plugin assemblies load from memory when the HUD avoids locking DLLs.
   - **Caching:** identical code reuses its compiled script.
   - **CI:** the runner's reference set includes the Roslyn DLLs (scaffolding `tools/ci/sync-hud-refs.ps1`).
+- `pipeline.trace {durationMs?, entities?}` / `pipeline.trace_result {id}` (`Shared/PipelineTrace.cs`): times the HUD render pipeline for the render-fidelity research (MCP `pipeline_trace`).
+  - **Off by default** (setting *Allow HUD Instrumentation*). For the trace only, Harmony (Lib.Harmony, copied next to the compiled plugin by the .csproj and loaded into the default load context: it cannot load into the collectible plugin context) patches the HUD's own unprotected code: `ImGuiRenderer.Update` / `Render`, `Overlay.ReplaceFontIfRequired` (the first call after Present: Vortice's Present is a calli and the PoE2 HUD's `PostFrame` is protected), every plugin's `Render`. Then `UnpatchAll`.
+  - **Memory reads are wrapped, not patched** (PoE2's backends are obfuscated; Harmony's IL copy fails): `Memory.CustomBackend` gets a timing wrapper over the paged backend, and the paged backend's leaf field another; both are restored at the end. Refused when the HUD is showing a snapshot.
+  - **Never patch a protected method**: `TraceIsStub` refuses the IL stubs (patching one hangs the HUD). Every target that could not be instrumented is listed in `patches.refused`, and `calls` counts each hook so a hook that is never hit names the broken link.
 - `object.explore {path, offset, limit, csharp?}` (`Shared/ObjectExplorer.cs`) returns one level of the object model at a walker path, for mapping data out:
   - **For the node and each child:** type, kind, a one-line preview (structs as `X=1 Y=2`, objects with their Name/RenderName and visibility), counts, the walker `path`, and null-safe `csharp`. Dictionaries with enum keys get typed keys (`Stats?[GameStat.MaximumLife]`).
   - **Entities** also list their components, as `GetComponent<T>()` paths.
