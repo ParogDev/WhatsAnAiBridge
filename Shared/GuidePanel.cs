@@ -41,8 +41,27 @@ public partial class WhatsAnAiBridge
         public string? LastError;
     }
 
-    /// <summary>The queue as the panel sees it this frame: the next step to offer, the one recording, how many wait.</summary>
-    private readonly record struct QueueView(QueuedStep? Next, QueuedStep? Running, int QueuedCount);
+    /// <summary>
+    /// The queue as the panel sees it this frame: the next step to offer, the one recording, how many wait, how many
+    /// chained steps of the same experiment follow Next (they start by themselves), and whether Next itself will
+    /// start by itself once the running step is captured.
+    /// </summary>
+    private readonly record struct QueueView(QueuedStep? Next, QueuedStep? Running, int QueuedCount, int ChainAfterNext, bool NextAuto);
+
+    private static QueueView QueueViewOf(List<QueuedStep> open)
+    {
+        var next = open.FirstOrDefault(s => s.Status == "queued");
+        var running = open.FirstOrDefault(s => s.Status == "running");
+        var chain = 0;
+        if (next != null)
+            foreach (var s in open.Where(s => s.Status == "queued").SkipWhile(s => s != next).Skip(1))
+            {
+                if (!s.Chain || s.Experiment != next.Experiment) break;
+                chain++;
+            }
+        var auto = running != null && next is { Chain: true } && next.Experiment == running.Experiment;
+        return new QueueView(next, running, open.Count(s => s.Status == "queued"), chain, auto);
+    }
 
     private readonly GuideUiState _guideUi = new();
 
@@ -69,9 +88,7 @@ public partial class WhatsAnAiBridge
 
         var g = GuideSnapshot();
         // Once per frame: it takes the queue lock. Open steps only, in queue order.
-        var open = QueueSnapshot();
-        var q = new QueueView(open.FirstOrDefault(s => s.Status == "queued"), open.FirstOrDefault(s => s.Status == "running"),
-            open.Count(s => s.Status == "queued"));
+        var q = QueueViewOf(QueueSnapshot());
         var now = ImGui.GetTime();
         var utc = DateTime.UtcNow;
         ObserveGuide(g, q, now);
@@ -521,9 +538,10 @@ public partial class WhatsAnAiBridge
     // ── Queue ────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The step at the front of the queue, offered to the user: the instruction, who asked and when, what will be
-    /// recorded, and Start / Skip. Calm on purpose (neutral frame, no pulse, one accent button): the user is not
-    /// required to act now, and nothing is recorded until Start.
+    /// The step at the front of the queue, offered to the user as two numbered steps: 1 is the Start button itself,
+    /// 2 is the instruction, dimmed and prefixed "Then:" so it reads as what comes AFTER Start. (The first live run
+    /// failed because the big instruction read as "do this now": the user did it, then pressed Start, and the baseline
+    /// already held the change.) Calm on purpose: neutral frame, no pulse, one accent control; nothing records before Start.
     /// </summary>
     private void DrawQueueCard(in QueueView q, PanelTheme th, double now, DateTime utc)
     {
@@ -532,7 +550,6 @@ public partial class WhatsAnAiBridge
         var font = ImGui.GetFont();
         var f = ImGui.GetFontSize();
         var small = f * 0.85f;
-        var mid = MathF.Round(f * 1.2f);
         var tone = ToneNeutral;
         var p = ImGui.GetCursorScreenPos();
         var x0 = p.X + GuideEdge;
@@ -542,20 +559,26 @@ public partial class WhatsAnAiBridge
         var headH = f + 12;
         var btnH = f + 10;
         const float specIndent = 14f;
+        const float stepIndent = 26f;        // room for the numbered badge
+        var stepW = innerW - stepIndent;
 
         // Text, then measure: the card background needs the full height.
-        var meta = QueueMetaLine(next, utc);
+        var meta = QueueMetaLine(next, q.ChainAfterNext, utc);
         var watchText = "Will record: " + string.Join(", ", next.Watch.Select(QueueWatchSummary));
-        const string hint = "Nothing is recorded until you press Start, then do it.";
-        var instrSize = font.CalcTextSizeA(mid, float.MaxValue, innerW, next.Instruction);
+        const string startNote = "first - records from then on";
+        var thenText = "Then: " + next.Instruction;
+        const string thenSub = "Only once the card says DO THIS NOW.";
+        var thenSize = font.CalcTextSizeA(f, float.MaxValue, stepW, thenText);
+        var thenSubSize = font.CalcTextSizeA(small, float.MaxValue, stepW, thenSub);
         var noteSize = next.Note != null ? font.CalcTextSizeA(f, float.MaxValue, innerW, next.Note) : default;
         var specSizes = _guideUi.QueueWatchOpen
             ? next.Watch.Select(s => font.CalcTextSizeA(small, float.MaxValue, innerW - specIndent, s)).ToArray() : [];
-        var bodyH = instrSize.Y + 4 + small + 6
+        var bodyH = btnH + 8
+                    + thenSize.Y + 2 + thenSubSize.Y + 8
                     + (next.Note != null ? noteSize.Y + 4 : 0)
-                    + f + 4 + specSizes.Sum(s => s.Y + 2)
-                    + small + 8 + btnH;
-        var h = headH + bodyH + 10;
+                    + small + 6
+                    + f + 4 + specSizes.Sum(s => s.Y + 2);
+        var h = headH + bodyH + 8;
         var min = new Vector2(x0, p.Y + GuideEdge);
         var max = new Vector2(x0 + w, p.Y + GuideEdge + h);
 
@@ -588,18 +611,42 @@ public partial class WhatsAnAiBridge
         var title = next.Title ?? $"{next.Experiment}: {next.Label}";
         if (rx - x > 40) dl.AddText(new Vector2(x, hy - f * 0.5f), U(th.TextDim), GuideClipText(title, rx - x));
 
-        // Body
+        // Body. Step 1: the Start button, with Skip at the far right of the same row.
         var y = min.Y + headH + 2;
         var bx = min.X + pad;
-        dl.AddText(font, mid, new Vector2(bx, y), U(th.Text), next.Instruction, innerW);
-        y += instrSize.Y + 4;
-        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim), GuideClipText(meta, innerW));
-        y += small + 6;
+        var sx = bx + stepIndent;
+        DrawQueueBadge(dl, new Vector2(bx + 8, y + btnH * 0.5f), "1", true, th);
+        var series = q.ChainAfterNext > 0 ? $" One Start runs all {q.ChainAfterNext + 1} steps in a row." : "";
+        var startW = QueuePillButton(dl, "##queue_start", new Vector2(sx, y), btnH, "Start recording", true, th, out var startClick,
+            "Starts recording. The card then says DO THIS NOW - do the action at that point, not before." + series);
+        if (startClick)
+        {
+            var r = QueueStart(next.Id, "hud");
+            if (r["error"] != null) LogError($"[GuidePanel] start refused: {r["error"]} {r["message"]}");
+        }
+        var skipW = ImGui.CalcTextSize("Skip").X + 24;
+        QueuePillButton(dl, "##queue_skip", new Vector2(max.X - pad - skipW, y), btnH, "Skip", false, th, out var skipClick,
+            "Skip this step. It is marked cancelled; an agent can queue it again.");
+        if (skipClick) QueueCancel(next.Id);
+        var noteX = sx + startW + 10;
+        var noteW = max.X - pad - skipW - 10 - noteX;
+        if (noteW > 40) dl.AddText(new Vector2(noteX, y + (btnH - f) * 0.5f), U(th.Text, 0.9f), GuideClipText(startNote, noteW));
+        y += btnH + 8;
+
+        // Step 2: the instruction, dimmed - it is what comes after Start, not what to do now.
+        DrawQueueBadge(dl, new Vector2(bx + 8, y + f * 0.5f), "2", false, th);
+        dl.AddText(font, f, new Vector2(sx, y), U(th.TextDim), thenText, stepW);
+        y += thenSize.Y + 2;
+        dl.AddText(font, small, new Vector2(sx, y), U(th.TextDim, 0.75f), thenSub, stepW);
+        y += thenSubSize.Y + 8;
+
         if (next.Note != null)
         {
             dl.AddText(font, f, new Vector2(bx, y), U(th.TextDim), next.Note, innerW);
             y += noteSize.Y + 4;
         }
+        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim), GuideClipText(meta, innerW));
+        y += small + 6;
 
         // "Will record" line: a disclosure that opens the exact watch specs, for the developer who wants to know.
         var watchOpen = _guideUi.QueueWatchOpen;
@@ -621,23 +668,27 @@ public partial class WhatsAnAiBridge
                 y += specSizes[i].Y + 2;
             }
 
-        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim, 0.9f), GuideClipText(hint, innerW));
-        y += small + 8;
-
-        // Buttons: Start (the one accented control on the card) and Skip.
-        var startW = QueuePillButton(dl, "##queue_start", new Vector2(bx, y), btnH, "Start recording", true, th, out var startClick,
-            "Start recording now, then do the action above. The agent reads the result later.");
-        if (startClick)
-        {
-            var r = QueueStart(next.Id, "hud");
-            if (r["error"] != null) LogError($"[GuidePanel] start refused: {r["error"]} {r["message"]}");
-        }
-        QueuePillButton(dl, "##queue_skip", new Vector2(bx + startW + 8, y), btnH, "Skip", false, th, out var skipClick,
-            "Skip this step. It is marked cancelled; an agent can queue it again.");
-        if (skipClick) QueueCancel(next.Id);
-
         ImGui.SetCursorScreenPos(p);
         ImGui.Dummy(new Vector2(GuideWidth, h + GuideEdge * 2));
+    }
+
+    /// <summary>16 px numbered badge: filled accent for the step to take now, neutral outline for the one after.</summary>
+    private static void DrawQueueBadge(ImDrawListPtr dl, Vector2 c, string n, bool active, PanelTheme th)
+    {
+        var f = ImGui.GetFontSize();
+        var small = f * 0.85f;
+        var font = ImGui.GetFont();
+        var tw = ImGui.CalcTextSize(n).X * (small / f);
+        if (active)
+        {
+            dl.AddCircleFilled(c, 8f, U(ToneAccent), 20);
+            dl.AddText(font, small, new Vector2(c.X - tw * 0.5f, c.Y - small * 0.5f), U(new Vector4(0.05f, 0.08f, 0.06f, 1f)), n);
+        }
+        else
+        {
+            dl.AddCircle(c, 8f, U(ToneNeutral, 0.8f), 20, 1.3f);
+            dl.AddText(font, small, new Vector2(c.X - tw * 0.5f, c.Y - small * 0.5f), U(th.TextDim), n);
+        }
     }
 
     /// <summary>One line standing in for the queue card while the live card has the user's attention.</summary>
@@ -661,21 +712,25 @@ public partial class WhatsAnAiBridge
         ImGui.SetCursorScreenPos(min);
         ImGui.InvisibleButton("##queue_strip", new Vector2(w, h));
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip($"Queued next: {next.Instruction}\nFinish or dismiss the current step first; this card then offers Start.");
+            ImGui.SetTooltip(q.NextAuto
+                ? $"Then: {next.Instruction}\nStarts by itself once the current step is captured - no Start needed. Wait for DO THIS NOW."
+                : $"Queued next: {next.Instruction}\nFinish or dismiss the current step first; this card then offers Start.");
 
         var hy = min.Y + h * 0.5f;
         var x = min.X + pad;
         DrawQueueGlyph(dl, new Vector2(x + 6, hy), U(ToneNeutral));
         x += 18;
-        const string label = "NEXT";
+        var label = q.NextAuto ? "THEN" : "NEXT";
         dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(ToneNeutral), label);
         x += ImGui.CalcTextSize(label).X * (small / f) + 10;
         var rx = max.X - pad;
-        if (q.QueuedCount > 1)
+        // Right: whether it starts by itself (chained), and how many wait after it.
+        var tail = q.NextAuto ? "starts by itself" + (q.QueuedCount > 1 ? $", +{q.QueuedCount - 1} more" : "")
+                 : q.QueuedCount > 1 ? $"+{q.QueuedCount - 1} more" : null;
+        if (tail != null)
         {
-            var t = $"+{q.QueuedCount - 1} more";
-            var tw = ImGui.CalcTextSize(t).X * (small / f);
-            dl.AddText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(th.TextDim, 0.8f), t);
+            var tw = ImGui.CalcTextSize(tail).X * (small / f);
+            dl.AddText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(th.TextDim, 0.8f), tail);
             rx -= tw + 10;
         }
         if (rx - x > 40) dl.AddText(new Vector2(x, hy - f * 0.5f), U(th.TextDim), GuideClipText(next.Instruction, rx - x));
@@ -725,12 +780,13 @@ public partial class WhatsAnAiBridge
         dl.AddLine(c, new Vector2(c.X + 2.6f, c.Y + 1.2f), col, 1.4f);
     }
 
-    /// <summary>"Claude asked 3h 05m ago - do it 2x": who, when, how many repeats.</summary>
-    private static string QueueMetaLine(QueuedStep s, DateTime utc)
+    /// <summary>"Claude asked 3h 05m ago - do it 2x - then 4 more start by themselves": who, when, repeats, chain.</summary>
+    private static string QueueMetaLine(QueuedStep s, int chainAfter, DateTime utc)
     {
         var who = string.IsNullOrWhiteSpace(s.By) ? "An agent" : s.By;
         var line = $"{who} asked {GuideElapsed(utc - s.QueuedAt)} ago";
         if (s.Repeats > 1) line += $" - do it {s.Repeats}x";
+        if (chainAfter > 0) line += chainAfter == 1 ? " - then 1 more starts by itself" : $" - then {chainAfter} more start by themselves";
         return line;
     }
 
