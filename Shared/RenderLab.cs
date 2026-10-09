@@ -63,6 +63,7 @@ public partial class WhatsAnAiBridge
             return LabStateJson();
         }),
         "lab.state" => SafeMemory(LabStateJson),
+        "lab.compare_paths" => SafeMemory(() => ComparePaths(p)),
         _ => null,
     };
 
