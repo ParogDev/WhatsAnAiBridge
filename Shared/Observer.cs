@@ -82,10 +82,11 @@ public partial class WhatsAnAiBridge
 
     private string? ProcessObserveMethod(string method, JToken? p) => method switch
     {
-        "observe.start" => SafeMemory(() => ObserveSet(true)),
+        "observe.start" => SafeMemory(() => { SrvConfigure(p?["server"] as JArray); return ObserveSet(true); }),
         "observe.stop" => SafeMemory(() => ObserveSet(false)),
         "observe.status" => SafeMemory(ObserveStatus),
         "observe.events" => SafeMemory(() => ObserveEvents(p)),
+        "observe.server_map" => SafeMemory(() => ServerMap(p)),
         _ => null,
     };
 
@@ -116,6 +117,7 @@ public partial class WhatsAnAiBridge
                 ["ok"] = true, ["enabled"] = s.Enabled, ["since"] = s.Since?.ToString("O"), ["seq"] = _obsSeq,
                 ["counts"] = JObject.FromObject(_obsEvents.GroupBy(e => e["kind"]!.ToString()).ToDictionary(g => g.Key, g => g.Count())),
                 ["unmappedPanelsSeen"] = _obsUnmappedSeen.Count, ["entityTypesSeen"] = _obsEntityTypes.Count,
+                ["server"] = ServerLayerStatus(),
                 ["journal"] = Path.Combine(ObsDir, "journal.jsonl"),
             };
         }
@@ -139,13 +141,27 @@ public partial class WhatsAnAiBridge
         {
             e["seq"] = ++_obsSeq;
             e["at"] = DateTime.UtcNow.ToString("O");
+            // One clock and frame number for every layer, so events from different layers can be lined up.
+            e["t"] = Math.Round(ObsClock.Elapsed.TotalMilliseconds, 1);
+            e["frame"] = ImGuiNET.ImGui.GetFrameCount();
             _obsEvents.Add(e);
             if (_obsEvents.Count > ObsRing) _obsEvents.RemoveRange(0, _obsEvents.Count - ObsRing);
+            _obsPending.Add(e.ToString(Formatting.None));
         }
+    }
+
+    private static readonly System.Diagnostics.Stopwatch ObsClock = System.Diagnostics.Stopwatch.StartNew();
+    private readonly List<string> _obsPending = new();
+
+    /// <summary>Writes the events emitted since the last flush to the journal (once per observer tick, not per event).</summary>
+    private void ObsFlush()
+    {
+        string[] lines;
+        lock (_obsLock) { if (_obsPending.Count == 0) return; lines = _obsPending.ToArray(); _obsPending.Clear(); }
         try
         {
             Directory.CreateDirectory(ObsDir);
-            File.AppendAllText(Path.Combine(ObsDir, "journal.jsonl"), e.ToString(Formatting.None) + "\n");
+            File.AppendAllLines(Path.Combine(ObsDir, "journal.jsonl"), lines);
         }
         catch { }
     }
@@ -156,6 +172,7 @@ public partial class WhatsAnAiBridge
     {
         if (!Obs().Enabled || !GameController.InGame) return;
         var now = DateTime.UtcNow;
+        try { ObserveServer(now); } catch (Exception ex) { LogError($"[Observe] server: {ex.Message}"); }
         if ((now - _obsLastTick).TotalMilliseconds < 500) return;
         _obsLastTick = now;
         try
@@ -165,6 +182,7 @@ public partial class WhatsAnAiBridge
             if ((now - _obsLastEntities).TotalSeconds >= 2) { _obsLastEntities = now; ObserveEntities(); }
         }
         catch (Exception ex) { LogError($"[Observe] {ex.Message}"); }
+        ObsFlush();
     }
 
     private void ObserveArea()
