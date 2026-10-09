@@ -18,7 +18,7 @@ namespace WhatsAnAiBridge;
 /// square, HUD: magenta square; pure colours for tools/fidelity) for screenshots. path= tracks other entities.
 /// Offsets are not hard-coded: at start the matrix and the position are located in fresh bytes by matching the HUD's own
 /// values (camera +0x100 and Render +0x138 on PoE2 in 2026-10). If a match is lost the start fails naming that link.
-/// Read-only (game memory reads like any HUD read; nothing patched). tracker.start {durationMs?, entities?, draw?, path?} -> {id};
+/// Read-only (game memory reads like any HUD read; nothing patched). tracker.start {durationMs?, entities?, draw?, path?, delayMs?} -> {id};
 /// tracker.result {id}; tracker.stop.
 /// </summary>
 public partial class WhatsAnAiBridge
@@ -28,6 +28,8 @@ public partial class WhatsAnAiBridge
         public string Id = "";
         public DateTime Until;
         public bool Draw;
+        public double DelayMs;   // cyan marker shows the fresh state from this long ago (game image latency compensation)
+        public readonly List<(long t, Matrix4x4 m, Vector3[] pos)> History = new();
         public int CamOffset, PosOffset;
         public long CamAddress;
         public List<(Entity e, Render r, string name)> Targets = new();
@@ -73,7 +75,7 @@ public partial class WhatsAnAiBridge
         IEnumerable<Entity> players = string.IsNullOrWhiteSpace(pathFilter)
             ? GameController.EntityListWrapper.ValidEntitiesByType.TryGetValue(EntityType.Player, out var list) ? list : []
             : GameController.Entities.Where(e => e.Path?.Contains(pathFilter, StringComparison.OrdinalIgnoreCase) == true);
-        var job = new TrackerJob { Id = Guid.NewGuid().ToString("N")[..10], Until = DateTime.UtcNow.AddMilliseconds(duration), Draw = p?["draw"]?.Value<bool>() ?? false, CamOffset = camOff, CamAddress = cam.Address, PosOffset = -1 };
+        var job = new TrackerJob { Id = Guid.NewGuid().ToString("N")[..10], Until = DateTime.UtcNow.AddMilliseconds(duration), Draw = p?["draw"]?.Value<bool>() ?? false, DelayMs = Math.Clamp(p?["delayMs"]?.Value<double>() ?? 0, 0, 100), CamOffset = camOff, CamAddress = cam.Address, PosOffset = -1 };
         foreach (var e in players.OrderBy(e => e.DistancePlayer).Take(max))
         {
             var r = e.GetComponent<Render>();
@@ -126,6 +128,10 @@ public partial class WhatsAnAiBridge
             job.Frames++;
             if (freshM != snap.Matrix) job.FramesCameraStale++;
             if (second == snap.Matrix && freshM != snap.Matrix) job.SecondCopyMatches++;
+            var nowT = System.Diagnostics.Stopwatch.GetTimestamp();
+            job.History.Add((nowT, freshM, fresh.Select(f => f.pos).ToArray()));
+            while (job.History.Count > 2 && job.History[0].t < nowT - System.Diagnostics.Stopwatch.Frequency / 4) job.History.RemoveAt(0);
+            var (delayedM, delayedPos) = job.DelayMs > 0 ? StateAt(job.History, nowT - (long)(job.DelayMs * System.Diagnostics.Stopwatch.Frequency / 1000)) : (freshM, null);
             var half = snap.HalfSize;
             var dl = job.Draw ? ImGui.GetForegroundDrawList() : default;
             var anyPosStale = false;
@@ -147,7 +153,8 @@ public partial class WhatsAnAiBridge
                     // Pure colours a screenshot tool can find: magenta = the HUD's projection 6 px above the point, cyan = fresh 6 px
                     // below (apart, so neither hides the other; tools/fidelity measures drift relative to the first frame).
                     dl.AddRectFilled(hud - new Vector2(2, 8), hud + new Vector2(3, -3), ImGui.GetColorU32(new Vector4(1f, 0f, 1f, 1f)));
-                    dl.AddRectFilled(now - new Vector2(2, -4), now + new Vector2(3, 9), ImGui.GetColorU32(new Vector4(0f, 1f, 1f, 1f)));
+                    var shown = delayedPos == null ? now : Project(delayedM, half, delayedPos[i]);
+                    dl.AddRectFilled(shown - new Vector2(2, -4), shown + new Vector2(3, 9), ImGui.GetColorU32(new Vector4(0f, 1f, 1f, 1f)));
                 }
             }
             if (anyPosStale) job.FramesPositionStale++;
@@ -181,6 +188,20 @@ public partial class WhatsAnAiBridge
             if (_trackerResults.Count >= 10) _trackerResults.Remove(_trackerResults.Keys.First());
             _trackerResults[job.Id] = r;
         }
+    }
+
+    /// <summary>The fresh state at time t, linearly interpolated between the two samples around it (clamped to the oldest).</summary>
+    private static (Matrix4x4 m, Vector3[] pos) StateAt(List<(long t, Matrix4x4 m, Vector3[] pos)> h, long t)
+    {
+        if (t <= h[0].t) return (h[0].m, h[0].pos);
+        for (var k = h.Count - 1; k > 0; k--)
+        {
+            if (h[k - 1].t > t) continue;
+            var (a, b) = (h[k - 1], h[k]);
+            var f = b.t == a.t ? 1f : (float)(t - a.t) / (b.t - a.t);
+            return (Matrix4x4.Lerp(a.m, b.m, f), a.pos.Zip(b.pos, (x, y) => Vector3.Lerp(x, y, f)).ToArray());
+        }
+        return (h[^1].m, h[^1].pos);
     }
 
     private static Vector2 Project(Matrix4x4 m, Vector2 half, Vector3 v)
