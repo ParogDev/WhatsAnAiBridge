@@ -161,20 +161,24 @@ public partial class WhatsAnAiBridge
             null => JValue.CreateNull(),
             string s when IsSecret(name, s) => "[redacted]",
             bool b => b,
+            int or long or short or byte or uint or ushort or sbyte => Convert.ToInt64(value, CultureInfo.InvariantCulture),
             IConvertible c when value is not string && !value.GetType().IsEnum => Convert.ToDouble(c, CultureInfo.InvariantCulture),
             _ when kind == "color" => ColorHex(value),
             _ => value.ToString(),
         };
         if (kind == "range")
         {
-            try { o["min"] = Convert.ToDouble(t.GetProperty("Min")?.GetValue(node), CultureInfo.InvariantCulture); } catch { }
-            try { o["max"] = Convert.ToDouble(t.GetProperty("Max")?.GetValue(node), CultureInfo.InvariantCulture); } catch { }
+            try { o["min"] = Num(t.GetProperty("Min")?.GetValue(node)); } catch { }
+            try { o["max"] = Num(t.GetProperty("Max")?.GetValue(node)); } catch { }
         }
         if (kind == "list" && t.GetProperty("Values")?.GetValue(node) is IEnumerable vals)
             o["options"] = new JArray(vals.Cast<object>().Take(200).Select(x => x?.ToString()));
         if (kind == "text" && IsSecret(name, value)) o["description"] = ((o["description"]?.ToString() ?? "") + " (write-only: the value is never shown)").Trim();
         return o;
     }
+
+    /// <summary>A range limit as an integer when it is one (RangeNode<int>), else a double.</summary>
+    private static JToken Num(object? v) => v is int or long or short or byte ? Convert.ToInt64(v, CultureInfo.InvariantCulture) : Convert.ToDouble(v, CultureInfo.InvariantCulture);
 
     /// <summary>#RRGGBBAA from System.Drawing.Color (PoE2) or SharpDX.Color (PoE1): both expose R, G, B, A.</summary>
     private static string ColorHex(object c)
