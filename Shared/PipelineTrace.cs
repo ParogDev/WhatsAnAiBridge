@@ -291,6 +291,7 @@ public partial class WhatsAnAiBridge
         public long CamData, EntData;          // when the data those reads returned was fetched from the game (0 = before the trace)
         public long Cycle;                     // the cache cycle (NotifyFrame) in this frame
         public int CamReads, EntReads, Fetches, Cycles;
+        public double PluginMs;   // time inside plugin Tick + Render this frame (summed; parallel ticks can overlap)
     }
 
     private JObject AnalyzeTrace(int n, long started)
@@ -327,11 +328,11 @@ public partial class WhatsAnAiBridge
                 case KCacheCycle: if (cur.Cycle == 0) cur.Cycle = t; cur.Cycles++; break;
                 case KTickBegin: tickOpen[(int)TrArg[i]] = t; break;
                 case KTickEnd:
-                    if (tickOpen.Remove((int)TrArg[i], out var tb)) (tick.TryGetValue((int)TrArg[i], out var tl) ? tl : tick[(int)TrArg[i]] = new()).Add(ms(t - tb));
+                    if (tickOpen.Remove((int)TrArg[i], out var tb)) { (tick.TryGetValue((int)TrArg[i], out var tl) ? tl : tick[(int)TrArg[i]] = new()).Add(ms(t - tb)); cur.PluginMs += ms(t - tb); }
                     break;
                 case KPluginBegin: pluginOpen[(int)TrArg[i]] = t; break;
                 case KPluginEnd:
-                    if (pluginOpen.Remove((int)TrArg[i], out var b)) (plugin.TryGetValue((int)TrArg[i], out var l) ? l : plugin[(int)TrArg[i]] = new()).Add(ms(t - b));
+                    if (pluginOpen.Remove((int)TrArg[i], out var b)) { (plugin.TryGetValue((int)TrArg[i], out var l) ? l : plugin[(int)TrArg[i]] = new()).Add(ms(t - b)); cur.PluginMs += ms(t - b); }
                     break;
             }
         }
@@ -366,6 +367,10 @@ public partial class WhatsAnAiBridge
             ["hudFps"] = full.Count > 1 ? Math.Round(1000.0 * (full.Count - 1) / ms(full[^1].Begin - full[0].Begin), 1) : null,
             ["frameIntervalMs"] = Stats(full.Zip(full.Skip(1), (a, b) => ms(b.Begin - a.Begin))),
             ["updateMs"] = Stats(full.Where(f => f.UpdEnd > 0).Select(f => ms(f.UpdEnd - f.Begin))),
+            // Split of the frame work: plugins (Tick + Render) vs the rest (the HUD core: game controller, entity parsing,
+            // its own UI). Approximate when plugin Ticks run on worker threads in parallel.
+            ["pluginsMs"] = Stats(full.Where(f => f.UpdEnd > 0).Select(f => f.PluginMs)),
+            ["coreMs"] = Stats(full.Where(f => f.UpdEnd > 0).Select(f => Math.Max(0, ms(f.UpdEnd - f.Begin) - f.PluginMs))),
             ["drawMs"] = Stats(full.Where(f => f.REnd > 0).Select(f => ms(f.REnd - f.RBegin))),
             ["presentCallMs"] = Stats(full.Where(f => f.REnd > 0).Select(f => ms(f.PEnd - f.REnd))),
             // Read = when the HUD used the value; data = when that value was taken from the game. Data age at Present is
