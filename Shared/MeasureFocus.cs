@@ -86,8 +86,15 @@ public partial class WhatsAnAiBridge
             m.AtEnd = GameInFront();
             MeasureStopLocked();
             var share = m.Samples == 0 ? (m.AtStart == true && m.AtEnd == true ? 1.0 : 0.0) : (double)m.Foreground / m.Samples;
-            if (m.OwnsCard)
-                GuideSet(new JObject { ["clear"] = true, ["title"] = "Measured", ["instruction"] = share >= 0.95 ? "Done: thanks, you can switch away" : "Done, but the game wasn't in front the whole time", ["status"] = share >= 0.95 ? "done" : "info" });
+            // The card was only for "keep the game in front" while it ran: give it back, and say how it went in a toast
+            // (it fades by itself; a card would stay until dismissed).
+            if (m.OwnsCard) GuideSet(new JObject { ["clear"] = true });
+            if (m.OwnsCard || Settings.ShowAgentGuide.Value)
+                GuideLog(new JObject
+                {
+                    ["text"] = share >= 0.95 ? $"Measured ({m.What}): you can switch away" : $"Measured ({m.What}), but the game wasn't in front {(1 - share):P0} of the time",
+                    ["kind"] = share >= 0.95 ? "result" : "warn",
+                });
             return new JObject
             {
                 ["share"] = Math.Round(share, 3), ["atStart"] = m.AtStart, ["atEnd"] = m.AtEnd, ["samples"] = m.Samples,
