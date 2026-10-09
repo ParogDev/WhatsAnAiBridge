@@ -116,8 +116,11 @@ public partial class WhatsAnAiBridge
                 MatchRead(address.ToInt64(), target.Length, KFetchCamera, ref _trFetchAll);
                 return ok;
             }
+            // Record after the inner read: a cache miss fetches inside it, and that fetch is the data this read returns.
+            // (Recording first credited misses to the previous frame's fetch: a false "camera one frame old".)
+            var read = Inner.TryReadMemory(address, target);
             MatchRead(address.ToInt64(), target.Length, KReadCamera, ref _trLogicalAll);
-            return Inner.TryReadMemory(address, target);
+            return read;
         }
         public void NotifyFrame() { if (!fetch) Rec(KCacheCycle, 0); Inner.NotifyFrame(); }
         public void Dispose() { }   // the HUD owns the wrapped backend
