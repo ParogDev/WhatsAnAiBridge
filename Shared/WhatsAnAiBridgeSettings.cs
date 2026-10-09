@@ -51,4 +51,7 @@ public class WhatsAnAiBridgeSettings : ISettings
     // In-HUD agent guide (Shared\AgentGuide.cs, GuidePanel.cs): the agent's current instruction for the user and its log.
     public ToggleNode ShowAgentGuide { get; set; } = new(true);
     public ToggleNode GuideLogOpen { get; set; } = new(true);   // panel-only: the log section's collapse state
+    // Toggles the agent log sheet under the guide card (GuidePanel.cs). None by default: the log then only shows as
+    // toasts. HotkeyNodeV2 exists on both HUDs (Shared\Nodes via the per-game global usings) and supports modifiers.
+    public HotkeyNodeV2 AgentLogHotkey { get; set; } = new();
 }
