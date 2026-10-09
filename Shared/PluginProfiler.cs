@@ -16,7 +16,8 @@ namespace WhatsAnAiBridge;
 /// not abstract; never the protected IL stubs - plugins are compiled from source, but checked anyway) with a
 /// prefix/postfix that keeps a per-thread call stack, so each method gets calls, inclusive and self time (inclusive
 /// minus its profiled callees). Then everything is unpatched. Overhead: roughly 0.1-0.3 µs per call, reported.
-/// Off unless Settings.AllowHudInstrumentation. profile.plugin {name, durationMs?} -> {id}; profile.result {id}.
+/// Off unless Settings.AllowHudInstrumentation. profile.plugin {name | assembly+filter, durationMs?, maxMethods?} -> {id};
+/// profile.result {id}. assembly= profiles part of a HUD assembly (e.g. ExileCore2, filter=EntityListWrapper).
 /// </summary>
 public partial class WhatsAnAiBridge
 {
@@ -63,13 +64,33 @@ public partial class WhatsAnAiBridge
         if (_profOn) return Err("busy", "A profile is already running.");
         var name = p?["name"]?.ToString() ?? "";
         var duration = Math.Clamp(p?["durationMs"]?.Value<int>() ?? 3000, 500, 20_000);
-        var wrapper = Core.Current?.pluginManager?.Plugins.FirstOrDefault(w => string.Equals(w.Name, name, StringComparison.OrdinalIgnoreCase));
-        if (wrapper == null)
-            return Err("not_found", $"No loaded plugin named '{name}'. Loaded: {string.Join(", ", Core.Current?.pluginManager?.Plugins.Select(w => w.Name) ?? [])}");
+        var asmName = p?["assembly"]?.ToString();
+        var filter = p?["filter"]?.ToString();
+        var max = Math.Clamp(p?["maxMethods"]?.Value<int>() ?? 600, 10, 3000);
         const BindingFlags any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-        var plugin = wrapper.GetType().GetProperty("Plugin", any)?.GetValue(wrapper) ?? wrapper.GetType().GetField("_plugin", any)?.GetValue(wrapper);
-        var asm = plugin?.GetType().Assembly;
-        if (asm == null) return Err("not_found", $"Could not reach {name}'s plugin object (PluginWrapper.Plugin)");
+        Assembly? asm;
+        string label;
+        if (!string.IsNullOrWhiteSpace(asmName))
+        {
+            // A HUD assembly (e.g. ExileCore2): profile its core. Only a filtered part at a time (type name substring),
+            // so the patch set stays small; protected stubs are skipped and uncopyable methods fail without effect.
+            asm = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => string.Equals(a.GetName().Name, asmName, StringComparison.OrdinalIgnoreCase));
+            if (asm == null) return Err("not_found", $"No loaded assembly '{asmName}'.");
+            if (asmName.StartsWith("System", StringComparison.OrdinalIgnoreCase) || asmName is "0Harmony" or "mscorlib")
+                return Err("refused", "Runtime and Harmony assemblies are not profiled.");
+            if (string.IsNullOrWhiteSpace(filter)) return Err("bad_request", "Profiling a whole HUD assembly is refused: pass filter (a type name substring, e.g. EntityListWrapper).");
+            label = $"{asm.GetName().Name} [{filter}]";
+        }
+        else
+        {
+            var wrapper = Core.Current?.pluginManager?.Plugins.FirstOrDefault(w => string.Equals(w.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (wrapper == null)
+                return Err("not_found", $"No loaded plugin named '{name}'. Loaded: {string.Join(", ", Core.Current?.pluginManager?.Plugins.Select(w => w.Name) ?? [])}");
+            var plugin = wrapper.GetType().GetProperty("Plugin", any)?.GetValue(wrapper) ?? wrapper.GetType().GetField("_plugin", any)?.GetValue(wrapper);
+            asm = plugin?.GetType().Assembly;
+            if (asm == null) return Err("not_found", $"Could not reach {name}'s plugin object (PluginWrapper.Plugin)");
+            label = wrapper.Name;
+        }
         if (asm == typeof(WhatsAnAiBridge).Assembly) return Err("refused", "The bridge does not profile itself.");
 
         const BindingFlags decl = any | BindingFlags.Static | BindingFlags.DeclaredOnly;
@@ -79,12 +100,14 @@ public partial class WhatsAnAiBridge
         foreach (var t in types)
         {
             if (t.ContainsGenericParameters) continue;
+            if (filter != null && t.FullName?.Contains(filter, StringComparison.OrdinalIgnoreCase) != true) continue;
             foreach (var m in t.GetMethods(decl).Cast<MethodBase>())
             {
                 if (m.IsAbstract || m.IsGenericMethodDefinition || m.ContainsGenericParameters) continue;
                 byte[]? il;
                 try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { continue; }
                 if (il == null || il.Length <= 8 || TraceIsStub(m)) continue;
+                if (targets.Count >= max) break;
                 targets.Add(m);
             }
         }
@@ -93,7 +116,7 @@ public partial class WhatsAnAiBridge
         var pre = new HarmonyMethod(typeof(WhatsAnAiBridge).GetMethod(nameof(ProfPre), BindingFlags.Static | BindingFlags.NonPublic));
         var post = new HarmonyMethod(typeof(WhatsAnAiBridge).GetMethod(nameof(ProfPost), BindingFlags.Static | BindingFlags.NonPublic));
         var id = Guid.NewGuid().ToString("N")[..10];
-        var job = new JObject { ["id"] = id, ["status"] = "patching", ["plugin"] = wrapper.Name, ["methods"] = targets.Count, ["durationMs"] = duration };
+        var job = new JObject { ["id"] = id, ["status"] = "patching", ["plugin"] = label, ["methods"] = targets.Count, ["durationMs"] = duration };
         lock (ProfJobs) { if (ProfJobs.Count >= 10) ProfJobs.Remove(ProfJobs.Keys.First()); ProfJobs[id] = job; }
         var harmony = _profHarmony;
         System.Threading.Tasks.Task.Run(async () =>
@@ -116,8 +139,8 @@ public partial class WhatsAnAiBridge
             var totalCalls = stats.Sum(kv => kv.Value.Calls);
             var result = new JObject
             {
-                ["id"] = id, ["status"] = "done", ["plugin"] = wrapper.Name, ["durationMs"] = duration,
-                ["methodsPatched"] = patched, ["patchMs"] = patchMs, ["refused"] = refused, ["calls"] = totalCalls,
+                ["id"] = id, ["status"] = "done", ["plugin"] = label, ["durationMs"] = duration,
+                ["methodsPatched"] = patched, ["methodsCapped"] = targets.Count >= max, ["patchMs"] = patchMs, ["refused"] = refused, ["calls"] = totalCalls,
                 ["selfTotalMsPerSecond"] = Math.Round(stats.Sum(kv => Ms(kv.Value.Self)) * 1000.0 / duration, 3),
                 ["note"] = "self = inclusive minus profiled callees (BCL/HUD calls count as self). Per-call overhead ~0.1-0.3 us inflates tiny hot methods.",
                 ["top"] = new JArray(stats.OrderByDescending(kv => kv.Value.Self).Take(25).Select(kv => new JObject
