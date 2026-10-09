@@ -32,6 +32,7 @@ public partial class WhatsAnAiBridge
     private DateTime _obsLastTick = DateTime.MinValue, _obsLastEntities = DateTime.MinValue;
     private Dictionary<long, bool>? _obsVisible;              // top-level panel address -> visible
     private readonly HashSet<int> _obsUnmappedSeen = new();      // by child index: addresses change on every area change
+    private readonly Dictionary<long, string> _obsPanelNames = new();   // address -> property name seen when it opened
     private readonly HashSet<string> _obsEntityTypes = new();
     private string? _obsArea;
     private int _obsLevel = -1;
@@ -48,12 +49,21 @@ public partial class WhatsAnAiBridge
             _obs = File.Exists(f) ? JsonConvert.DeserializeObject<ObserveState>(File.ReadAllText(f)) ?? new() : new();
         }
         catch { _obs = new(); }
-        // Continue the sequence from the journal: an agent waiting with since=<seq> across a HUD restart must not miss events.
+        // Continue from the journal: the sequence (an agent waiting with since=<seq> across a HUD restart must not miss
+        // events) and what was already seen (entity kinds, unmapped panels), so a restart doesn't report them as new.
         try
         {
             var j = Path.Combine(ObsDir, "journal.jsonl");
-            if (File.Exists(j) && File.ReadLines(j).LastOrDefault(l => l.Length > 0) is { } last)
-                _obsSeq = JObject.Parse(last)["seq"]?.Value<long>() ?? 0;
+            if (File.Exists(j))
+                foreach (var line in File.ReadLines(j))
+                {
+                    if (line.Length == 0) continue;
+                    JObject e;
+                    try { e = JObject.Parse(line); } catch { continue; }
+                    _obsSeq = Math.Max(_obsSeq, e["seq"]?.Value<long>() ?? 0);
+                    if (e["kind"]?.ToString() == "entity" && e["type"]?.ToString() is { } t) _obsEntityTypes.Add(t);
+                    if (e["firstSeen"]?.Value<bool>() == true && e["index"] != null) _obsUnmappedSeen.Add(e["index"]!.Value<int>());
+                }
         }
         catch { }
         return _obs;
@@ -195,7 +205,10 @@ public partial class WhatsAnAiBridge
             _obsVisible[addr] = vis;
             if (!known && !vis) continue;   // a new panel that is hidden is not an event
             names ??= MappedPanels(ui);
+            // Some properties only return their panel while it is open: keep the name seen at opening for the close.
             var mapped = names.TryGetValue(addr, out var n) ? n : null;
+            if (vis && mapped != null) _obsPanelNames[addr] = mapped;
+            else if (!vis && _obsPanelNames.TryGetValue(addr, out var openedAs)) mapped = openedAs;
             var ev = new JObject
             {
                 ["kind"] = "ui", ["index"] = index, ["address"] = $"0x{addr:X}", ["visible"] = vis, ["mapped"] = mapped,
