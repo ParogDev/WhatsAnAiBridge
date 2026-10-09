@@ -798,11 +798,13 @@ public partial class WhatsAnAiBridge
             }
             else
             {
-                var selIdx = state.SelectedStatKey == null ? -1 : rows.FindIndex(s => s.Key == state.SelectedStatKey);
                 var viewH = tableH - rowH;
                 if (_panel.ScrollToSelected)
                 {
                     _panel.ScrollToSelected = false;
+                    var selIdx = -1;
+                    if (state.SelectedStatKey != null)
+                        for (var i = 0; i < count; i++) if (rows[i].Key == state.SelectedStatKey) { selIdx = i; break; }
                     if (selIdx >= 0) ImGui.SetScrollY(Math.Max(0, selIdx * rowH - (viewH - rowH) * 0.5f));
                 }
                 var scroll = ImGui.GetScrollY();
