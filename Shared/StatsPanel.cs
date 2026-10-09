@@ -317,7 +317,7 @@ public partial class WhatsAnAiBridge
 
         if (_panel.ByKey.TryGetValue("level", out var lvl))
         {
-            var t = "Lv " + lvl.Value.ToString(CultureInfo.InvariantCulture);
+            var t = T("Lv ", (int)lvl.Value);
             dl.AddText(new Vector2(x, p.Y + 4), U(th.TextDim), t);
             x += ImGui.CalcTextSize(t).X + 10;
         }
@@ -418,8 +418,13 @@ public partial class WhatsAnAiBridge
 
     // ── Vitals ───────────────────────────────────────────────────────
 
-    private static string VitalsSummary(VitalsDto v) =>
-        v.MaxEs > 0 ? $"{N(v.Hp)} / {N(v.Es)} / {N(v.Mana)}" : $"{N(v.Hp)} / {N(v.Mana)}";
+    private static string VitalsSummary(VitalsDto v)
+    {
+        var key = (v.Hp, v.MaxEs > 0 ? v.Es : int.MinValue, v.Mana);
+        if (VitalsCache.TryGetValue(key, out var s)) return s;
+        if (VitalsCache.Count > 1024) VitalsCache.Clear();
+        return VitalsCache[key] = v.MaxEs > 0 ? $"{N(v.Hp)} / {N(v.Es)} / {N(v.Mana)}" : $"{N(v.Hp)} / {N(v.Mana)}";
+    }
 
     private static void DrawVitals(VitalsDto? v, PanelTheme th, double now)
     {
@@ -505,7 +510,7 @@ public partial class WhatsAnAiBridge
         for (var i = 0; i < Elements.Length; i++)
         {
             var r = ResistOf(Elements[i]);
-            parts[i] = r.Value.HasValue ? r.Value.Value.ToString(CultureInfo.InvariantCulture) : "0";
+            parts[i] = r.Value.HasValue ? T("", r.Value.Value) : "0";
         }
         return string.Join(" / ", parts);
     }
@@ -568,7 +573,7 @@ public partial class WhatsAnAiBridge
 
             var big = f * 1.3f;
             var valCol = !has ? th.TextDim : negative ? ToneBad : th.Text;
-            dl.AddText(ImGui.GetFont(), big, new Vector2(x + 7, p.Y + 5 + small + 3), U(valCol), v.ToString(CultureInfo.InvariantCulture) + "%");
+            dl.AddText(ImGui.GetFont(), big, new Vector2(x + 7, p.Y + 5 + small + 3), U(valCol), T("", v, "%"));
 
             string status; Vector4 tone;
             if (!has) { status = "no stat"; tone = th.TextDim; }
@@ -832,8 +837,8 @@ public partial class WhatsAnAiBridge
             var cat = i < 0 ? "all" : StatCategories.All[i];
             var count = i < 0 ? total : _panel.CategoryCounts[i];
             if (i >= 0 && count == 0 && state.Category != cat) continue;
-            var label = i < 0 ? "All" : char.ToUpperInvariant(cat[0]) + cat[1..];
-            var countText = count.ToString(CultureInfo.InvariantCulture);
+            var label = i < 0 ? "All" : CatLabel(cat);
+            var countText = T("", count);
             var lw = ImGui.CalcTextSize(label).X * (small / f);
             var cw2 = ImGui.CalcTextSize(countText).X * (small / f);
             var cw = pad + lw + 4 + cw2 + pad;
@@ -1147,7 +1152,7 @@ public partial class WhatsAnAiBridge
             for (var k = 0; k < 4; k++)
             {
                 var (label, lkey, lv, assumed) = layers[k];
-                var valueText = lv == null ? "-" : lv.Value.ToString(CultureInfo.InvariantCulture) + "%" + (assumed ? " assumed" : "");
+                var valueText = lv == null ? "-" : T("", lv.Value, assumed ? "% assumed" : "%");
                 var lw = ImGui.CalcTextSize(label).X * (small / f);
                 var vw = ImGui.CalcTextSize(valueText).X * (small / f);
                 var cw = 7 + lw + 4 + vw + 7;
@@ -1175,7 +1180,32 @@ public partial class WhatsAnAiBridge
 
     // ── Formatting ───────────────────────────────────────────────────
 
-    private static string N(int v) => v.ToString("#,0", CultureInfo.InvariantCulture);
+    // Panel text is rebuilt every frame from values that rarely change: cache the strings (bounded) so drawing the
+    // panel doesn't allocate (it was ~9 KB per frame; garbage becomes GC pauses at high fps).
+    private static readonly Dictionary<int, string> NCache = new();
+    private static readonly Dictionary<(string, int, string), string> TextCache = new();
+    private static readonly Dictionary<(int, int, int), string> VitalsCache = new();
+    private static readonly Dictionary<string, string> CatLabelCache = new();
+
+    private static string N(int v)
+    {
+        if (NCache.TryGetValue(v, out var s)) return s;
+        if (NCache.Count > 4096) NCache.Clear();
+        return NCache[v] = v.ToString("#,0", CultureInfo.InvariantCulture);
+    }
+
+    private static string T(string pre, int v, string suf = "")
+    {
+        if (TextCache.TryGetValue((pre, v, suf), out var s)) return s;
+        if (TextCache.Count > 8192) TextCache.Clear();
+        return TextCache[(pre, v, suf)] = pre + v.ToString(CultureInfo.InvariantCulture) + suf;
+    }
+
+    private static string CatLabel(string cat)
+    {
+        if (CatLabelCache.TryGetValue(cat, out var s)) return s;
+        return CatLabelCache[cat] = char.ToUpperInvariant(cat[0]) + cat[1..];
+    }
 
     private static bool IsPercentKey(string key) => key.EndsWith('%') || key.Contains("_%_");
 
