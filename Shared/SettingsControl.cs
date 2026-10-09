@@ -260,7 +260,10 @@ public partial class WhatsAnAiBridge
                 if (d < Lim("Min") || d > Lim("Max")) throw new ArgumentOutOfRangeException(nameof(value), $"{d} is outside {Lim("Min")}-{Lim("Max")}");
                 return Convert.ChangeType(target == typeof(int) ? Math.Round(d) : d, target, CultureInfo.InvariantCulture);
             }
-            case "text": return value.ToString();
+            case "text":
+                // "[redacted]" is what describe shows for a hidden value: sending it back would overwrite the secret with it.
+                if (value.ToString() == "[redacted]") throw new ArgumentException("'[redacted]' stands for a hidden value; type the new value instead");
+                return value.ToString();
             case "list":
             {
                 var s = value.ToString();
