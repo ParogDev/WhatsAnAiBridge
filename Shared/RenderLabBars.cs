@@ -60,6 +60,7 @@ public partial class WhatsAnAiBridge
             // Time-aligned: the position as of t, between the last two fresh samples (clamped).
             var f = h.Item3 == h.Item1 ? 1f : Math.Clamp((float)(t - h.Item1) / (h.Item3 - h.Item1), 0f, 1f);
             var pos = Vector3.Lerp(h.Item2, h.Item4, f);
+            pos.Z += RenderBoundsZ(r);   // Render.Pos + Bounds.Z == Entity.Pos (verified on all 535 entities, PoE2): HealthBars' base
             if (!_hbAnchor.groundLevel) pos.Z -= 2 * RenderBoundsZ(r);
             pos.Z += _hbAnchor.zOffset;
             var s = Project(m, half, pos);
