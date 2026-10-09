@@ -462,7 +462,13 @@ public partial class WhatsAnAiBridge
     /// <summary>ArrayPool&lt;byte&gt;.Shared limits, read once from the runtime's SharedArrayPoolStatics (null fields when that internal type moves).</summary>
     private static JObject SharedArrayPoolLimits()
     {
-        if (_poolLimits != null) return _poolLimits;
+        if (_poolLimits != null)
+        {
+            // gc.pool may have changed the 4 KB bucket since: report what it holds now.
+            var live = PoolCapacity(4096);
+            if (live != null) _poolLimits["arraysPerSize"] = live;
+            return _poolLimits;
+        }
         const BindingFlags sf = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
         var st = typeof(System.Buffers.ArrayPool<byte>).Assembly.GetType("System.Buffers.SharedArrayPoolStatics");
         int? Get(string name) => st?.GetField(name, sf)?.GetValue(null) is int v ? v : null;
@@ -471,7 +477,7 @@ public partial class WhatsAnAiBridge
         return _poolLimits = new JObject
         {
             ["partitions"] = partitions, ["maxArraysPerPartition"] = perPartition,
-            ["arraysPerSize"] = partitions * perPartition,
+            ["arraysPerSize"] = PoolCapacity(4096) ?? partitions * perPartition,
             ["envMaxArraysPerPartition"] = Environment.GetEnvironmentVariable("DOTNET_SYSTEM_BUFFERS_SHAREDARRAYPOOL_MAXARRAYSPERPARTITION"),
             ["broken"] = st == null ? "System.Buffers.SharedArrayPoolStatics not found in this runtime" : partitions == null || perPartition == null ? "SharedArrayPoolStatics fields s_partitionCount/s_maxArraysPerPartition not found" : null,
         };

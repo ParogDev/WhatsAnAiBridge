@@ -241,7 +241,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessTraceMethod(method, parameters) ?? ProcessTrackerMethod(method, parameters)
                          ?? ProcessLayoutMethod(method, parameters) ?? ProcessMotionMethod(method, parameters)
                          ?? ProcessLabMethod(method, parameters) ?? ProcessProfileMethod(method, parameters)
-                         ?? ProcessSelfPerfMethod(method, parameters);
+                         ?? ProcessSelfPerfMethod(method, parameters) ?? ProcessGcPoolMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
