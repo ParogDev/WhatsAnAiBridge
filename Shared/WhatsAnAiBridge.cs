@@ -241,7 +241,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessTraceMethod(method, parameters) ?? ProcessTrackerMethod(method, parameters)
                          ?? ProcessLayoutMethod(method, parameters) ?? ProcessMotionMethod(method, parameters)
                          ?? ProcessLabMethod(method, parameters) ?? ProcessProfileMethod(method, parameters)
-                         ?? ProcessSelfPerfMethod(method, parameters) ?? ProcessGcPoolMethod(method, parameters);
+                         ?? ProcessSelfPerfMethod(method, parameters) ?? ProcessGcPoolMethod(method, parameters)
+                         ?? ProcessSettingsMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
@@ -283,6 +284,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
     {
         // Plugin reloads requested over the bridge run here, on the main thread, like the menu's Reload button.
         _selfFrames++;
+        RunMainActions();   // settings changes (SettingsControl.cs) and other main-thread work queued by bridge clients
         var sp = SelfStart(); RunPendingReload(); SelfEnd(0, sp);
         sp = SelfStart(); RunPendingScript(); SelfEnd(1, sp);
         sp = SelfStart(); RunQueuedStep(); SelfEnd(2, sp);

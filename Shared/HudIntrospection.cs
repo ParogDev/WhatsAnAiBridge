@@ -69,8 +69,15 @@ public partial class WhatsAnAiBridge
     // ── Live settings ────────────────────────────────────────────────
 
     // Setting names that may hold credentials or personal data (e.g. a PoE session id for stash APIs).
-    private static readonly Regex SecretName = new("(token|secret|password|passwd|session|cookie|auth|apikey|api_key|key$|poesessid)",
+    private static readonly Regex SecretName = new("(token|secret|password|passwd|session|cookie|auth|apikey|api_key|key$|poesessid|connection|credential|webhook)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // Secrets inside a value under an innocent name (e.g. a connection string's Password=..., a URL's ?token=...).
+    private static readonly Regex SecretValue = new(@"(password|pwd|passwd|secret|token|api[_-]?key|access[_-]?key|sessid|bearer)\s*[=:]",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>True when a string setting must not be shown: a secret-looking name, or a secret inside the value.</summary>
+    private static bool IsSecret(string name, object? value) => SecretName.IsMatch(name) || (value is string s && SecretValue.IsMatch(s));
 
     private JObject PluginSettings(string? name)
     {
@@ -111,7 +118,7 @@ public partial class WhatsAnAiBridge
     {
         var t = v.GetType();
         if (t.IsPrimitive || v is string || v is decimal || t.IsEnum)
-            return SecretName.IsMatch(name) && v is string ? "[redacted]" : JToken.FromObject(t.IsEnum ? v.ToString()! : v);
+            return IsSecret(name, v) && v is string ? "[redacted]" : JToken.FromObject(t.IsEnum ? v.ToString()! : v);
 
         var baseName = t.Name.Contains('`') ? t.Name[..t.Name.IndexOf('`')] : t.Name; // RangeNode`1 -> RangeNode
         var valueProp = t.GetProperty("Value", BindingFlags.Public | BindingFlags.Instance);
@@ -123,7 +130,7 @@ public partial class WhatsAnAiBridge
             try { inner = valueProp.GetValue(v); } catch { inner = null; }
             var node = new JObject { ["node"] = baseName };
             node["value"] = inner == null ? JValue.CreateNull()
-                : SecretName.IsMatch(name) && inner is string ? "[redacted]"
+                : IsSecret(name, inner) && inner is string ? "[redacted]"
                 : inner is IConvertible || inner is Enum ? JToken.FromObject(inner is Enum ? inner.ToString()! : inner)
                 : inner.ToString();
             foreach (var extra in new[] { "Min", "Max", "Values" })
