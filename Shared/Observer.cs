@@ -31,7 +31,7 @@ public partial class WhatsAnAiBridge
     private long _obsSeq;
     private DateTime _obsLastTick = DateTime.MinValue, _obsLastEntities = DateTime.MinValue;
     private Dictionary<long, bool>? _obsVisible;              // top-level panel address -> visible
-    private readonly HashSet<int> _obsUnmappedSeen = new();      // by child index: addresses change on every area change
+    private readonly HashSet<string> _obsUnmappedSeen = new();   // by first text (stable when indexes shift), else "#index"
     private readonly Dictionary<long, string> _obsPanelNames = new();   // address -> property name seen when it opened
     private readonly HashSet<string> _obsEntityTypes = new();
     private string? _obsArea;
@@ -62,7 +62,7 @@ public partial class WhatsAnAiBridge
                     try { e = JObject.Parse(line); } catch { continue; }
                     _obsSeq = Math.Max(_obsSeq, e["seq"]?.Value<long>() ?? 0);
                     if (e["kind"]?.ToString() == "entity" && e["type"]?.ToString() is { } t) _obsEntityTypes.Add(t);
-                    if (e["firstSeen"]?.Value<bool>() == true && e["index"] != null) _obsUnmappedSeen.Add(e["index"]!.Value<int>());
+                    if (e["firstSeen"]?.Value<bool>() == true && e["index"] != null) _obsUnmappedSeen.Add(PanelKey(e["texts"] as JArray, e["index"]!.Value<int>()));
                 }
         }
         catch { }
@@ -216,14 +216,18 @@ public partial class WhatsAnAiBridge
             };
             if (vis && mapped == null)
             {
-                ev["texts"] = new JArray(PanelTexts(e, 4, 6));
-                ev["firstSeen"] = _obsUnmappedSeen.Add(index);
+                var texts = new JArray(PanelTexts(e, 4, 6));
+                ev["texts"] = texts;
+                ev["firstSeen"] = _obsUnmappedSeen.Add(PanelKey(texts, index));
                 var bytes = GameController.Memory.ReadBytes(addr, 0x200);
                 if (bytes != null) ev["snapshot"] = Convert.ToBase64String(bytes);
             }
             ObsEmit(ev);
         }
     }
+
+    /// <summary>Identity of an unmapped panel: its first text if it has one (top-level indexes shift between openings).</summary>
+    private static string PanelKey(JArray? texts, int index) => texts?.FirstOrDefault()?.ToString() is { Length: > 0 } t ? t : "#" + index;
 
     /// <summary>Address -> IngameUIElements property name, for the panels the HUD maps (taken only when something changed).</summary>
     private static Dictionary<long, string> MappedPanels(object ui)

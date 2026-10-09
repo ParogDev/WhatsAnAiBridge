@@ -22,7 +22,8 @@ namespace WhatsAnAiBridge;
 public partial class WhatsAnAiBridge
 {
     private const double HlSnapSec = 0.32, HlRingSec = 0.6, HlCheckSec = 0.3, HlPulseSec = 2.6;
-    private const float HlBadgeR = 9f, HlSnapPx = 10f;
+    private const double HlPressSec = 1.4, HlPressDelay = 0.7;   // mouse cue: one press per cycle, the first after the entry ring
+    private const float HlBadgeR = 9f, HlSnapPx = 10f, HlMouseW = 14f, HlMouseH = 20f, HlMousePad = 5f;
 
     /// <summary>Overlay-local state: when each target's boxes appeared, for the entry animations.</summary>
     private sealed class HighlightUiState
@@ -120,9 +121,16 @@ public partial class WhatsAnAiBridge
             HlDots(dl, aMin, aMax, bMin, bMax, U(ToneNeutral, 0.6f * snap));
         }
 
-        // Pass 3: the title once, above the box the user should look at; then one label per target, outside its
-        // first box, where it covers no other highlight or label.
+        // Pass 3: the title once, above the box the user should look at; then, per target, the action cue and the
+        // label outside its first box, where they cover no other highlight, badge or pill. Badges are reserved first.
         u.Placed.Clear();
+        foreach (var b in boxes)
+            if (b.Order != null)
+            {
+                var (min, _) = HlRect(b);
+                var r = new Vector2(HlBadgeR + 1.5f, HlBadgeR + 1.5f);
+                u.Placed.Add((min - r, min + r));
+            }
         if (title != null)
         {
             var anchor = curIdx >= 0 ? curIdx : HlAnchor(boxes, current);
@@ -141,13 +149,25 @@ public partial class WhatsAnAiBridge
         for (var i = 0; i < boxes.Count; i++)
         {
             var b = boxes[i];
-            if (b.Label == null || !u.Labelled.Add(b.TargetIndex)) continue;
+            if (!u.Labelled.Add(b.TargetIndex)) continue;
             var (min, max) = HlRect(b);
             if (max.X < 0 || max.Y < 0 || min.X > disp.X || min.Y > disp.Y) continue;
+            var state = HlStateOf(b, current);
+            var arrived = u.ArrivedAt.GetValueOrDefault(b.TargetIndex, -1e9);
+            var snap = HlEase((now - arrived) / HlSnapSec);
+            // Which mouse button to press: animated on the current step, a quiet static glyph on an upcoming one.
+            if (b.Action is "click" or "rightclick" && state != 2)
+            {
+                var size = new Vector2(HlMouseW + HlMousePad * 2, HlMouseH + HlMousePad * 2);
+                var (pmin, pmax) = HlPlace(size, min, max, boxes, disp, prefer: 2);
+                HlMouse(dl, pmin + new Vector2(HlMousePad, HlMousePad), b.Action == "rightclick", state == 0 ? snap : 0.4f * snap,
+                    state == 0 ? now - arrived : -1, th);
+                u.Placed.Add((pmin, pmax));
+            }
+            if (b.Label == null) continue;
             var count = u.Counts.GetValueOrDefault(b.TargetIndex);
             var text = count > 1 ? $"{b.Label} x{count}" : b.Label;
-            var snap = HlEase((now - u.ArrivedAt.GetValueOrDefault(b.TargetIndex, -1e9)) / HlSnapSec);
-            HlLabel(dl, text, b.Tier, HlStateOf(b, current), min, max, boxes, disp, th, snap);
+            HlLabel(dl, text, b.Tier, state, min, max, boxes, disp, th, snap);
         }
     }
 
@@ -294,6 +314,44 @@ public partial class WhatsAnAiBridge
         }
     }
 
+    /// <summary>
+    /// 14 x 20 px mouse: a rounded body with two buttons, the one to press filled with the accent. While
+    /// <paramref name="age"/> (seconds since the step became current) is non-negative the button presses once per
+    /// 1.4 s cycle: it dips 1 px and brightens, and a small ring leaves its top edge. Negative age: static.
+    /// </summary>
+    private static void HlMouse(ImDrawListPtr dl, Vector2 pos, bool right, float alpha, double age, PanelTheme th)
+    {
+        if (alpha <= 0.01f) return;
+        var min = pos;
+        var max = pos + new Vector2(HlMouseW, HlMouseH);
+        var split = min.Y + HlMouseH * 0.42f;
+        var midX = min.X + HlMouseW * 0.5f;
+        var press = 0f;
+        var phase = -1.0;
+        if (age >= HlPressDelay)
+        {
+            phase = (age - HlPressDelay) % HlPressSec / HlPressSec;
+            if (phase < 0.22) press = MathF.Sin((float)(Math.PI * phase / 0.22));
+        }
+        // Body: card fill so it reads on any art, light outline, button split lines.
+        dl.AddRectFilled(min, max, U(th.Card, 0.92f * alpha), 6f);
+        dl.AddRect(min, max, U(th.Text, 0.8f * alpha), 6f, ImDrawFlags.None, 1.2f);
+        dl.AddLine(new Vector2(min.X + 1, split), new Vector2(max.X - 1, split), U(th.Text, 0.55f * alpha), 1f);
+        dl.AddLine(new Vector2(midX, min.Y + 1), new Vector2(midX, split), U(th.Text, 0.55f * alpha), 1f);
+        // The button to press, dipping while pressed.
+        var bx0 = right ? midX + 1f : min.X + 1.5f;
+        var bx1 = right ? max.X - 1.5f : midX - 1f;
+        var dip = press * 1f;
+        dl.AddRectFilled(new Vector2(bx0, min.Y + 1.5f + dip), new Vector2(bx1, split - 1f), U(ToneAccent, (0.7f + 0.3f * press) * alpha), 4.5f,
+            right ? ImDrawFlags.RoundCornersTopRight : ImDrawFlags.RoundCornersTopLeft);
+        // Click ring: leaves the pressed button's top edge and fades over the first 40% of the cycle.
+        if (phase >= 0 && phase < 0.4)
+        {
+            var k = (float)(phase / 0.4);
+            dl.AddCircle(new Vector2((bx0 + bx1) * 0.5f, min.Y + 1.5f), 2.5f + 6.5f * HlEase(k), U(ToneAccent, 0.6f * (1 - k) * alpha), 16, 1.2f);
+        }
+    }
+
     /// <summary>Dotted hint from the edge of box a to the edge of box b, with a small chevron at b. Skipped when they touch.</summary>
     private static void HlDots(ImDrawListPtr dl, Vector2 aMin, Vector2 aMax, Vector2 bMin, Vector2 bMax, uint col)
     {
@@ -355,7 +413,7 @@ public partial class WhatsAnAiBridge
         var tw = ImGui.CalcTextSize(title).X;
         var sw = sub != null ? ImGui.CalcTextSize(sub).X * (small / f) + 8 : 0;
         var size = new Vector2(10 + 6 + 6 + tw + sw + 10, f + 8);
-        var (pmin, pmax) = HlPlace(size, min, max, boxes, disp, preferAbove: true);
+        var (pmin, pmax) = HlPlace(size, min, max, boxes, disp, prefer: 1);
         var cy = (pmin.Y + pmax.Y) * 0.5f;
         dl.AddRectFilled(pmin, pmax, U(th.Card, 0.94f * snap), 5f);
         dl.AddRect(pmin, pmax, U(ToneAccent, 0.5f * snap), 5f);
@@ -367,10 +425,11 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>
-    /// Where a pill of <paramref name="size"/> goes around a box: below, above, right or left (above first for the
-    /// title), the first spot on screen that covers no highlight box and no pill placed earlier this frame; else below.
+    /// Where a pill of <paramref name="size"/> goes around a box: the first of below / above / right / left that is on
+    /// screen and covers no highlight box, badge or pill placed earlier this frame; else the preferred spot.
+    /// <paramref name="prefer"/>: 0 = below first (labels), 1 = above first (title), 2 = right first (the mouse cue).
     /// </summary>
-    private (Vector2 min, Vector2 max) HlPlace(Vector2 size, Vector2 min, Vector2 max, List<HighlightBox> boxes, Vector2 disp, bool preferAbove = false)
+    private (Vector2 min, Vector2 max) HlPlace(Vector2 size, Vector2 min, Vector2 max, List<HighlightBox> boxes, Vector2 disp, int prefer = 0)
     {
         const float gap = 5f;
         var cx = (min.X + max.X) * 0.5f;
@@ -380,10 +439,12 @@ public partial class WhatsAnAiBridge
         var right = new Vector2(max.X + gap, cy - size.Y * 0.5f);
         var left = new Vector2(min.X - gap - size.X, cy - size.Y * 0.5f);
         Span<Vector2> cands = stackalloc Vector2[4];
-        cands[0] = preferAbove ? above : below;
-        cands[1] = preferAbove ? below : above;
-        cands[2] = right;
-        cands[3] = left;
+        switch (prefer)
+        {
+            case 1: cands[0] = above; cands[1] = below; cands[2] = right; cands[3] = left; break;
+            case 2: cands[0] = right; cands[1] = left; cands[2] = above; cands[3] = below; break;
+            default: cands[0] = below; cands[1] = above; cands[2] = right; cands[3] = left; break;
+        }
         var fallback = default(Vector2);
         for (var i = 0; i < cands.Length; i++)
         {
