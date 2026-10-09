@@ -317,8 +317,8 @@ public partial class WhatsAnAiBridge
             n++;
         }
         if (n == 0) return 0f;
-        var rowH = ImGui.GetFontSize() * 0.85f + 8;
-        return GuideEdge + n * (rowH + 3f);
+        var rowH = GuideToastRowHeight(ImGui.GetFontSize());
+        return GuideEdge + n * (rowH + GuideToastGap);
     }
 
     private void GuideReport(Exception ex)
@@ -676,10 +676,27 @@ public partial class WhatsAnAiBridge
 
     // ── Log: toasts ──────────────────────────────────────────────────
 
+    // Toast geometry, in px (the lines scale with the HUD font, the frame does not): the kind stripe flush on the
+    // left edge, the padding inside, the 18 px outlined icon and its gap to the text, the gap between the title and
+    // the message line, the gap between stacked toasts.
+    private const float GuideToastStripe = 3f, GuideToastPadX = 12f, GuideToastPadY = 7f, GuideToastIcon = 18f, GuideToastIconGap = 10f;
+    private const float GuideToastLineGap = 3f, GuideToastGap = 3f;
+    // Fake letter-spacing (the HUD font has no condensed or tracked face): extra px after every glyph.
+    private const float GuideToastTitleTrack = 0.8f, GuideToastMsgTrack = 0.6f;
+
+    /// <summary>Height of one toast: the title line at f, the message line at 0.85 f, the gap and the padding.</summary>
+    private static float GuideToastRowHeight(float f) => GuideToastPadY * 2 + f + GuideToastLineGap + f * 0.85f;
+
     /// <summary>
-    /// Each new log line as a small dark toast under the panel for ~3 s: newest on top (older ones slide down to
-    /// make room), the last 0.6 s fading, at most three at once. Drawn on the background draw list: no window, so
-    /// the mouse passes straight through to the game. Nothing stays.
+    /// Each new log line as a toast under the panel for ~3 s: newest on top (older ones slide down to make room),
+    /// the last 0.6 s fading, at most three at once. Drawn on the background draw list: no window, so the mouse
+    /// passes straight through to the game. Nothing stays.
+    /// The look (the brand's toast): a slate panel the width of the strip with square corners and a hairline
+    /// border, a 3 px stripe in the kind's tone flush on the left edge, an outlined 18 px glyph in the tone, the
+    /// title in caps (faux bold, tracked) and the message under it in caps, smaller and muted. Fixed colours, so
+    /// it looks the same on any HUD theme. With f = 16: a row is 46.6 px tall (7 + 16 + 3 + 13.6 + 7); the stripe
+    /// covers x 0..3, the icon box x 15..33 (centre 24, centred on the row), the text starts at x 43 and may run to
+    /// x 460 of the 472 px width; the title sits at y 7..23 and the message at y 26..39.6.
     /// </summary>
     private void DrawGuideToasts(in GuideSnap g, PanelTheme th, double now, DateTime utc, Vector2 anchor)
     {
@@ -688,10 +705,12 @@ public partial class WhatsAnAiBridge
         var font = ImGui.GetFont();
         var f = ImGui.GetFontSize();
         var small = f * 0.85f;
-        var rowH = small + 8;
-        const float gap = 3f, pad = 8f;
-        var maxW = GuideWidth - GuideEdge * 2;
+        var rowH = GuideToastRowHeight(f);
+        var w = GuideWidth - GuideEdge * 2;      // every toast is the strip's width, so the stack reads as one column
         var x0 = anchor.X + GuideEdge;
+        var textX = x0 + GuideToastStripe + GuideToastPadX + GuideToastIcon + GuideToastIconGap;
+        var textMax = x0 + w - GuideToastPadX - textX;
+        var iconX = x0 + GuideToastStripe + GuideToastPadX + GuideToastIcon * 0.5f;
         // The newest toast's slide-in pushes the older ones down with it.
         var newestAge = (utc - g.log[^1].At).TotalSeconds;
         var push = (float)(1 - HlEase(newestAge / GuideToastInSec));
@@ -703,33 +722,169 @@ public partial class WhatsAnAiBridge
             var age = (utc - e.At).TotalSeconds;
             if (age >= GuideToastSec) break;
             var alpha = (float)Math.Clamp((GuideToastSec - age) / GuideToastFadeSec, 0, 1) * HlEase(age / GuideToastInSec);
-            if (shown > 0) y -= push * (rowH + gap);   // older rows catch up with the push from above
-            var tone = GuideKindTone(e.Kind, th);
-            var textMax = maxW - pad * 2 - 3 - 6;
-            var text = GuideClipText(e.Text, textMax * (f / small)); // clip measured at the small size
-            var textW = ImGui.CalcTextSize(text).X * (small / f);
-            var w = pad + 3 + 6 + textW + pad;
+            if (shown > 0) y -= push * (rowH + GuideToastGap);   // older rows catch up with the push from above
+            var tone = GuideKindTone(e.Kind);
             var min = new Vector2(x0, y);
             var max = new Vector2(x0 + w, y + rowH);
-            // Fixed dark ink, low contrast: a toast is for the corner of the eye, whatever the HUD theme.
-            dl.AddRectFilled(min, max, U(GuideToastInk, 0.8f * alpha), 4f);
-            dl.AddRectFilled(new Vector2(min.X + pad, min.Y + 4), new Vector2(min.X + pad + 3, max.Y - 4), U(tone, 0.8f * alpha), 1f);
-            var tcol = e.Kind == "agent" ? U(th.Text, 0.78f * alpha) : U(tone, 0.9f * alpha);
-            dl.AddText(font, small, new Vector2(min.X + pad + 9, min.Y + 4), tcol, text);
-            y += rowH + gap;
+            // The panel: fixed slate ink, a hairline one step lighter, square corners, no shadow; then the stripe
+            // over the border's left edge.
+            dl.AddRectFilled(min, max, U(GuideToastInk, 0.94f * alpha), 0f);
+            dl.AddRect(min, max, U(GuideToastLine, alpha), 0f);
+            dl.AddRectFilled(min, new Vector2(min.X + GuideToastStripe, max.Y), U(tone, alpha), 0f);
+            GuideToastGlyph(dl, e.Kind, new Vector2(iconX, min.Y + rowH * 0.5f), U(tone, alpha));
+            // Title: caps, faux bold (drawn twice 0.6 px apart), tracked. Message: caps, 0.85 f, muted, tracked.
+            var title = GuideClipTracked(GuideToastTitle(e, g), font, f, GuideToastTitleTrack, textMax);
+            var ty = min.Y + GuideToastPadY;
+            var tcol = U(GuideToastText, alpha);
+            GuideTrackedText(dl, font, f, new Vector2(textX, ty), tcol, title, GuideToastTitleTrack);
+            GuideTrackedText(dl, font, f, new Vector2(textX + 0.6f, ty), tcol, title, GuideToastTitleTrack);
+            var msg = GuideClipTracked(GuideCaps(e.Text), font, small, GuideToastMsgTrack, textMax);
+            GuideTrackedText(dl, font, small, new Vector2(textX, ty + f + GuideToastLineGap), U(GuideToastMuted, alpha), msg, GuideToastMsgTrack);
+            y += rowH + GuideToastGap;
             shown++;
         }
     }
 
-    private static readonly Vector4 GuideToastInk = new(0.07f, 0.07f, 0.09f, 1f);
+    // Fixed toast colours (the same on any HUD theme): a blue-tinted slate ink, its hairline one step lighter, the
+    // near-white title (15.9:1 on the ink) and the muted message grey (6.4:1).
+    private static readonly Vector4 GuideToastInk = Hex(0x15171C), GuideToastLine = Hex(0x2B2E36);
+    private static readonly Vector4 GuideToastText = Hex(0xF2F1EE), GuideToastMuted = Hex(0x9C9B95);
 
-    private static Vector4 GuideKindTone(string kind, PanelTheme th) => kind switch
+    /// <summary>The kind's tone: the stripe, the glyph. Agent lines are neutral (an "i"), steps accent, results
+    /// green, warnings amber, errors red.</summary>
+    private static Vector4 GuideKindTone(string kind) => kind switch
     {
         "step" => ToneAccent,
         "result" => ToneOk,
         "warn" => ToneWarn,
-        _ => th.TextDim,
+        "error" => ToneBad,
+        _ => ToneNeutral,
     };
+
+    /// <summary>The title line: the entry's own title when the agent gave one, else the kind as a word ("STEP 2"
+    /// while the guide is on a numbered step).</summary>
+    private static string GuideToastTitle(GuideLogEntry e, in GuideSnap g)
+    {
+        if (!string.IsNullOrWhiteSpace(e.Title)) return GuideCaps(e.Title!);
+        return e.Kind switch
+        {
+            "step" => g.step is { } n ? "STEP " + n : "STEP",
+            "result" => "RESULT",
+            "warn" => "WARNING",
+            "error" => "ERROR",
+            _ => "AGENT",
+        };
+    }
+
+    /// <summary>
+    /// The outlined kind glyph in an 18 px box, stroke 1.6, in the tone: a circle with an x (error), a triangle
+    /// with a bang (warn), a circle with a check (result), a circle with an i (agent, step). All on the draw list:
+    /// the HUD font has no glyphs for these.
+    /// </summary>
+    private static void GuideToastGlyph(ImDrawListPtr dl, string kind, Vector2 c, uint col)
+    {
+        const float r = 8f, t = 1.6f;
+        switch (kind)
+        {
+            case "error":
+                dl.AddCircle(c, r, col, 24, t);
+                dl.AddLine(new Vector2(c.X - 3f, c.Y - 3f), new Vector2(c.X + 3f, c.Y + 3f), col, t);
+                dl.AddLine(new Vector2(c.X + 3f, c.Y - 3f), new Vector2(c.X - 3f, c.Y + 3f), col, t);
+                break;
+            case "warn":
+                // Apex up; the base sits 1 px below the circle's bottom so the optical centre matches the circles.
+                dl.AddTriangle(new Vector2(c.X, c.Y - 8f), new Vector2(c.X + 8.5f, c.Y + 7f), new Vector2(c.X - 8.5f, c.Y + 7f), col, t);
+                dl.AddLine(new Vector2(c.X, c.Y - 1.5f), new Vector2(c.X, c.Y + 2f), col, t);
+                dl.AddCircleFilled(new Vector2(c.X, c.Y + 4.5f), 1.1f, col, 8);
+                break;
+            case "result":
+                dl.AddCircle(c, r, col, 24, t);
+                dl.AddLine(new Vector2(c.X - 3.6f, c.Y + 0.2f), new Vector2(c.X - 1f, c.Y + 2.8f), col, t);
+                dl.AddLine(new Vector2(c.X - 1f, c.Y + 2.8f), new Vector2(c.X + 3.8f, c.Y - 2.8f), col, t);
+                break;
+            default:
+                dl.AddCircle(c, r, col, 24, t);
+                dl.AddCircleFilled(new Vector2(c.X, c.Y - 3.5f), 1.1f, col, 8);
+                dl.AddLine(new Vector2(c.X, c.Y - 1f), new Vector2(c.X, c.Y + 4f), col, t);
+                break;
+        }
+    }
+
+    // One cached string per ASCII glyph, so tracked text allocates nothing per frame.
+    private static readonly string[] GuideGlyphs = Enumerable.Range(0, 128).Select(c => ((char)c).ToString()).ToArray();
+
+    /// <summary>The advance of one glyph at <paramref name="size"/>: the font's base advance, scaled.</summary>
+    private static float GuideGlyphAdvance(ImFontPtr font, float size, char ch) => font.GetCharAdvance(ch < 128 ? ch : '?') * (size / font.FontSize);
+
+    /// <summary>
+    /// Draw text one glyph at a time with <paramref name="track"/> px after each (fake letter-spacing: the HUD font
+    /// has no tracked or condensed face). One AddText per glyph; a toast is ~60 glyphs, three toasts ~360 calls,
+    /// only while toasts are on screen.
+    /// </summary>
+    private static void GuideTrackedText(ImDrawListPtr dl, ImFontPtr font, float size, Vector2 pos, uint col, string text, float track)
+    {
+        var x = pos.X;
+        for (var i = 0; i < text.Length; i++)
+        {
+            var ch = text[i] < 128 ? text[i] : '?';
+            dl.AddText(font, size, new Vector2(x, pos.Y), col, GuideGlyphs[ch]);
+            x += GuideGlyphAdvance(font, size, ch) + track;
+        }
+    }
+
+    /// <summary>Width of tracked text (no trailing track after the last glyph).</summary>
+    private static float GuideTrackedWidth(ImFontPtr font, float size, string text, float track)
+    {
+        var w = 0f;
+        for (var i = 0; i < text.Length; i++) w += GuideGlyphAdvance(font, size, text[i]) + track;
+        return text.Length > 0 ? w - track : 0f;
+    }
+
+    /// <summary>Clip tracked text to <paramref name="maxW"/> with an ASCII ".." tail (same rule as GuideClipText).</summary>
+    private static string GuideClipTracked(string s, ImFontPtr font, float size, float track, float maxW)
+    {
+        if (GuideTrackedWidth(font, size, s, track) <= maxW) return s;
+        var tail = GuideTrackedWidth(font, size, "..", track) + track;
+        var w = 0f;
+        var n = 0;
+        for (; n < s.Length; n++)
+        {
+            var next = w + GuideGlyphAdvance(font, size, s[n]) + track;
+            if (next + tail > maxW) break;
+            w = next;
+        }
+        return n <= 0 ? ".." : s[..n].TrimEnd() + "..";
+    }
+
+    /// <summary>
+    /// Upper-case a toast line the way the brand book says: words become caps, identifiers keep their case so they
+    /// stay recognisable - a word with an inner '_', '.', '/', ':', '[', '<', '{' or '#', a CamelCase bump, or a 0x
+    /// prefix, signed or not (fire_damage_resistance_%, findings.json, GameController.Player, ReAgent, +0x3D). Trailing punctuation
+    /// does not count. ASCII only, like all HUD text.
+    /// </summary>
+    internal static string GuideCaps(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        var parts = s.Split(' ');
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var core = parts[i].TrimEnd('.', ',', ';', ':', '!', '?', ')');
+            if (!GuideIsIdentifier(core)) parts[i] = parts[i].ToUpperInvariant();
+        }
+        return string.Join(' ', parts);
+    }
+
+    private static bool GuideIsIdentifier(string w)
+    {
+        if (w.TrimStart('+', '-').StartsWith("0x", StringComparison.Ordinal)) return true;
+        for (var i = 0; i < w.Length; i++)
+        {
+            var c = w[i];
+            if (i > 0 && i < w.Length - 1 && c is '_' or '.' or '/' or ':' or '[' or '<' or '{' or '#') return true;
+            if (i > 0 && char.IsUpper(c) && char.IsLower(w[i - 1])) return true;
+        }
+        return false;
+    }
 
     // ── Log: hotkey-toggled sheet ────────────────────────────────────
 
