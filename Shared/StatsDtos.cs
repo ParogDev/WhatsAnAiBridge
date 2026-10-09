@@ -36,7 +36,7 @@ public class StatsUiState
     public bool SortDesc { get; set; }
 
     [JsonProperty("panelOpen")]
-    public bool PanelOpen { get; set; } = true;
+    public bool PanelOpen { get; set; } = false;   // closed unless the user opens it (settings pill, control center)
 
     public StatsUiState Clone() => new()
     {
