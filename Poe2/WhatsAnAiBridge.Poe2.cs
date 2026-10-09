@@ -39,6 +39,7 @@ public partial class WhatsAnAiBridge
 
     private static float[] RenderPos(Render r) => [Round1(r.Pos.X), Round1(r.Pos.Y), Round1(r.Pos.Z)];
     private static System.Numerics.Vector3 RenderPosNum(Render r) => r.Pos;
+    private static float RenderBoundsZ(Render r) => r.Bounds.Z;
 
     private static float[] RenderBounds(Render r) => [Round1(r.Bounds.X), Round1(r.Bounds.Y), Round1(r.Bounds.Z)];
 

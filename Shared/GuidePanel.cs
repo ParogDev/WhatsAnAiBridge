@@ -17,7 +17,9 @@ using FlowSnap = (string? title, (string label, string state)[] steps, string? s
 /// progress and results, hidden when there is nothing to say.
 /// How visible each surface is this frame is decided in ONE place, GuideAttentionFor (research\display-attention.md):
 /// while highlights are on screen the card ghosts (the highlight carries the words), hovering it brings it back for
-/// 5 s, and the card never covers a highlight box (it slides along the top edge to the nearest free spot).
+/// 5 s, and the card never covers a highlight box (it slides along the top edge to the nearest free spot). In combat
+/// (CombatSense.cs) the card hides, toasts queue and highlights pause; a loud state leaves a small dot at the top
+/// edge. After two quiet minutes only a 6 px status dot stays. Hovering a dot brings the card back.
 /// The agent's log is not a panel: each new line is a small dark toast under the card for ~3 s (no window, no
 /// input), and the full recent log appears as a selectable sheet that the user's own hotkey toggles
 /// (Settings.AgentLogHotkey, none by default: then the sheet cannot be opened and only the toasts show).
@@ -37,9 +39,14 @@ public partial class WhatsAnAiBridge
     // a hover keeps it, how fast it fades between the two, how fast it slides clear of a highlight, and the clearance.
     private const float GuideGhostAlpha = 0.15f, GuideHoverAlpha = 0.9f, GuideAvoidGap = 8f;
     private const double GuideHoverKeepSec = 5.0, GuideFadeSec = 0.3, GuideShiftSec = 0.3;
-    // Toasts: a line shows for ToastSec, the last ToastFadeSec of it fading; at most ToastMax at once.
+    // Rule 4: a waiting card with no highlight to carry the words pulses for this long after it changed, then is calm.
+    private const double GuideEmphasisSec = 6.0;
+    // Rules 1 and 5: the status dot that stands in for the hidden card (6 px), its hover radius, and the opacity under
+    // which a fading card stops being drawn.
+    private const float GuideDotR = 3f, GuideDotHit = 9f, GuideHiddenAlpha = 0.03f;
+    // Toasts: a line shows for ToastSec, the last ToastFadeSec of it fading; at most ToastMax at once (rule 6).
     private const double GuideToastSec = 3.0, GuideToastFadeSec = 0.6, GuideToastInSec = 0.15;
-    private const int GuideToastMax = 3;
+    private const int GuideToastMax = 2;
     // Log sheet: the hotkey toggles it (a dedicated key is not pressed by accident, so no hold delay); it eases in on
     // open and fades on close.
     private const double GuideSheetInSec = 0.15, GuideSheetOutSec = 0.2;
@@ -68,7 +75,15 @@ public partial class WhatsAnAiBridge
         public double ShiftAt = -1e9;
         public bool WasShifted;
         public float AlphaNow = 1f;
-        public double HoverAt = -1e9;      // ImGui time the mouse was last over the card's rect
+        public double HoverAt = -1e9;      // ImGui time the mouse was last over the card's rect (or the status dot)
+        public bool DotShown;              // a status dot stood in for the card last frame (its rect is the hover target)
+        // Toasts as they show this frame (newest first, repeats merged), rebuilt every frame without allocating
+        // unless a line is young enough to show. While toasts are muted (combat) MuteSince holds when that began;
+        // lines that arrived inside the last mute window [MuteFrom, MuteTo) only show through Summary.
+        public readonly List<GuideToast> Toasts = new();
+        public DateTime? MuteSince;
+        public DateTime MuteFrom = DateTime.MaxValue, MuteTo = DateTime.MinValue;
+        public GuideToast? Summary;
         // Hotkey-toggled log sheet.
         public bool SheetOpen;             // toggled by the hotkey, the sheet's close pill, or an empty log
         public double SheetOpenedAt = -1e9; // ImGui time the sheet was opened (eases in from there)
@@ -137,7 +152,14 @@ public partial class WhatsAnAiBridge
 
     private void DrawGuidePanel()
     {
-        if (!Settings.ShowAgentGuide.Value) return;
+        if (!Settings.ShowAgentGuide.Value)
+        {
+            // No panel, but the other surfaces still read attention: combat still gates the highlights.
+            var (fighting, safeNow) = CombatSense(ImGui.GetTime());
+            _guideAttention = GuideAttentionFor(false, false, 1e9, false, false, 1e9, fighting, safeNow, FlowSnapshot().status == "running", false, Vector2.Zero);
+            _guideUi.WinH = 0;
+            return;
+        }
 
         var g = GuideSnapshot();
         // Once per frame: it takes the queue lock. Open steps only, in queue order.
@@ -153,53 +175,69 @@ public partial class WhatsAnAiBridge
             fl.status == "running" || (fl.status == "done" && now - _guideUi.FlowEndedAt < GuideFlowDoneShowSec),
             fl.status == "running", plan, fl.steps.Where(s => s.state == "done").Select(s => s.label).ToArray(), fl.steps.Length);
 
-        // Visibility: a card exists while there is an instruction or a non-idle status. The panel hides itself once
-        // everything is quiet (idle / captured / done / info) and nothing happened for two minutes; waiting, failed
-        // and progress states stay until the agent or the user clears them. It comes back on the next rev change.
-        // A queued step keeps the panel up too (calmly): the user may come back hours later and must find it.
+        // What there is to show: a card exists while there is an instruction or a non-idle status; with no card and
+        // no queued step there is nothing to draw at all. Whether what exists is SHOWN is attention's call: quiet
+        // (rule 5) is everything calm (idle / captured / done / info), no queued step and nothing happened for two
+        // minutes - then only the status dot stays, until the next rev change; waiting, failed and progress states
+        // never go quiet, and a queued step keeps the panel up too: the user may come back hours later and must find it.
         var hasCard = g.instruction != null || g.status != "idle";
         var needsUser = g.status is "waiting" or "failed" or "detected" or "settling";
-        var quietFor = (utc - g.updatedAt).TotalSeconds;
-        var hide = (!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null);
+        var loud = g.status is "waiting" or "failed";
+        var nothing = !hasCard && q.Next == null;
+        var quiet = g.updatedAt != DateTime.MinValue && !needsUser && q.Next == null && (utc - g.updatedAt).TotalSeconds > GuideQuietHideSec;
 
         // Attention, decided once per frame for every surface (GuideAttentionFor). Inputs: the highlight boxes on
         // screen (a consistent copy; the overlay re-resolves them after this panel, so they may be one frame old),
-        // the mouse against the card's rect last frame (a hit-test: the window takes no focus for it, and takes no
-        // input at all while ghosted), and where the card and its toasts would sit at the card's home position.
+        // combat (CombatSense, sampled every 250 ms), the mouse against the card's rect last frame (a hit-test: the
+        // window takes no focus for it, and takes no input at all while ghosted) or against the status dot while
+        // that stands in for the card, how long ago the card changed, and where the card and its toasts would sit at
+        // the card's home position (rule 3's offset is folded in after the toasts are known).
         var u = _guideUi;
         var io = ImGui.GetIO();
         var defaultPos = new Vector2(MathF.Round((io.DisplaySize.X - GuideWidth) * 0.5f), GuideTopY);
         if (float.IsNaN(u.WinPos.X)) u.WinPos = defaultPos;
         if (float.IsNaN(u.Home.X)) u.Home = u.WinPos;
         var boxes = HighlightSnapshot().boxes;
-        var cardH = hide ? 0f : u.WinH;
-        var hovered = cardH > 0 && io.MousePos.X >= u.WinPos.X && io.MousePos.X < u.WinPos.X + GuideWidth
-                      && io.MousePos.Y >= u.WinPos.Y && io.MousePos.Y < u.WinPos.Y + cardH;
+        var (inCombat, areaSafe) = CombatSense(now);
+        var cardH = u.WinH;   // 0 while the window was not drawn last frame
+        var dotPos = GuideDotPos(u);
+        var hovered = cardH > 0 && _guideAttention.CardVisible
+            ? io.MousePos.X >= u.WinPos.X && io.MousePos.X < u.WinPos.X + GuideWidth && io.MousePos.Y >= u.WinPos.Y && io.MousePos.Y < u.WinPos.Y + cardH
+            : u.DotShown && Vector2.DistanceSquared(io.MousePos, dotPos) <= GuideDotHit * GuideDotHit;
         if (hovered) u.HoverAt = now;
-        var toastsH = GuideToastStackHeight(g, utc);
-        var homeMin = u.Home;
-        var homeMax = u.Home + new Vector2(GuideWidth, cardH + (cardH > 0 && toastsH > 0 ? 2 : 0) + toastsH);
-        var avoid = GuideAvoid(homeMin, homeMax, boxes, io.DisplaySize);
-        var at = GuideAttentionFor(boxes.Count > 0, hovered, now - u.HoverAt, needsUser, avoid);
+        var changedAgo = now - Math.Max(u.ArrivedAt, u.StatusAt);
+        var at = GuideAttentionFor(boxes.Count > 0, hovered, now - u.HoverAt, needsUser, loud, changedAgo, inCombat, areaSafe, fv.Running, quiet, Vector2.Zero);
+        GuideUpdateToasts(g, boxes, at, utc);
+        var toastsH = GuideToastStackHeight(u.Toasts.Count);
+        var showCard = at.CardVisible && !nothing;
+        var rectH = (showCard ? cardH : 0f) + (showCard && cardH > 0 && toastsH > 0 ? 2 : 0) + toastsH;
+        var avoid = rectH > 0 ? GuideAvoid(u.Home, u.Home + new Vector2(GuideWidth, rectH), boxes, io.DisplaySize) : Vector2.Zero;
+        at = at with { Overlapped = avoid != Vector2.Zero, CardShift = avoid };
+        _guideAttention = at;
 
-        // Ease what the attention asked for: the opacity over FadeSec, the slide clear of a highlight over ShiftSec.
-        u.AlphaNow += (at.CardAlpha - u.AlphaNow) * (1f - MathF.Exp(-io.DeltaTime / (float)(GuideFadeSec / 3)));
+        // Ease what the attention asked for: the opacity over FadeSec (a hidden card fades out before it goes, and
+        // fades back in), the slide clear of a highlight over ShiftSec.
+        u.AlphaNow += ((showCard ? at.CardAlpha : 0f) - u.AlphaNow) * (1f - MathF.Exp(-io.DeltaTime / (float)(GuideFadeSec / 3)));
         if (at.CardShift != u.ShiftTarget) { u.ShiftFrom = u.Shift; u.ShiftTarget = at.CardShift; u.ShiftAt = now; }
         u.Shift = u.ShiftFrom + (u.ShiftTarget - u.ShiftFrom) * HlEase((now - u.ShiftAt) / GuideShiftSec);
         var shifted = u.ShiftTarget != Vector2.Zero || u.Shift != Vector2.Zero;
+        var drawCard = showCard || (!nothing && u.AlphaNow > GuideHiddenAlpha);
+
+        // The status dot stands in for the hidden card (rules 1 and 5): background draw list, no window.
+        u.DotShown = at.Dot != GuideDot.None && !nothing;
+        if (u.DotShown) DrawGuideDot(at.Dot, GuideLookFor(g.status).Tone, dotPos, now, _tcpServer?.IsRunning == true);
 
         // The log lives outside the window: toasts (no input) or, toggled by the hotkey, its own selectable sheet.
         // Both anchor under the panel's last known rectangle, so they show even while the panel is hidden, and they
         // move with it when it slides clear of a highlight.
         try
         {
-            var anchor = new Vector2(u.WinPos.X, u.WinPos.Y + cardH + (cardH > 0 ? 2 : 0));
-            if (hide) anchor = u.Home + u.Shift;
-            if (!DrawGuideLogSheet(g, th, now, anchor)) { if (at.ToastsAllowed) DrawGuideToasts(g, th, now, utc, anchor); }
+            var anchor = drawCard ? new Vector2(u.WinPos.X, u.WinPos.Y + cardH + (cardH > 0 ? 2 : 0)) : u.Home + u.Shift;
+            if (!DrawGuideLogSheet(g, th, now, anchor)) { if (at.ToastsAllowed) DrawGuideToasts(th, now, utc, anchor); }
         }
         catch (Exception ex) { GuideReport(ex); }
 
-        if (hide) { u.WinH = 0; return; }
+        if (!drawCard) { u.WinH = 0; return; }
 
         // Default: the very top of the screen, centred. The user drags it anywhere and imgui.ini remembers (its
         // home). While it would cover a highlight it is moved away from home (and cannot be dragged, so home stays
@@ -217,7 +255,7 @@ public partial class WhatsAnAiBridge
                     | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoCollapse
                     | ImGuiWindowFlags.NoNav | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoBringToFrontOnFocus
                     | ImGuiWindowFlags.NoBackground;
-        if (!at.CardInput) flags |= ImGuiWindowFlags.NoInputs;   // ghosted: the mouse goes to the game underneath
+        if (!at.CardInput || !showCard) flags |= ImGuiWindowFlags.NoInputs;   // ghosted or fading out: the mouse goes to the game underneath
         if (shifted) flags |= ImGuiWindowFlags.NoMove;
         var shown = ImGui.Begin("Agent Guide###bridge_guide_panel", flags);
         try
@@ -237,35 +275,95 @@ public partial class WhatsAnAiBridge
 
     // ── Attention ────────────────────────────────────────────────────
 
+    /// <summary>Which status dot stands in for the hidden card: none, the quiet dot (rule 5) or the loud one (rule 1).</summary>
+    private enum GuideDot { None, Quiet, Loud }
+
     /// <summary>
-    /// How visible each guide surface is this frame, decided in one place (research\display-attention.md; this is
-    /// its v1: rules 2, 3 and 7). The inputs it used travel with the outputs, so a surface can explain itself and
-    /// the rules can grow (combat, town, idle, open panels...) without the surfaces changing: each surface reads its
-    /// entry and never decides for itself.
+    /// How visible each guide surface is this frame, decided in one place (research\display-attention.md: rules 1
+    /// to 7). The inputs it used travel with the outputs, so a surface can explain itself and the rules can grow
+    /// (open panels, recent damage...) without the surfaces changing: each surface reads its entry and never decides
+    /// for itself. The last result is kept in _guideAttention for surfaces drawn after the panel (the highlights).
     /// </summary>
-    /// <param name="Highlights">Input: highlight boxes are on screen (HighlightSnapshot).</param>
-    /// <param name="Hovered">Input: the mouse is over the card's rect (hit-test on io.MousePos, no focus taken).</param>
-    /// <param name="HoverAgo">Input: seconds since the mouse was last over the card.</param>
-    /// <param name="NeedsUser">Input: the user must act (waiting / failed / progress). Unused by v1's rules.</param>
+    /// <param name="Highlights">Input: highlight boxes are on screen (HighlightSnapshot), i.e. the instruction has a target it is pointed at.</param>
+    /// <param name="Hovered">Input: the mouse is over the card's rect, or over the status dot while that stands in for it (hit-test on io.MousePos, no focus taken).</param>
+    /// <param name="HoverAgo">Input: seconds since the mouse was last over the card or the dot.</param>
+    /// <param name="NeedsUser">Input: the user must act (waiting / failed / progress).</param>
+    /// <param name="Loud">Input: a loud state (waiting / failed): the user must act, not just watch.</param>
+    /// <param name="ChangedAgo">Input: seconds since the instruction or the status last changed.</param>
+    /// <param name="InCombat">Input: hostile monsters near the player within the last few seconds (CombatSense, held 3 s).</param>
+    /// <param name="AreaSafe">Input: town or hideout, or no hostile near at the last sample (no hold).</param>
+    /// <param name="FlowRunning">Input: a guided flow is running.</param>
+    /// <param name="Quiet">Input: nothing to do and nothing happened for two minutes.</param>
     /// <param name="Overlapped">Input: at its home position the card (with its toasts) would cover a highlight box.</param>
+    /// <param name="CardVisible">Output: the card is shown at all (false: it fades out and a dot may stand in).</param>
     /// <param name="CardAlpha">Output: the card's target opacity (the drawer eases towards it).</param>
-    /// <param name="CardPulse">Output: the waiting frame may pulse.</param>
+    /// <param name="CardPulse">Output: the waiting frame may pulse (the emphasis after a change).</param>
     /// <param name="CardInput">Output: the card takes the mouse (false: clicks go to the game underneath).</param>
     /// <param name="ShowPlan">Output: the "next:" plan line is drawn under the instruction.</param>
     /// <param name="ToastsAllowed">Output: log toasts may show.</param>
+    /// <param name="ToastsMuted">Output: new log lines are held back; when the mute lifts they show as one summary.</param>
+    /// <param name="ToastMax">Output: how many toasts at once.</param>
+    /// <param name="ToastSkipLabelled">Output: a toast whose text a visible highlight label already says is dropped.</param>
+    /// <param name="HighlightsAllowed">Output: the highlight overlay is drawn.</param>
+    /// <param name="Dot">Output: the status dot that stands in for the hidden card.</param>
     /// <param name="CardShift">Output: offset from the card's home position (zero: at home).</param>
     private readonly record struct GuideAttention(
-        bool Highlights, bool Hovered, double HoverAgo, bool NeedsUser, bool Overlapped,
-        float CardAlpha, bool CardPulse, bool CardInput, bool ShowPlan, bool ToastsAllowed, Vector2 CardShift);
+        bool Highlights, bool Hovered, double HoverAgo, bool NeedsUser, bool Loud, double ChangedAgo,
+        bool InCombat, bool AreaSafe, bool FlowRunning, bool Quiet, bool Overlapped,
+        bool CardVisible, float CardAlpha, bool CardPulse, bool CardInput, bool ShowPlan,
+        bool ToastsAllowed, bool ToastsMuted, int ToastMax, bool ToastSkipLabelled,
+        bool HighlightsAllowed, GuideDot Dot, Vector2 CardShift);
 
-    private static GuideAttention GuideAttentionFor(bool highlights, bool hovered, double hoverAgo, bool needsUser, Vector2 avoid)
+    private GuideAttention _guideAttention = GuideAttentionFor(false, false, 1e9, false, false, 1e9, false, true, false, false, Vector2.Zero);
+
+    private static GuideAttention GuideAttentionFor(bool highlights, bool hovered, double hoverAgo, bool needsUser, bool loud,
+        double changedAgo, bool inCombat, bool areaSafe, bool flowRunning, bool quiet, Vector2 avoid)
     {
         var explicitly = hovered || hoverAgo < GuideHoverKeepSec;   // rule 7: a hovered surface shows until 5 s after
-        var ghost = highlights && !explicitly;                       // rule 2: the highlight carries the words
-        var alpha = ghost ? GuideGhostAlpha : highlights ? GuideHoverAlpha : 1f;
-        // rule 3: never cover a highlight; the offset was found by GuideAvoid (zero when nothing overlaps).
-        return new GuideAttention(highlights, hovered, hoverAgo, needsUser, avoid != Vector2.Zero,
-            alpha, !ghost, !ghost, !ghost, true, avoid);
+        // rule 1 (combat beats everything) and rule 5 (quiet): the card gives way, unless the user reached for it
+        // (hovering the dot that stands in for it is explicit).
+        var away = inCombat || quiet;
+        var visible = !away || explicitly;
+        var ghost = visible && highlights && !explicitly;            // rule 2: the highlight carries the words
+        var alpha = !visible ? 0f : ghost ? GuideGhostAlpha : highlights || away ? GuideHoverAlpha : 1f;
+        // rule 4: with nothing to point at, a waiting card is fully visible and emphasised (pulse) only for a few
+        // seconds after it changed, then calm. The same emphasis window applies when it is hovered back from a ghost.
+        var pulse = visible && !ghost && changedAgo < GuideEmphasisSec;
+        // rule 1: a loud state becomes a dot while the card is away for combat; rule 5: quiet leaves the status dot.
+        var dot = visible ? GuideDot.None : inCombat && loud ? GuideDot.Loud : quiet ? GuideDot.Quiet : GuideDot.None;
+        // rule 1: toasts queue through combat; highlights only for a running flow while no hostile is near.
+        var highlightsAllowed = !inCombat || (flowRunning && areaSafe);
+        // rule 6: at most two toasts; a toast a visible label already says is noise.
+        // rule 3: never cover a highlight; the offset comes from GuideAvoid (zero when nothing overlaps).
+        return new GuideAttention(highlights, hovered, hoverAgo, needsUser, loud, changedAgo, inCombat, areaSafe, flowRunning, quiet,
+            avoid != Vector2.Zero,
+            visible, alpha, pulse, visible && !ghost, visible && !ghost,
+            !inCombat, inCombat, GuideToastMax, highlights && highlightsAllowed,
+            highlightsAllowed, dot, avoid);
+    }
+
+    /// <summary>
+    /// Where the status dot sits: on the top edge of the screen above the card's home when the card lives in its
+    /// default strip at the very top, else at the top edge of the card's home. Centred on the card.
+    /// </summary>
+    private static Vector2 GuideDotPos(GuideUiState u) =>
+        new(MathF.Round(u.Home.X + GuideWidth * 0.5f), u.Home.Y <= GuideTopY + 1 ? 6f : u.Home.Y + GuideEdge + GuideDotR);
+
+    /// <summary>
+    /// The 6 px status dot on the background draw list (no window, no input; hovering it is read by the panel's own
+    /// hit-test). A dark halo keeps it readable over the game. Quiet: steady, the last status's tone (red when the
+    /// bridge is not listening). Loud, in combat: the status tone breathing slowly - act once the fight is over.
+    /// </summary>
+    private static void DrawGuideDot(GuideDot kind, Vector4 tone, Vector2 c, double now, bool alive)
+    {
+        var dl = ImGui.GetBackgroundDrawList();
+        dl.AddCircleFilled(c, GuideDotR + 2f, U(GuideToastInk, 0.55f), 16);
+        if (kind == GuideDot.Loud)
+        {
+            var b = (float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 0.8));
+            dl.AddCircleFilled(c, GuideDotR, U(tone, 0.65f + 0.35f * b), 16);
+        }
+        else dl.AddCircleFilled(c, GuideDotR, U(alive ? tone : ToneBad, 0.6f), 16);
     }
 
     /// <summary>
@@ -307,15 +405,61 @@ public partial class WhatsAnAiBridge
         return best;
     }
 
-    /// <summary>Height of the toast stack under the card right now (0 when no line is young enough to show).</summary>
-    private static float GuideToastStackHeight(in GuideSnap g, DateTime utc)
+    /// <summary>A toast as it shows: its text and kind, when it (last) arrived, and how many equal lines it stands for.</summary>
+    private readonly record struct GuideToast(string Text, string Kind, DateTime At, int Count);
+
+    /// <summary>
+    /// Rebuilds the toast stack for this frame from the log and attention (rules 1 and 6), newest first. Muted
+    /// (combat): nothing shows and the start of the mute is remembered; when the mute lifts, what arrived meanwhile
+    /// becomes one toast - the line itself when it was one, else "N updates" - and those lines never show on their
+    /// own. Repeats merge into one toast with a count ("Recorded x3" in the drawer); a line a visible highlight
+    /// label already says is dropped; at most ToastMax. Allocation-free unless a line is young enough to show.
+    /// </summary>
+    private void GuideUpdateToasts(in GuideSnap g, List<HighlightBox> boxes, in GuideAttention at, DateTime utc)
     {
-        var n = 0;
-        for (var i = g.log.Length - 1; i >= 0 && n < GuideToastMax; i--)
+        var u = _guideUi;
+        if (at.ToastsMuted) u.MuteSince ??= utc;
+        else if (u.MuteSince is DateTime from)
         {
-            if ((utc - g.log[i].At).TotalSeconds >= GuideToastSec) break;
-            n++;
+            u.MuteSince = null;
+            u.MuteFrom = from;
+            u.MuteTo = utc;
+            var n = 0;
+            GuideLogEntry? last = null;
+            for (var i = g.log.Length - 1; i >= 0 && g.log[i].At >= from; i--) { n++; last ??= g.log[i]; }
+            if (n == 1) u.Summary = new GuideToast(last!.Text, last.Kind, utc, 1);
+            else if (n > 1) u.Summary = new GuideToast($"{n} updates", "agent", utc, n);
         }
+        u.Toasts.Clear();
+        if (at.ToastsMuted) return;
+        if (u.Summary is { } s) { if ((utc - s.At).TotalSeconds < GuideToastSec) u.Toasts.Add(s); else u.Summary = null; }
+        var mergeFrom = u.Toasts.Count;   // the summary never merges with a log line
+        for (var i = g.log.Length - 1; i >= 0 && u.Toasts.Count < at.ToastMax; i--)
+        {
+            var e = g.log[i];
+            if ((utc - e.At).TotalSeconds >= GuideToastSec) break;
+            if (e.At >= u.MuteFrom && e.At < u.MuteTo) continue;
+            if (at.ToastSkipLabelled && GuideLabelSays(boxes, e.Text)) continue;
+            if (u.Toasts.Count > mergeFrom)
+            {
+                var t = u.Toasts[^1];
+                if (t.Kind == e.Kind && string.Equals(t.Text, e.Text, StringComparison.Ordinal)) { u.Toasts[^1] = t with { Count = t.Count + 1 }; continue; }
+            }
+            u.Toasts.Add(new GuideToast(e.Text, e.Kind, e.At, 1));
+        }
+    }
+
+    /// <summary>True when a highlight on screen carries this text as its label (the user already reads it there).</summary>
+    private static bool GuideLabelSays(List<HighlightBox> boxes, string text)
+    {
+        foreach (var b in boxes)
+            if (b.Label != null && string.Equals(b.Label, text, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    /// <summary>Height of the toast stack under the card right now (0 when no toast shows).</summary>
+    private static float GuideToastStackHeight(int n)
+    {
         if (n == 0) return 0f;
         var rowH = ImGui.GetFontSize() * 0.85f + 8;
         return GuideEdge + n * (rowH + 3f);
@@ -677,13 +821,14 @@ public partial class WhatsAnAiBridge
     // ── Log: toasts ──────────────────────────────────────────────────
 
     /// <summary>
-    /// Each new log line as a small dark toast under the panel for ~3 s: newest on top (older ones slide down to
-    /// make room), the last 0.6 s fading, at most three at once. Drawn on the background draw list: no window, so
-    /// the mouse passes straight through to the game. Nothing stays.
+    /// The toast stack (GuideUpdateToasts) as small dark toasts under the panel for ~3 s each: newest on top (older
+    /// ones slide down to make room), the last 0.6 s fading, at most two at once; a merged repeat reads "Recorded x3".
+    /// Drawn on the background draw list: no window, so the mouse passes straight through to the game. Nothing stays.
     /// </summary>
-    private void DrawGuideToasts(in GuideSnap g, PanelTheme th, double now, DateTime utc, Vector2 anchor)
+    private void DrawGuideToasts(PanelTheme th, double now, DateTime utc, Vector2 anchor)
     {
-        if (g.log.Length == 0) return;
+        var toasts = _guideUi.Toasts;
+        if (toasts.Count == 0) return;
         var dl = ImGui.GetBackgroundDrawList();
         var font = ImGui.GetFont();
         var f = ImGui.GetFontSize();
@@ -693,20 +838,19 @@ public partial class WhatsAnAiBridge
         var maxW = GuideWidth - GuideEdge * 2;
         var x0 = anchor.X + GuideEdge;
         // The newest toast's slide-in pushes the older ones down with it.
-        var newestAge = (utc - g.log[^1].At).TotalSeconds;
+        var newestAge = (utc - toasts[0].At).TotalSeconds;
         var push = (float)(1 - HlEase(newestAge / GuideToastInSec));
         var y = anchor.Y + GuideEdge;
-        var shown = 0;
-        for (var i = g.log.Length - 1; i >= 0 && shown < GuideToastMax; i--)
+        for (var shown = 0; shown < toasts.Count; shown++)
         {
-            var e = g.log[i];
+            var e = toasts[shown];
             var age = (utc - e.At).TotalSeconds;
-            if (age >= GuideToastSec) break;
             var alpha = (float)Math.Clamp((GuideToastSec - age) / GuideToastFadeSec, 0, 1) * HlEase(age / GuideToastInSec);
             if (shown > 0) y -= push * (rowH + gap);   // older rows catch up with the push from above
             var tone = GuideKindTone(e.Kind, th);
             var textMax = maxW - pad * 2 - 3 - 6;
-            var text = GuideClipText(e.Text, textMax * (f / small)); // clip measured at the small size
+            var raw = e.Count > 1 ? $"{e.Text} x{e.Count}" : e.Text;
+            var text = GuideClipText(raw, textMax * (f / small)); // clip measured at the small size
             var textW = ImGui.CalcTextSize(text).X * (small / f);
             var w = pad + 3 + 6 + textW + pad;
             var min = new Vector2(x0, y);
@@ -717,7 +861,6 @@ public partial class WhatsAnAiBridge
             var tcol = e.Kind == "agent" ? U(th.Text, 0.78f * alpha) : U(tone, 0.9f * alpha);
             dl.AddText(font, small, new Vector2(min.X + pad + 9, min.Y + 4), tcol, text);
             y += rowH + gap;
-            shown++;
         }
     }
 

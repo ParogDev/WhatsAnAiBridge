@@ -419,7 +419,9 @@ public partial class WhatsAnAiBridge
     {
         ResolveHighlights();
         var (boxes, title, current, since, rev) = HighlightSnapshot();
-        if (boxes.Count == 0) return;
+        // Attention (GuidePanel.cs, decided earlier this frame): in combat the overlay stays off unless a flow is
+        // running and no hostile is near.
+        if (boxes.Count == 0 || !_guideAttention.HighlightsAllowed) return;
         DrawHighlightsImpl(boxes, title, current, since, rev);
     }
 }

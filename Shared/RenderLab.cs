@@ -22,7 +22,8 @@ namespace WhatsAnAiBridge;
 /// - Path: A* to a target (waypoint, area transition, or an entity path substring) on a worker thread when the player
 ///   changes cell (at most every 150 ms), simplified by line of sight, smoothed (Chaikin, heights too), and trimmed to
 ///   start at the player's live position so re-plans never draw backwards from the feet.
-/// lab.set {walls?, path?, target?, delayMs?}, lab.state.
+/// - Bars: a marker at HealthBars' own anchor for each nearby monster and player (RenderLabBars.cs).
+/// lab.set {walls?, path?, bars?, target?, delayMs?}, lab.state.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
@@ -30,7 +31,7 @@ public partial class WhatsAnAiBridge
 
     private sealed class LabState
     {
-        public bool Walls, Path;
+        public bool Walls, Path, Bars;
         public string Target = "waypoint";
         public double DelayMs = 5;
         // area cache
@@ -58,6 +59,7 @@ public partial class WhatsAnAiBridge
         {
             if (p?["walls"] is { } w) _lab.Walls = w.Value<bool>();
             if (p?["path"] is { } pa) _lab.Path = pa.Value<bool>();
+            if (p?["bars"] is { } ba) _lab.Bars = ba.Value<bool>();
             if (p?["target"]?.Value<string>() is { Length: > 0 } t) { _lab.Target = t; _lab.PathWorld = null; _lab.PathCell = (int.MinValue, 0); }
             if (p?["delayMs"] is { } d) _lab.DelayMs = Math.Clamp(d.Value<double>(), 0, 100);
             return LabStateJson();
@@ -69,7 +71,7 @@ public partial class WhatsAnAiBridge
 
     private JObject LabStateJson() => new()
     {
-        ["walls"] = _lab.Walls, ["path"] = _lab.Path, ["target"] = _lab.Target, ["delayMs"] = _lab.DelayMs,
+        ["walls"] = _lab.Walls, ["path"] = _lab.Path, ["bars"] = _lab.Bars, ["target"] = _lab.Target, ["delayMs"] = _lab.DelayMs,
         ["wallRuns"] = _lab.WallRuns.Count, ["pathPoints"] = _lab.PathWorld?.Length ?? 0, ["targetLabel"] = _lab.TargetLabel,
         ["calibrated"] = _lab.CamOffset >= 0 && _lab.PosOffset >= 0, ["error"] = _lab.LastError,
     };
@@ -77,7 +79,7 @@ public partial class WhatsAnAiBridge
     /// <summary>Called from Render, after the other drawers.</summary>
     private void RenderLabFrame()
     {
-        if (!_lab.Walls && !_lab.Path) return;
+        if (!_lab.Walls && !_lab.Path && !_lab.Bars) return;
         if (!GameController.InGame || GameController.Player == null) return;
         try
         {
@@ -92,6 +94,7 @@ public partial class WhatsAnAiBridge
             if (_lab.Walls) { LabCastWalls(cell, player); LabProjectWalls(f, m, half, player); }
             if (_lab.Path) { LabPlanPath(cell); LabProjectPath(f, m, half, player); }
             DrawRenderLabImpl(f);
+            if (_lab.Bars) LabDrawBars(m, half);
             _lab.LastError = null;
         }
         catch (Exception ex)
