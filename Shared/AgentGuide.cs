@@ -10,7 +10,8 @@ namespace WhatsAnAiBridge;
 /// and a short log of what the agent is doing - so the user never has to watch the chat to know what to do in game.
 ///   guide.set   {title?, instruction?, step?, steps?, status?, detail?, clear?}
 ///               status: waiting (do it now) | detected (change seen) | settling | captured | failed | info | done
-///   guide.log   {text, kind?: agent|step|result|warn}
+///   guide.log   {text, kind?: agent|step|result|warn|error, title?}
+///               title: the toast's caps title (up to 40 chars, e.g. "Low life"); without one the kind is the title
 ///   guide.state {}
 /// The state is in memory only (not saved); the panel is drawn by GuidePanel.cs. Written from the TCP thread, read in
 /// Render, so access goes through the lock.
@@ -22,6 +23,7 @@ public partial class WhatsAnAiBridge
         public DateTime At;
         public string Kind = "agent";
         public string Text = "";
+        public string? Title;   // the toast's title line; null = the kind as a word
     }
 
     internal sealed class GuideState
@@ -89,10 +91,11 @@ public partial class WhatsAnAiBridge
     {
         var text = Clip(p?["text"]?.ToString(), 200);
         if (string.IsNullOrWhiteSpace(text)) return new JObject { ["error"] = "missing_text" };
-        var kind = p?["kind"]?.ToString() is "step" or "result" or "warn" ? p["kind"]!.ToString() : "agent";
+        var kind = p?["kind"]?.ToString() is "step" or "result" or "warn" or "error" ? p["kind"]!.ToString() : "agent";
+        var title = Clip(p?["title"]?.ToString(), 40);
         lock (_guideLock)
         {
-            _guide.Log.Add(new GuideLogEntry { At = DateTime.UtcNow, Kind = kind, Text = text! });
+            _guide.Log.Add(new GuideLogEntry { At = DateTime.UtcNow, Kind = kind, Text = text!, Title = string.IsNullOrWhiteSpace(title) ? null : title });
             if (_guide.Log.Count > GuideLogMax) _guide.Log.RemoveRange(0, _guide.Log.Count - GuideLogMax);
             _guide.UpdatedAt = DateTime.UtcNow;
             _guide.Rev++;
@@ -106,7 +109,7 @@ public partial class WhatsAnAiBridge
     {
         ["ok"] = true, ["rev"] = _guide.Rev, ["title"] = _guide.Title, ["instruction"] = _guide.Instruction,
         ["step"] = _guide.Step, ["steps"] = _guide.Steps, ["status"] = _guide.Status, ["detail"] = _guide.Detail,
-        ["log"] = new JArray(_guide.Log.TakeLast(10).Select(e => new JObject { ["at"] = e.At.ToString("HH:mm:ss"), ["kind"] = e.Kind, ["text"] = e.Text })),
+        ["log"] = new JArray(_guide.Log.TakeLast(10).Select(e => new JObject { ["at"] = e.At.ToString("HH:mm:ss"), ["kind"] = e.Kind, ["text"] = e.Text, ["title"] = e.Title })),
     };
 
     /// <summary>A consistent copy for drawing (taken once per frame).</summary>
