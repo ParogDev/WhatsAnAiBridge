@@ -50,6 +50,10 @@ public partial class WhatsAnAiBridge
     }
 
     private readonly LabState _lab = new();
+    private readonly List<LabWallRun> _labWallBuf = new();
+    private readonly List<Vector2> _labPathPts = new();
+    private readonly List<float> _labPathAlong = new();
+    private Vector2[] _labPathArr = []; private float[] _labAlongArr = [];
 
     partial void DrawRenderLabImpl(LabFrame f);
 
@@ -138,11 +142,11 @@ public partial class WhatsAnAiBridge
             }
         }
         if (_lab.CamOffset < 0 || _lab.PosOffset < 0) return true;
-        byte[] mb, pb;
-        using (mem.DisableCaching()) { mb = mem.ReadBytes(_lab.CamAddress + _lab.CamOffset, 64); pb = mem.ReadBytes(r.Address + _lab.PosOffset, 12); }
-        if (mb is not { Length: 64 } || pb is not { Length: 12 }) return true;
+        // Fresh and allocation-free: straight from the leaf backend (no page cache, no arrays).
+        var freshM = RawRead<Matrix4x4>(_lab.CamAddress + _lab.CamOffset);
+        var freshP = RawRead<Vector3>(r.Address + _lab.PosOffset);
         var now = Stopwatch.GetTimestamp();
-        _lab.History.Add((now, MemoryMarshal.Read<Matrix4x4>(mb), new Vector3(BitConverter.ToSingle(pb, 0), BitConverter.ToSingle(pb, 4), BitConverter.ToSingle(pb, 8))));
+        _lab.History.Add((now, freshM, freshP));
         while (_lab.History.Count > 2 && _lab.History[0].t < now - Stopwatch.Frequency / 4) _lab.History.RemoveAt(0);
         var t = now - (long)(_lab.DelayMs * Stopwatch.Frequency / 1000);
         (m, player) = LabStateAt(t);
@@ -234,9 +238,13 @@ public partial class WhatsAnAiBridge
     private void LabProjectWalls(LabFrame f, Matrix4x4 m, Vector2 half, Vector3 player)
     {
         const float wallHeight = 60f;   // world units drawn as the wall face (up is -Z)
-        foreach (var run in _lab.WallRuns)
+        for (var k = 0; k < _lab.WallRuns.Count; k++)
         {
-            var pts = new Vector2[run.Count]; var dist = new float[run.Count]; var hgt = new float[run.Count];
+            var run = _lab.WallRuns[k];
+            // Reuse last frame's arrays for this run (walls only change when the player changes cell): no garbage per frame.
+            if (k >= _labWallBuf.Count) _labWallBuf.Add(new LabWallRun(new Vector2[run.Count], new float[run.Count], new float[run.Count]));
+            else if (_labWallBuf[k].Points.Length != run.Count) _labWallBuf[k] = new LabWallRun(new Vector2[run.Count], new float[run.Count], new float[run.Count]);
+            var (pts, dist, hgt) = (_labWallBuf[k].Points, _labWallBuf[k].Distance, _labWallBuf[k].Height);
             for (var i = 0; i < run.Count; i++)
             {
                 var (g, _) = run[i];
@@ -244,7 +252,7 @@ public partial class WhatsAnAiBridge
                 hgt[i] = Vector2.Distance(pts[i], Project(m, half, g with { Z = g.Z - wallHeight }));
                 dist[i] = Vector2.Distance(new Vector2(g.X, g.Y), new Vector2(player.X, player.Y));
             }
-            f.Walls.Add(new LabWallRun(pts, dist, hgt));
+            f.Walls.Add(_labWallBuf[k]);
         }
     }
 
@@ -299,7 +307,7 @@ public partial class WhatsAnAiBridge
             if (d < bestD) { bestD = d; seg = i; start = c; }
             if (i > 40 && d > bestD * 4) break;   // well past the nearby part
         }
-        var pts = new List<Vector2>(); var along = new List<float>();
+        var pts = _labPathPts; var along = _labPathAlong; pts.Clear(); along.Clear();   // reused every frame
         float acc = 0; var prev = player with { Z = start.Z };
         void Add(Vector3 p)
         {
@@ -316,7 +324,9 @@ public partial class WhatsAnAiBridge
         pts.Add(Project(m, half, prev)); along.Add(0);
         Add(start);
         for (var i = seg + 1; i < w.Length; i++) Add(w[i]);
-        f.Path = new LabPath(pts.ToArray(), along.ToArray(), acc, _lab.TargetLabel,
+        if (_labPathArr.Length != pts.Count) { _labPathArr = new Vector2[pts.Count]; _labAlongArr = new float[pts.Count]; }
+        pts.CopyTo(_labPathArr); along.CopyTo(_labAlongArr);
+        f.Path = new LabPath(_labPathArr, _labAlongArr, acc, _lab.TargetLabel,
             (float)((Stopwatch.GetTimestamp() - _lab.PathChangedAt) / (double)Stopwatch.Frequency));
     }
 
