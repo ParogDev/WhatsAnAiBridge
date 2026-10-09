@@ -117,6 +117,11 @@ public partial class WhatsAnAiBridge
     /// <summary>The offsets struct a memory object caches: a CachedValue&lt;T&gt;/FrameCache&lt;T&gt; field's Value, or a property typed as a GameOffsets struct.</summary>
     private static (object? value, string? via) FindOffsetsStruct(object obj)
     {
+        // Candidates: CachedValue<T>/FrameCache<T> field values and GameOffsets-typed properties. An object can cache
+        // several (IngameState caches a Vector2 too): prefer GameOffsets types, then the largest struct.
+        var found = new List<(object v, string via, bool game, int size)>();
+        static int Size(Type t) { try { return Marshal.SizeOf(t); } catch { return 0; } }
+        static bool Game(Type t) => t.Assembly.GetName().Name?.StartsWith("GameOffsets", StringComparison.Ordinal) == true;
         for (var t = obj.GetType(); t != null && t != typeof(object); t = t.BaseType)
             foreach (var f in t.GetFields(LayoutFlags | BindingFlags.DeclaredOnly))
             {
@@ -126,16 +131,15 @@ public partial class WhatsAnAiBridge
                 try
                 {
                     var cache = f.GetValue(obj);
-                    var v = cache?.GetType().GetProperty("Value")?.GetValue(cache);
-                    if (v != null) return (v, $"{t.Name}.{f.Name}.Value");
+                    if (cache?.GetType().GetProperty("Value")?.GetValue(cache) is { } v) found.Add((v, $"{t.Name}.{f.Name}.Value", Game(arg), Size(arg)));
                 }
                 catch { }
             }
         foreach (var prop in obj.GetType().GetProperties(LayoutFlags))
-            if (prop.PropertyType is { IsValueType: true, IsPrimitive: false } pt && pt.Assembly.GetName().Name?.StartsWith("GameOffsets", StringComparison.Ordinal) == true &&
-                prop.GetIndexParameters().Length == 0)
-                try { return (prop.GetValue(obj), $"{obj.GetType().Name}.{prop.Name}"); } catch { }
-        return (null, null);
+            if (prop.PropertyType is { IsValueType: true, IsPrimitive: false } pt && Game(pt) && prop.GetIndexParameters().Length == 0)
+                try { if (prop.GetValue(obj) is { } v) found.Add((v, $"{obj.GetType().Name}.{prop.Name}", true, Size(pt))); } catch { }
+        var best = found.OrderByDescending(x => x.game).ThenByDescending(x => x.size).FirstOrDefault();
+        return best.v == null ? (null, null) : (best.v, best.via);
     }
 
     private sealed record LayoutField(string Name, Type Type, int Off, int Len, int? Meta, FieldInfo[] Chain);

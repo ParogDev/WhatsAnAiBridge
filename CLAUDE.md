@@ -94,6 +94,7 @@ Offsets move and HUD APIs change with patches. Code that looks things up must sa
   - Walls: rays over `RawPathfindingData`, re-cast per grid cell.
   - Path: A* on a worker, line-of-sight simplification and Chaikin smoothing, trimmed to start at the player's live position.
   - The drawer gets screen-space data only.
+- `profile.plugin {name, durationMs?}` / `profile.result {id}` (`Shared/PluginProfiler.cs`, MCP `profile_plugin`): Harmony wraps every method of one plugin's assembly for a few seconds, with a per-thread call stack, and reports per method calls and self/inclusive time. Then `UnpatchAll`. Behind *Allow HUD Instrumentation*; skips IL stubs, generic definitions and tiny bodies; refuses the bridge itself.
 - `object.explore {path, offset, limit, csharp?}` (`Shared/ObjectExplorer.cs`) returns one level of the object model at a walker path, for mapping data out:
   - **For the node and each child:** type, kind, a one-line preview (structs as `X=1 Y=2`, objects with their Name/RenderName and visibility), counts, the walker `path`, and null-safe `csharp`. Dictionaries with enum keys get typed keys (`Stats?[GameStat.MaximumLife]`).
   - **Entities** also list their components, as `GetComponent<T>()` paths.
