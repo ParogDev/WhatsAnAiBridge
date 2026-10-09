@@ -12,3 +12,4 @@ global using Color = SharpDX.Color;
 global using RectangleF = SharpDX.RectangleF;
 global using Vector2N = System.Numerics.Vector2;
 global using FileInMemory = ExileCore.PoEMemory.FileInMemory;
+global using UiElement = ExileCore.PoEMemory.Element;

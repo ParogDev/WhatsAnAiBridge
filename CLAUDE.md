@@ -50,6 +50,10 @@ Poe2\                    PoE2 partial class + GlobalUsings (ExileCore2, System.D
   - Nothing is captured before Start. The runner in `Render` then records the baseline, waits for a lasting change and lets it settle, once per repeat. It stores the raw eval / memory.read / memory.collect responses, which the MCP diffs.
   - Saved to `<BridgeDirectory>\experiments\queue.json`. A step that was running when the HUD closed goes back to queued.
 - `data.find_value` / `data.find_result`: a background scan of all loaded tables for ids seen in memory.
+- `observe.start|stop|status|events` (`Shared/Observer.cs`): passive observation while the user plays. The runner in `Render` checks every 500 ms while on and in game:
+  - Top-level UI panels opening or closing, with the IngameUIElements property that maps each one, or none. An unmapped panel is saved with its first texts and 512 bytes at its address.
+  - Area and level changes, and new entity metadata prefixes (every 2 s).
+  - Events go to a ring of 1000 and to `<BridgeDirectory>\observe\journal.jsonl`. The on/off state survives restarts (`observe\state.json`).
 - Structured methods with named params: `stats.*` (shared stats view), `recording.*` (stateless playback), and `hud.*` (dev loop):
   - `hud.plugins` lists loaded and failed source plugins.
   - `hud.reload_plugin {name}` queues a recompile of one source plugin, like the menu's Reload button. It runs in `Render` on the main thread, and the HUD pauses while compiling. The bridge refuses to reload itself. The setting is `AllowPluginReload`.
