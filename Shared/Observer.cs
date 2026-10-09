@@ -23,6 +23,8 @@ public partial class WhatsAnAiBridge
     {
         public bool Enabled;
         public DateTime? Since;
+        /// <summary>Layer specs (ObserveLayers.cs); null = the defaults.</summary>
+        public List<LayerSpec>? Layers;
     }
 
     private readonly object _obsLock = new();
@@ -56,7 +58,7 @@ public partial class WhatsAnAiBridge
         {
             var j = Path.Combine(ObsDir, "journal.jsonl");
             if (File.Exists(j))
-                foreach (var line in File.ReadLines(j))
+                foreach (var line in JournalTail(j, 16 * 1024 * 1024))
                 {
                     if (line.Length == 0) continue;
                     JObject e;
@@ -68,6 +70,20 @@ public partial class WhatsAnAiBridge
         }
         catch { }
         return _obs;
+    }
+
+    /// <summary>
+    /// The journal's last maxBytes as lines (the first, partial line skipped). Layer events make the journal grow by
+    /// MBs per hour; reading it all at every start would grow with it. The sequence is monotonic, so the tail has the max.
+    /// </summary>
+    private static IEnumerable<string> JournalTail(string path, long maxBytes)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        var skipFirst = fs.Length > maxBytes;
+        if (skipFirst) fs.Seek(-maxBytes, SeekOrigin.End);
+        using var rd = new StreamReader(fs);
+        if (skipFirst) rd.ReadLine();
+        for (string? line; (line = rd.ReadLine()) != null;) yield return line;
     }
 
     private void SaveObs()
@@ -82,11 +98,15 @@ public partial class WhatsAnAiBridge
 
     private string? ProcessObserveMethod(string method, JToken? p) => method switch
     {
-        "observe.start" => SafeMemory(() => { SrvConfigure(p?["server"] as JArray); return ObserveSet(true); }),
+        "observe.start" => SafeMemory(() => ObserveSet(true)),
         "observe.stop" => SafeMemory(() => ObserveSet(false)),
         "observe.status" => SafeMemory(ObserveStatus),
         "observe.events" => SafeMemory(() => ObserveEvents(p)),
-        "observe.server_map" => SafeMemory(() => ServerMap(p)),
+        "observe.layers" => SafeMemory(LayersList),
+        "observe.layer_set" => SafeMemory(() => LayerSet(p)),
+        "observe.layer_remove" => SafeMemory(() => LayerRemove(p)),
+        "observe.layer_map" => SafeMemory(() => LayerMap(p)),
+        "observe.server_map" => SafeMemory(() => LayerMap(new JObject((p as JObject)?.Properties().ToArray() ?? []) { ["layer"] = "server" })),
         _ => null,
     };
 
@@ -117,7 +137,7 @@ public partial class WhatsAnAiBridge
                 ["ok"] = true, ["enabled"] = s.Enabled, ["since"] = s.Since?.ToString("O"), ["seq"] = _obsSeq,
                 ["counts"] = JObject.FromObject(_obsEvents.GroupBy(e => e["kind"]!.ToString()).ToDictionary(g => g.Key, g => g.Count())),
                 ["unmappedPanelsSeen"] = _obsUnmappedSeen.Count, ["entityTypesSeen"] = _obsEntityTypes.Count,
-                ["server"] = ServerLayerStatus(),
+                ["layers"] = new JArray(_layers.Select(LayerStatus)),
                 ["journal"] = Path.Combine(ObsDir, "journal.jsonl"),
             };
         }
@@ -172,7 +192,7 @@ public partial class WhatsAnAiBridge
     {
         if (!Obs().Enabled || !GameController.InGame) return;
         var now = DateTime.UtcNow;
-        try { ObserveServer(now); } catch (Exception ex) { LogError($"[Observe] server: {ex.Message}"); }
+        try { ObserveLayers(now); } catch (Exception ex) { LogError($"[Observe] layers: {ex.Message}"); }
         if ((now - _obsLastTick).TotalMilliseconds < 500) return;
         _obsLastTick = now;
         try
