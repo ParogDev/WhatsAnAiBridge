@@ -212,16 +212,36 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>A target's visible boxes now (element when it is a UI element), clipped to its clipTo container if any.</summary>
+    /// <summary>Why the last ResolveTarget / condition came up empty or false: the FIRST link that failed, by name (main thread only).
+    /// Offsets and UI trees change with patches: a failure must name its broken link, not surface ten calls later.</summary>
+    internal string? Why;
+
     internal List<(UiElement? e, float x, float y, float w, float h)> ResolveTarget(HighlightTarget t)
     {
         var list = new List<(UiElement?, float, float, float, float)>();
+        Why = null;
         if (t.Rect != null) list.Add((null, t.Rect[0], t.Rect[1], t.Rect[2], t.Rect[3]));
         else if (t.Item != null) foreach (var r in FindItemRects(t.Item)) list.Add((null, r.x, r.y, r.w, r.h));
         else
         {
-            var elements = t.Text != null ? FindByText(t.Text, t.Within)
-                : t.Panel != null ? (PanelChild(t.Panel, t.Child) is { } pe ? [pe] : [])
-                : t.Path != null && new ExpressionWalker(GameController).Resolve(t.Path, out _) is UiElement we ? [we] : new List<UiElement>();
+            List<UiElement> elements;
+            if (t.Text != null) elements = FindByText(t.Text, t.Within);
+            else if (t.Panel != null) elements = PanelChild(t.Panel, t.Child) is { } pe ? [pe] : [];
+            else
+            {
+                var obj = new ExpressionWalker(GameController).Resolve(t.Path!, out var err);
+                elements = obj is UiElement we ? [we] : [];
+                if (err != null) Why = $"path {t.Path}: {err}";
+                else if (obj == null) Why = $"path {t.Path}: resolved to null";
+                else if (obj is not UiElement) Why = $"path {t.Path}: is a {obj.GetType().Name}, not a UI element";
+            }
+            if (t.Rel != null && elements.Count > 0)
+            {
+                var moved = elements.Select(e => Navigate(e, t.Rel)).Where(e => e != null).Select(e => e!).ToList();
+                if (moved.Count == 0) Why = $"rel [{string.Join(",", t.Rel)}] from {elements.Count} match(es): a step does not exist (UI tree changed?)";
+                elements = moved;
+            }
+            if (elements.Count > 0 && elements.All(e => !e.IsVisible)) Why ??= $"{elements.Count} match(es), none visible";
             if (t.Rel != null) elements = elements.Select(e => Navigate(e, t.Rel)).Where(e => e != null).Select(e => e!).ToList();
             foreach (var e in elements)
             {
@@ -239,8 +259,10 @@ public partial class WhatsAnAiBridge
                 list.RemoveAll(b => b.Item2 + b.Item4 / 2 < cr.X || b.Item2 + b.Item4 / 2 > cr.X + cr.Width
                                     || b.Item3 + b.Item5 / 2 < cr.Y || b.Item3 + b.Item5 / 2 > cr.Y + cr.Height);
             }
-            else list.Clear();
+            else { list.Clear(); Why = $"clipTo {t.ClipTo}: container not found or not visible"; }
+            if (list.Count == 0) Why ??= "outside the clipTo container (e.g. scrolled out of view)";
         }
+        if (list.Count == 0) Why ??= t.Item != null ? $"no visible item matches '{t.Item}' (inventory / visible stash tab)" : "not found";
         return list;
     }
 
@@ -295,6 +317,12 @@ public partial class WhatsAnAiBridge
         }
         else if (GameController.IngameState?.IngameUi?.Children is { } kids)
             roots.AddRange(kids.Where(k => k != null && k.Address != 0 && k.IsVisibleLocal));
+        if (roots.Count == 0)
+        {
+            Why = within == null ? "no visible top-level panel" : within.StartsWith("GameController", StringComparison.Ordinal)
+                ? $"within {within}: not found or not visible" : $"within: no open panel contains the text '{within}'";
+            return [];
+        }
         var hits = new List<UiElement>();
         var queue = new Queue<(UiElement e, int d)>(roots.Select(r => (r, 0)));
         int visited = 0;
@@ -307,6 +335,7 @@ public partial class WhatsAnAiBridge
             if (d >= 16) continue;
             try { foreach (var c in e.Children) if (c != null && c.IsVisibleLocal) queue.Enqueue((c, d + 1)); } catch { }
         }
+        if (hits.Count == 0) Why = $"text '{text}' not found in {(within ?? "the open panels")} ({visited} visible elements searched)";
         return hits;
     }
 
@@ -317,7 +346,8 @@ public partial class WhatsAnAiBridge
     private UiElement? PanelChild(string text, int[]? child)
     {
         var kids = GameController.IngameState?.IngameUi?.Children;
-        if (kids == null) return null;
+        if (kids == null) { Why = "IngameUi.Children unavailable"; return null; }
+        string? brokenAt = null;
         foreach (var p in kids)
         {
             if (p == null || p.Address == 0 || !p.IsVisibleLocal) continue;
@@ -328,14 +358,23 @@ public partial class WhatsAnAiBridge
             }
             if (!texts.Any(t => t.Contains(text, StringComparison.OrdinalIgnoreCase))) continue;
             UiElement? e = p;
+            var walked = new List<int>();
             foreach (var i in child ?? [])
             {
                 var cs = e.Children;
-                if (i < 0 || i >= cs.Count || cs[i] == null) { e = null; break; }
+                if (i < 0 || i >= cs.Count || cs[i] == null)
+                {
+                    brokenAt = $"panel '{text}' is open, but child [{string.Join(",", walked.Append(i))}] does not exist " +
+                               $"(element at [{string.Join(",", walked)}] has {cs.Count} children): its layout changed";
+                    e = null;
+                    break;
+                }
+                walked.Add(i);
                 e = cs[i];
             }
             if (e != null) return e;
         }
+        Why = brokenAt ?? $"panel '{text}' is not open";
         return null;
     }
 
