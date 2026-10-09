@@ -49,6 +49,7 @@ public partial class WhatsAnAiBridge
         var radarPrev = new List<Vector3>(); var labPrev = new List<Vector3>();
         var radarPlan = new List<Vector3>(); (int, int) radarPlanCell = (int.MinValue, 0); float sincePlan = float.MaxValue;
         var radar = new List<(bool back, float turn, float jump)>(); var lab = new List<(bool back, float turn, float jump)>();
+        var patched = new List<(bool back, float turn, float jump)>(); var patchedPrev = new List<Vector3>();
         var labPlan = route; (int, int) labPlanCell = Cell(walk[0]);
         for (var k = 1; k < walk.Count - 2; k++)
         {
@@ -62,11 +63,22 @@ public partial class WhatsAnAiBridge
                 radarPlanCell = cell; sincePlan = 0;
             }
             var radarDrawn = new List<Vector3> { pos }; radarDrawn.AddRange(radarPlan);
+            // Radar with research/patches/radar-path-start-at-player.patch: start at the plan node nearest the player (first
+            // 24), or the next one if the player is already past it along the path.
+            var patchedDrawn = new List<Vector3> { pos };
+            if (radarPlan.Count > 0)
+            {
+                var st = 0; var bd = float.MaxValue;
+                for (var q = 0; q < Math.Min(radarPlan.Count, 24); q++) { var d = Vector2.DistanceSquared(Flat(radarPlan[q]), Flat(pos)); if (d < bd) { bd = d; st = q; } }
+                if (st + 1 < radarPlan.Count && Vector2.Dot(Flat(radarPlan[st + 1] - radarPlan[st]), Flat(pos - radarPlan[st])) > 0) st++;
+                patchedDrawn.AddRange(radarPlan.Skip(st));
+            }
             // Lab: re-plan on cell change (150 ms like RenderLab), drawn from the closest point to the live position.
             if (cell != labPlanCell && AStar(grid, cell, goal, 400_000) is { } lc) { labPlan = LabWorld(StringPull(lc)); labPlanCell = cell; }
             var labDrawn = TrimTo(labPlan, pos);
 
             radar.Add(Metrics(radarDrawn, radarPrev, dir)); lab.Add(Metrics(labDrawn, labPrev, dir));
+            patched.Add(Metrics(patchedDrawn, patchedPrev, dir)); patchedPrev = patchedDrawn;
             radarPrev = radarDrawn; labPrev = labDrawn;
         }
         JObject Sum(List<(bool back, float turn, float jump)> m) => new()
@@ -80,7 +92,7 @@ public partial class WhatsAnAiBridge
         return new JObject
         {
             ["target"] = label, ["routeWorld"] = Math.Round(Length(route)), ["stepWorld"] = step, ["replanMs"] = replanMs, ["speed"] = speed,
-            ["radar"] = Sum(radar), ["lab"] = Sum(lab),
+            ["radar"] = Sum(radar), ["radarPatched"] = Sum(patched), ["lab"] = Sum(lab),
             ["note"] = "World units (~0.7 px each at default zoom). Radar-style = per-cell A* path from the integer cell, re-planned at most every replanMs; lab = simplified + smoothed + trimmed to the live position.",
         };
     }
