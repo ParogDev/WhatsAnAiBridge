@@ -29,6 +29,7 @@ public partial class WhatsAnAiBridge
         public DateTime Until;
         public bool Draw;
         public double DelayMs;   // cyan marker shows the fresh state from this long ago (game image latency compensation)
+        public readonly List<(Vector3 pos, bool ok)> Fresh = new();   // reused every frame
         public double[] ExtraDelays = [];   // up to 3 more markers (yellow, green, blue) at these delays: one pan calibrates them all
         public readonly List<(long t, Matrix4x4 m, Vector3[] pos)> History = new();
         public int CamOffset, PosOffset;
@@ -113,22 +114,16 @@ public partial class WhatsAnAiBridge
         try
         {
             var snap = GameController.IngameState.Camera.Snapshot;
-            var m = GameController.Memory;
-            byte[] camBytes;
-            var fresh = new List<(Vector3 pos, bool ok)>(job.Targets.Count);
-            using (m.DisableCaching())
+            // Fresh reads straight from the leaf backend (RawRead): no page cache and no garbage, so the measurement doesn't
+            // add GC pressure of its own.
+            var fresh = job.Fresh; fresh.Clear();
+            foreach (var (_, r, _) in job.Targets)
             {
-                camBytes = m.ReadBytes(job.CamAddress + job.CamOffset, 0x80);
-                foreach (var (_, r, _) in job.Targets)
-                {
-                    var b = m.ReadBytes(r.Address + job.PosOffset, 12);
-                    job.Reads++;
-                    fresh.Add(b is { Length: 12 } ? (new Vector3(BitConverter.ToSingle(b, 0), BitConverter.ToSingle(b, 4), BitConverter.ToSingle(b, 8)), true) : (default, false));
-                }
+                job.Reads++;
+                fresh.Add((RawRead<Vector3>(r.Address + job.PosOffset), true));
             }
-            if (camBytes is not { Length: 0x80 }) { job.ReadFailures++; return; }
-            var freshM = MemoryMarshal.Read<Matrix4x4>(camBytes);
-            var second = MemoryMarshal.Read<Matrix4x4>(camBytes.AsSpan(0x40));
+            var freshM = RawRead<Matrix4x4>(job.CamAddress + job.CamOffset);
+            var second = RawRead<Matrix4x4>(job.CamAddress + job.CamOffset + 0x40);
             job.Frames++;
             if (freshM != snap.Matrix) job.FramesCameraStale++;
             if (second == snap.Matrix && freshM != snap.Matrix) job.SecondCopyMatches++;
