@@ -31,7 +31,7 @@ public partial class WhatsAnAiBridge
     private long _obsSeq;
     private DateTime _obsLastTick = DateTime.MinValue, _obsLastEntities = DateTime.MinValue;
     private Dictionary<long, bool>? _obsVisible;              // top-level panel address -> visible
-    private readonly HashSet<long> _obsUnmappedSeen = new();
+    private readonly HashSet<int> _obsUnmappedSeen = new();      // by child index: addresses change on every area change
     private readonly HashSet<string> _obsEntityTypes = new();
     private string? _obsArea;
     private int _obsLevel = -1;
@@ -196,7 +196,7 @@ public partial class WhatsAnAiBridge
             if (vis && mapped == null)
             {
                 ev["texts"] = new JArray(PanelTexts(e, 4, 6));
-                ev["firstSeen"] = _obsUnmappedSeen.Add(addr);
+                ev["firstSeen"] = _obsUnmappedSeen.Add(index);
                 var bytes = GameController.Memory.ReadBytes(addr, 0x200);
                 if (bytes != null) ev["snapshot"] = Convert.ToBase64String(bytes);
             }
