@@ -285,15 +285,18 @@ public partial class WhatsAnAiBridge
         int gc0 = GC.CollectionCount(0), gc1 = GC.CollectionCount(1), gc2 = GC.CollectionCount(2);
         var gcPause0 = GC.GetTotalPauseDuration(); var gcAlloc0 = GC.GetTotalAllocatedBytes();
         _trLogicalAll = 0; _trFetchAll = 0; _trFetchBytes = 0;
+        MeasureBegin("HUD frame timing", duration);   // guide card + foreground sampling (MeasureFocus.cs)
         _trOn = true;
         var started = Stopwatch.GetTimestamp();
         System.Threading.Tasks.Task.Run(async () =>
         {
             await System.Threading.Tasks.Task.Delay(duration);
             _trOn = false;
+            var foreground = MeasureEnd();
             try { _harmony.UnpatchAll(_harmony.Id); } catch { }
             try { unwrap?.Invoke(); } catch { }
             var result = AnalyzeTrace(Math.Min(_trIdx, TraceCap), started);
+            result["foreground"] = foreground;
             var secs = duration / 1000.0;
             var frames = Math.Max(1, result["frames"]?.Value<int>() ?? 1);
             result["gc"] = new JObject

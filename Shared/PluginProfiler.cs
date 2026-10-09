@@ -156,9 +156,11 @@ public partial class WhatsAnAiBridge
             var patchMs = sw.ElapsedMilliseconds;
             var (ohTicks, ohBytes) = ProfCalibrate(harmony, pre, post);
             ProfStats.Clear();
+            MeasureBegin($"profiling {label}", duration);
             _profOn = true;
             await System.Threading.Tasks.Task.Delay(duration);
             _profOn = false;
+            var foreground = MeasureEnd();
             // Remove the hooks' own cost (measured on an empty method) from every call's self numbers.
             foreach (var st in ProfStats.Values)
             {
@@ -174,6 +176,7 @@ public partial class WhatsAnAiBridge
             var result = new JObject
             {
                 ["id"] = id, ["status"] = "done", ["plugin"] = label, ["durationMs"] = duration,
+                ["foreground"] = foreground,
                 ["methodsPatched"] = patched, ["methodsCapped"] = targets.Count >= max, ["patchMs"] = patchMs, ["refused"] = refused, ["calls"] = totalCalls,
                 ["selfTotalMsPerSecond"] = Math.Round(stats.Sum(kv => Ms(kv.Value.Self)) * 1000.0 / duration, 3),
                 ["hookOverhead"] = new JObject { ["usPerCall"] = Math.Round(ohTicks * 1e6 / Stopwatch.Frequency, 3), ["bytesPerCall"] = Math.Round(ohBytes, 1) },
