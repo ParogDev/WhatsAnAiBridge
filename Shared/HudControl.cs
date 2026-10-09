@@ -184,6 +184,7 @@ public partial class WhatsAnAiBridge
         result.DurationMs = sw.ElapsedMilliseconds;
         result.FinishedAt = DateTime.UtcNow;
         _lastReload = result;
+        ObsHud(new JObject { ["cause"] = "reload", ["plugin"] = r.Folder, ["ok"] = result.Ok, ["durationMs"] = result.DurationMs });
         if (result.Ok == true) LogMessage($"[Reload] {r.Folder} recompiled and reloaded in {result.DurationMs} ms (requested over the bridge)");
         else LogError($"[Reload] {r.Folder} failed: {result.Error}");
     }

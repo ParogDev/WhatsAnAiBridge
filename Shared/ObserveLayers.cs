@@ -11,17 +11,20 @@ namespace WhatsAnAiBridge;
 
 /// <summary>
 /// The observer's layers: runtime specs, not code. A layer is {id, path, mode, hz}: any walker path, watched by one of
-/// four generic modes that work on whatever the path resolves to, through reflection:
+/// five generic modes that work on whatever the path resolves to, through reflection:
 ///   struct  the object's cached offsets struct, read raw (leaf backend) and diffed byte by byte; each changed range is
 ///           named by the runtime layout (HUD property, else struct field; null = unmapped). For server-sent state.
 ///   props   its public scalar properties (numbers, enums, bools, strings, vectors), diffed by value.
 ///   dict    a dictionary (IDictionary): keys added, removed, values changed (e.g. Stats.StatDictionary).
 ///   list    a collection: items added and removed, by identity (spec.key property, default Address).
+///   each    a collection, a few values per item: spec.props (dotted sub-paths, e.g. Inventory.Hash) of each item, keyed
+///           by spec.key (a dotted sub-path too, default Address); unit = "&lt;key&gt;.&lt;prop&gt;". One layer over all
+///           the player's inventories shows which one changed and when.
 /// Every change is a "layer" event {layer, mode, unit, name?, old, new, ...} on the observer's clock (t, frame), so
 /// layers line up with each other and with ui/area/level/entity. A unit (offset block, property, key) that changes more
 /// than 20 times in 10 s is reported once as layer.noisy and then only counted; every change of every unit is counted
 /// in the layer's map (observe.layer_map) whatever the journal does. Specs persist in observe\state.json.
-///   observe.layers {} / observe.layer_set {id, path, mode, hz?, enabled?, key?} / observe.layer_remove {id}
+///   observe.layers {} / observe.layer_set {id, path, mode, hz?, enabled?, key?, props?} / observe.layer_remove {id}
 ///   observe.layer_map {layer, unmappedOnly?, minChanges?, sort?: changes|recent|unit, limit?}
 /// Read-only. Runs from Render (main thread) within a per-tick time budget.
 /// </summary>
@@ -37,14 +40,19 @@ public partial class WhatsAnAiBridge
         [JsonProperty("enabled")] public bool Enabled { get; set; } = true;
         /// <summary>list mode: the item property that identifies an item (default Address).</summary>
         [JsonProperty("key", NullValueHandling = NullValueHandling.Ignore)] public string? Key { get; set; }
+        /// <summary>each mode: the values to watch on every item, as dotted sub-paths of the item.</summary>
+        [JsonProperty("props", NullValueHandling = NullValueHandling.Ignore)] public List<string>? Props { get; set; }
     }
 
-    private static readonly string[] LayerModes = ["struct", "props", "dict", "list"];
+    private static readonly string[] LayerModes = ["struct", "props", "dict", "list", "each"];
 
     private static List<LayerSpec> DefaultLayers() =>
     [
         new() { Id = "server", Path = "GameController.IngameState.ServerData", Mode = "struct", Hz = 10 },
         new() { Id = "stats", Path = "GameController.Player.GetComponent<Stats>().StatDictionary", Mode = "dict", Hz = 4 },
+        new() { Id = "life", Path = "GameController.Player.GetComponent<Life>()", Mode = "props", Hz = 4 },
+        new() { Id = "buffs", Path = "GameController.Player.GetComponent<Buffs>().BuffsList", Mode = "list", Hz = 4, Key = "Name" },
+        new() { Id = "inventories", Path = "GameController.IngameState.ServerData.PlayerInventories", Mode = "each", Hz = 2, Key = "TypeId", Props = ["Inventory.Hash", "Inventory.ItemCount"] },
     ];
 
     private sealed class LayerUnit { public long Changes; public double FirstT, LastT; public string Last = ""; public string? Name; }
@@ -57,6 +65,8 @@ public partial class WhatsAnAiBridge
         public string? NotNow;            // resolved to null right now (loading, no player)
         public long Events, Ticks;
         public double CostMs;             // last tick
+        public Type? CheckedType;         // the resolved type ModeMismatch last passed
+        public EachCache? Each;           // each: items listed every 5 s and the raw read plans
         // struct
         public long Address; public int Size; public byte[] Prev = [], Now = []; public bool HasPrev;
         public List<(int off, int len, string name, bool property)> Names = [];
@@ -66,6 +76,8 @@ public partial class WhatsAnAiBridge
         public readonly Dictionary<object, string> KeyNames = new();
         public Dictionary<Type, PropertyInfo[]> PropCache = new();
         public HashSet<string> SlowProps = new();
+        public readonly Dictionary<(Type, string), PropertyInfo?> SubProps = new();   // each: sub-path segments
+        public readonly Dictionary<(object, int), string> EachUnits = new();           // each: (item key, prop) -> unit
         // noise and map
         public readonly Dictionary<string, (int count, double windowStart)> Rate = new();
         public readonly Dictionary<string, long> Noisy = new();
@@ -107,6 +119,8 @@ public partial class WhatsAnAiBridge
         ["unitsChanged"] = l.Map.Count, ["noisyUnits"] = l.Noisy.Count,
         ["bytes"] = l.Spec.Mode == "struct" ? l.Size : null, ["namedRanges"] = l.Spec.Mode == "struct" ? l.Names.Count : null,
         ["slowProps"] = l.SlowProps.Count > 0 ? new JArray(l.SlowProps) : null,
+        ["rawPaths"] = l.Each?.Plans != null ? new JObject(l.Spec.Props!.Select((p, i) => new JProperty(p, l.Each.PlanNotes[i]))) : null,
+        ["items"] = l.Each?.Items.Count,
         ["broken"] = l.Broken, ["notNow"] = l.NotNow,
     };
 
@@ -118,6 +132,8 @@ public partial class WhatsAnAiBridge
         if (string.IsNullOrWhiteSpace(spec.Path) || !spec.Path.StartsWith("GameController", StringComparison.Ordinal))
             return Err("bad_request", "path is required and starts with GameController (a walker path, as in eval_path / explore_object)");
         if (!LayerModes.Contains(spec.Mode)) return Err("bad_request", $"mode must be one of {string.Join(", ", LayerModes)}");
+        if (spec.Mode == "each" && (spec.Props == null || spec.Props.Count == 0 || spec.Props.Count > 8))
+            return Err("bad_request", "each mode needs props: 1-8 dotted sub-paths of each item, e.g. [\"Inventory.Hash\"]");
         spec.Hz = Math.Clamp(spec.Hz, 0.2, 30);
         // Preflight while in game: the path must resolve and suit the mode, or say which link is wrong now.
         string? preflight = null;
@@ -125,6 +141,12 @@ public partial class WhatsAnAiBridge
         {
             var obj = new ExpressionWalker(GameController).Resolve(spec.Path, out var error);
             preflight = error != null ? $"path: {error}" : obj == null ? null : ModeMismatch(spec.Mode, obj);
+            if (preflight == null && spec.Mode == "each" && obj is IEnumerable items && items.Cast<object?>().FirstOrDefault(i => i != null) is { } first)
+            {
+                var probe = new LayerRun { Spec = spec };
+                try { foreach (var sub in spec.Props!.Prepend(spec.Key ?? "Address")) SubPath(probe, first, sub); }
+                catch (MissingMemberException ex) { return Err("resolve_failed", $"each item ({first.GetType().Name}): {ex.Message}"); }
+            }
             if (preflight != null && error != null) return Err("resolve_failed", preflight);
             if (preflight != null) return Err("wrong_mode", preflight);
         }
@@ -149,7 +171,7 @@ public partial class WhatsAnAiBridge
     {
         "struct" => FindOffsetsStruct(obj).value == null ? $"{obj.GetType().Name} holds no cached offsets struct (struct mode needs one; try props)" : null,
         "dict" => obj is IDictionary ? null : $"{obj.GetType().Name} is not a dictionary (IDictionary)",
-        "list" => obj is IEnumerable && obj is not string ? null : $"{obj.GetType().Name} is not a collection",
+        "list" or "each" => obj is IEnumerable && obj is not string ? null : $"{obj.GetType().Name} is not a collection",
         _ => null,
     };
 
@@ -162,7 +184,7 @@ public partial class WhatsAnAiBridge
         if (area != _layerArea)
         {
             _layerArea = area;
-            foreach (var l in _layers.Where(l => l.Spec.Mode is "struct" or "list")) { l.HasPrev = false; l.PrevValues = null; l.Address = 0; }
+            foreach (var l in _layers.Where(l => l.Spec.Mode is "struct" or "list" or "each")) { l.HasPrev = false; l.PrevValues = null; l.Address = 0; l.Each = null; l.ValuesA = null; }
         }
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         foreach (var l in _layers)
@@ -180,16 +202,27 @@ public partial class WhatsAnAiBridge
 
     private void LayerTick(LayerRun l)
     {
-        var obj = new ExpressionWalker(GameController).Resolve(l.Spec.Path, out var error);
+        // each: between listings the items are known (address, key): no need to resolve the collection again.
+        if (l.Spec.Mode == "each" && l.Each is { Plans: not null } ec && (DateTime.UtcNow - ec.ListedAt).TotalSeconds < EachRelistSeconds)
+        {
+            ValuesTick(l, null!, ObsClock.Elapsed.TotalMilliseconds);
+            return;
+        }
+        var obj =new ExpressionWalker(GameController).Resolve(l.Spec.Path, out var error);
         if (error != null) { l.Broken = $"path: {error}"; return; }   // the link no longer exists: say so once
         if (obj == null) { l.NotNow = "resolves to null right now"; return; }
         l.NotNow = null;
-        if (ModeMismatch(l.Spec.Mode, obj) is { } wrong) { l.Broken = wrong; return; }
+        // Once per resolved type: the struct check boxes the whole cached struct (34 KB for ServerData) every call.
+        if (obj.GetType() != l.CheckedType)
+        {
+            if (ModeMismatch(l.Spec.Mode, obj) is { } wrong) { l.Broken = wrong; return; }
+            l.CheckedType = obj.GetType();
+        }
         var t = ObsClock.Elapsed.TotalMilliseconds;
         switch (l.Spec.Mode)
         {
             case "struct": StructTick(l, obj, t); break;
-            case "props": case "dict": ValuesTick(l, obj, t); break;
+            case "props": case "dict": case "each": ValuesTick(l, obj, t); break;
             case "list": ListTick(l, (IEnumerable)obj, t); break;
         }
     }
@@ -309,7 +342,9 @@ public partial class WhatsAnAiBridge
     {
         var now = l.ValuesB ??= new Dictionary<object, object?>();
         now.Clear();
-        if (l.Spec.Mode == "dict") DictValues((IDictionary)obj, now); else PropValues(l, obj, now);
+        if (l.Spec.Mode == "dict") DictValues((IDictionary)obj, now);
+        else if (l.Spec.Mode == "each") EachValuesRaw(l, (obj as IEnumerable)!, now);
+        else PropValues(l, obj, now);
         var prev = l.ValuesA;
         (l.ValuesA, l.ValuesB) = (now, prev);
         if (prev == null) return;   // baseline
@@ -334,6 +369,26 @@ public partial class WhatsAnAiBridge
             && double.TryParse(@new, NumberStyles.Float, CultureInfo.InvariantCulture, out var b)) e["delta"] = b - a;
         if (old == null) e["change"] = "added"; else if (@new == null) e["change"] = "removed";
         Emit(l, e);
+    }
+
+    // ── each ─────────────────────────────────────────────────────────
+
+    // The per-tick reads are in ObserveEachRaw.cs (raw steps compiled once, reflection as the fallback).
+
+    /// <summary>A dotted property path below obj (null when a link is null now). A segment that doesn't exist is broken.</summary>
+    private static object? SubPath(LayerRun l, object obj, string path)
+    {
+        object? cur = obj;
+        foreach (var seg in path.Split('.'))
+        {
+            if (cur == null) return null;
+            var type = cur.GetType();
+            if (!l.SubProps.TryGetValue((type, seg), out var prop))
+                l.SubProps[(type, seg)] = prop = type.GetProperty(seg, BindingFlags.Instance | BindingFlags.Public);
+            if (prop == null) throw new MissingMemberException($"{type.Name} has no public property '{seg}' (in '{path}')");
+            cur = prop.GetValue(cur);
+        }
+        return cur;
     }
 
     // ── list ─────────────────────────────────────────────────────────
