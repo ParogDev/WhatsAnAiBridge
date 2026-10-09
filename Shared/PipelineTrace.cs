@@ -20,7 +20,7 @@ namespace WhatsAnAiBridge;
 /// Never patches a protected method. ExileCore2 ships IL stubs whose real body only the JIT gets (patching one would
 /// replace it with the stub and hang the HUD): TraceIsStub refuses them. Its obfuscated methods fail Harmony's IL copy
 /// before anything is applied ("invalid program"). Either way the target is reported by name in patches.refused.
-/// Off unless Settings.AllowHudInstrumentation. pipeline.trace {durationMs?, entities?} -> {id}; pipeline.trace_result {id}.
+/// Off unless Settings.AllowHudInstrumentation. pipeline.trace {durationMs?, entities?, series?} -> {id}; pipeline.trace_result {id}.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
@@ -89,7 +89,8 @@ public partial class WhatsAnAiBridge
     }
 
     // ── Patch bodies (static, allocation-free except __args) ──
-    private static void PreUpdate() => Rec(KUpdateBegin, 0);
+    // The GC's cumulative pause at frame start (100 ns ticks): the difference to the next frame is the pause it took.
+    private static void PreUpdate() => Rec(KUpdateBegin, GC.GetTotalPauseDuration().Ticks);
     private static void PostUpdate() => Rec(KUpdateEnd, 0);
     private static void PreRender() => Rec(KRenderBegin, 0);
     private static void PostRender() => Rec(KRenderEnd, 0);
@@ -192,6 +193,7 @@ public partial class WhatsAnAiBridge
         if (_trOn) return Err("busy", "A trace is already running.");
         var duration = Math.Clamp(p?["durationMs"]?.Value<int>() ?? 3000, 500, 20_000);
         var maxEntities = Math.Clamp(p?["entities"]?.Value<int>() ?? 8, 0, 32);
+        _trSeries = p?["series"]?.Value<bool>() == true;
 
         // What to watch: the camera struct and the Render components of the nearest players (moving targets).
         var ranges = new List<(long, long, bool, int)>();
@@ -332,9 +334,12 @@ public partial class WhatsAnAiBridge
         public long CamRead, EntRead;          // last consumed read of the camera / a watched entity in this frame
         public long CamData, EntData;          // when the data those reads returned was fetched from the game (0 = before the trace)
         public long Cycle;                     // the cache cycle (NotifyFrame) in this frame
+        public long GcPause;                   // GC.GetTotalPauseDuration at frame start (TimeSpan ticks)
         public int CamReads, EntReads, Fetches, Cycles;
         public double PluginMs;   // time inside plugin Tick + Render this frame (summed; parallel ticks can overlap)
     }
+
+    private static bool _trSeries;
 
     private JObject AnalyzeTrace(int n, long started)
     {
@@ -358,7 +363,7 @@ public partial class WhatsAnAiBridge
             {
                 case KUpdateBegin:
                     if (inFrame) frames.Add(cur);
-                    cur = new TraceFrame { Begin = t }; inFrame = true; break;
+                    cur = new TraceFrame { Begin = t, GcPause = TrArg[i] }; inFrame = true; break;
                 case KUpdateEnd: cur.UpdEnd = t; break;
                 case KRenderBegin: cur.RBegin = t; break;
                 case KRenderEnd: cur.REnd = t; break;   // RunFrameLoop calls Present right after Render
@@ -397,6 +402,8 @@ public partial class WhatsAnAiBridge
         return new JObject
         {
             ["events"] = n, ["eventsDropped"] = Math.Max(0, _trIdx - TraceCap), ["frames"] = full.Count,
+            // Per frame (series=true), for timelines: what each frame took and whether a GC pause landed in it.
+            ["series"] = _trSeries ? TraceSeries(full) : null,
             // Patched but never hit = that link of the pipeline is not where we think it is (fail at the broken link).
             ["calls"] = new JObject
             {
@@ -468,5 +475,30 @@ public partial class WhatsAnAiBridge
             ["envMaxArraysPerPartition"] = Environment.GetEnvironmentVariable("DOTNET_SYSTEM_BUFFERS_SHAREDARRAYPOOL_MAXARRAYSPERPARTITION"),
             ["broken"] = st == null ? "System.Buffers.SharedArrayPoolStatics not found in this runtime" : partitions == null || perPartition == null ? "SharedArrayPoolStatics fields s_partitionCount/s_maxArraysPerPartition not found" : null,
         };
+    }
+}
+
+public partial class WhatsAnAiBridge
+{
+    /// <summary>
+    /// One entry per complete frame, as parallel arrays (compact JSON): ms since the first frame, the interval to the
+    /// next frame, the work (update) time, the plugins' share of it, and the GC pause that landed between this frame's
+    /// start and the next (from GC.GetTotalPauseDuration, recorded at each frame start).
+    /// </summary>
+    private static JObject TraceSeries(List<TraceFrame> full)
+    {
+        double ms(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
+        var t = new JArray(); var interval = new JArray(); var work = new JArray(); var plugins = new JArray(); var gc = new JArray();
+        for (var k = 0; k < full.Count; k++)
+        {
+            var f = full[k];
+            var next = k + 1 < full.Count ? full[k + 1] : null;
+            t.Add(Math.Round(ms(f.Begin - full[0].Begin), 2));
+            interval.Add(next == null ? null : Math.Round(ms(next.Begin - f.Begin), 2));
+            work.Add(f.UpdEnd > 0 ? Math.Round(ms(f.UpdEnd - f.Begin), 3) : null);
+            plugins.Add(Math.Round(f.PluginMs, 3));
+            gc.Add(next == null ? 0 : Math.Round((next.GcPause - f.GcPause) / (double)TimeSpan.TicksPerMillisecond, 2));
+        }
+        return new JObject { ["tMs"] = t, ["intervalMs"] = interval, ["workMs"] = work, ["pluginsMs"] = plugins, ["gcPauseMs"] = gc };
     }
 }
