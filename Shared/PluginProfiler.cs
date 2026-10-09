@@ -96,10 +96,13 @@ public partial class WhatsAnAiBridge
         }
         else
         {
-            var wrapper = Core.Current?.pluginManager?.Plugins.FirstOrDefault(w => string.Equals(w.Name, name, StringComparison.OrdinalIgnoreCase));
+            object? PluginOf(object w) => w.GetType().GetProperty("Plugin", any)?.GetValue(w) ?? w.GetType().GetField("_plugin", any)?.GetValue(w);
+            // The HUD's display name, or the plugin's type name (what pipeline.trace reports, e.g. SkillDpsCore for "Skill DPS").
+            var wrapper = Core.Current?.pluginManager?.Plugins.FirstOrDefault(w => string.Equals(w.Name, name, StringComparison.OrdinalIgnoreCase))
+                          ?? Core.Current?.pluginManager?.Plugins.FirstOrDefault(w => string.Equals(PluginOf(w)?.GetType().Name, name, StringComparison.OrdinalIgnoreCase));
             if (wrapper == null)
                 return Err("not_found", $"No loaded plugin named '{name}'. Loaded: {string.Join(", ", Core.Current?.pluginManager?.Plugins.Select(w => w.Name) ?? [])}");
-            var plugin = wrapper.GetType().GetProperty("Plugin", any)?.GetValue(wrapper) ?? wrapper.GetType().GetField("_plugin", any)?.GetValue(wrapper);
+            var plugin = PluginOf(wrapper);
             asm = plugin?.GetType().Assembly;
             if (asm == null) return Err("not_found", $"Could not reach {name}'s plugin object (PluginWrapper.Plugin)");
             label = wrapper.Name;
