@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using ImGuiNET;
 
@@ -12,6 +14,8 @@ using GuideSnap = (string? title, string? instruction, int? step, int? steps, st
 /// "combat log" of what the agent is doing under it. One surface over the state in AgentGuide.cs (GuideSnapshot,
 /// taken once per frame; the only write is GuideDismiss). Loud only while the user must act (status waiting, and
 /// failed: the step needs redoing), quiet for progress and results, hidden when there is nothing to say.
+/// Steps an agent QUEUED (ExperimentQueue.cs) get their own calm card under the live one: what to do, what will be
+/// recorded, and a Start button - nothing is captured until the user presses it.
 /// Game-agnostic: ImGui only; nothing here touches ExileCore* directly.
 /// </summary>
 public partial class WhatsAnAiBridge
@@ -31,8 +35,14 @@ public partial class WhatsAnAiBridge
         public double ArrivedAt = -1e9;    // ImGui time the current instruction appeared
         public double StatusAt = -1e9;     // ImGui time the status last changed
         public double LogAt = -1e9;        // ImGui time the newest log line arrived
+        public string? SeenQueueTop;       // id of the queued step at the front last frame
+        public double QueueArrivedAt = -1e9; // ImGui time a new step reached the front of the queue
+        public bool QueueWatchOpen;        // the "Will record" line expanded to the exact watch specs
         public string? LastError;
     }
+
+    /// <summary>The queue as the panel sees it this frame: the next step to offer, the one recording, how many wait.</summary>
+    private readonly record struct QueueView(QueuedStep? Next, QueuedStep? Running, int QueuedCount);
 
     private readonly GuideUiState _guideUi = new();
 
@@ -58,20 +68,25 @@ public partial class WhatsAnAiBridge
         if (!Settings.ShowAgentGuide.Value) return;
 
         var g = GuideSnapshot();
+        // Once per frame: it takes the queue lock. Open steps only, in queue order.
+        var open = QueueSnapshot();
+        var q = new QueueView(open.FirstOrDefault(s => s.Status == "queued"), open.FirstOrDefault(s => s.Status == "running"),
+            open.Count(s => s.Status == "queued"));
         var now = ImGui.GetTime();
         var utc = DateTime.UtcNow;
-        ObserveGuide(g, now);
+        ObserveGuide(g, q, now);
 
         // Visibility: a card exists while there is an instruction or a non-idle status. The panel hides itself once
         // everything is quiet (idle / captured / done / info) and nothing happened for two minutes; waiting, failed
         // and progress states stay until the agent or the user clears them. It comes back on the next rev change.
+        // A queued step keeps the panel up too (calmly): the user may come back hours later and must find it.
         var hasCard = g.instruction != null || g.status != "idle";
         var needsUser = g.status is "waiting" or "failed" or "detected" or "settling";
         var lastActivity = g.updatedAt;
         if (g.log.Length > 0 && g.log[^1].At > lastActivity) lastActivity = g.log[^1].At;
         var quietFor = (utc - lastActivity).TotalSeconds;
-        if (!needsUser && quietFor > GuideQuietHideSec) return;
-        if (!hasCard && g.log.Length == 0) return;
+        if (!needsUser && q.Next == null && quietFor > GuideQuietHideSec) return;
+        if (!hasCard && q.Next == null && g.log.Length == 0) return;
 
         var io = ImGui.GetIO();
         // Default: top centre, under the skill bar; clear of the stash (left) and the inventory (right) at 1080p.
@@ -88,7 +103,7 @@ public partial class WhatsAnAiBridge
         var shown = ImGui.Begin("Agent Guide###bridge_guide_panel", flags);
         try
         {
-            if (shown) DrawGuideBody(g, hasCard, now, utc);
+            if (shown) DrawGuideBody(g, q, hasCard, needsUser, now, utc);
         }
         catch (Exception ex)
         {
@@ -106,11 +121,18 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>Notice what changed since last frame, so arrivals can flash and the log can highlight its newest line.</summary>
-    private void ObserveGuide(in GuideSnap g, double now)
+    private void ObserveGuide(in GuideSnap g, in QueueView q, double now)
     {
         var u = _guideUi;
-        if (g.rev == u.SeenRev) return;
         var first = u.SeenRev < 0;
+        // The queue has no rev of its own: watch the id at its front. A new front step gets a soft flash.
+        if (q.Next?.Id != u.SeenQueueTop)
+        {
+            if (!first && q.Next != null) u.QueueArrivedAt = now;
+            u.SeenQueueTop = q.Next?.Id;
+            u.QueueWatchOpen = false;
+        }
+        if (g.rev == u.SeenRev) return;
         u.SeenRev = g.rev;
         if (g.instructionSince != u.SeenSince)
         {
@@ -135,18 +157,26 @@ public partial class WhatsAnAiBridge
 
     // ── Body ─────────────────────────────────────────────────────────
 
-    private void DrawGuideBody(in GuideSnap g, bool hasCard, double now, DateTime utc)
+    private void DrawGuideBody(in GuideSnap g, in QueueView q, bool hasCard, bool needsUser, double now, DateTime utc)
     {
         var th = PanelTheme.Current();
         if (hasCard)
         {
-            DrawGuideCard(g, th, now, utc);
+            DrawGuideCard(g, q.Running, th, now, utc);
+            ImGui.Dummy(new Vector2(GuideWidth, 5));
+        }
+        if (q.Next != null)
+        {
+            // The live card wins while the user has something to do (an agent's direct instruction, a failed step to
+            // redo, or the queued step that is recording): the queue then shrinks to a one-line "next" strip.
+            if (needsUser || q.Running != null) DrawQueueStrip(q, th);
+            else DrawQueueCard(q, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
         if (g.log.Length > 0) DrawGuideLog(g, th, now);
     }
 
-    private void DrawGuideCard(in GuideSnap g, PanelTheme th, double now, DateTime utc)
+    private void DrawGuideCard(in GuideSnap g, QueuedStep? running, PanelTheme th, double now, DateTime utc)
     {
         var dl = ImGui.GetWindowDrawList();
         var font = ImGui.GetFont();
@@ -218,10 +248,30 @@ public partial class WhatsAnAiBridge
             x += ImGui.CalcTextSize(look.Label).X * (small / f) + 10;
         }
 
-        // Right side, laid out from the edge inwards.
+        // Right side, laid out from the edge inwards. While a queued step records, the dismiss x gives way to Stop:
+        // hiding the card would leave the recorder running with nothing to stop it from.
         var rx = max.X - pad;
         var showDismiss = g.instruction != null || g.status != "idle";
-        if (showDismiss)
+        if (running != null)
+        {
+            const string label = "Stop";
+            var tw = ImGui.CalcTextSize(label).X * (small / f);
+            var pillW = tw + 27;
+            var pillH = small + 8;
+            var pmin = new Vector2(rx - pillW, hy - pillH * 0.5f);
+            ImGui.SetCursorScreenPos(pmin);
+            ImGui.InvisibleButton("##guide_stop", new Vector2(pillW, pillH));
+            var hov = ImGui.IsItemHovered();
+            if (ImGui.IsItemClicked()) QueueCancel(running.Id);
+            if (hov) ImGui.SetTooltip("Stop recording this step. It is marked cancelled; an agent can queue it again.");
+            var sc = hov ? ToneBad : th.TextDim;
+            dl.AddRectFilled(pmin, pmin + new Vector2(pillW, pillH), hov ? U(ToneBad, 0.22f) : U(th.Tile), pillH * 0.5f);
+            dl.AddRect(pmin, pmin + new Vector2(pillW, pillH), U(hov ? ToneBad : th.Border, 0.7f), pillH * 0.5f);
+            dl.AddRectFilled(new Vector2(pmin.X + 8, hy - 3.5f), new Vector2(pmin.X + 15, hy + 3.5f), U(sc), 1f);
+            dl.AddText(font, small, new Vector2(pmin.X + 19, hy - small * 0.5f), U(sc), label);
+            rx -= pillW + 8;
+        }
+        else if (showDismiss)
         {
             var bx = new Vector2(rx - 16, hy - 8);
             ImGui.SetCursorScreenPos(bx);
@@ -464,6 +514,257 @@ public partial class WhatsAnAiBridge
         if (t < TimeSpan.Zero) t = TimeSpan.Zero;
         if (t.TotalSeconds < 60) return $"{(int)t.TotalSeconds}s";
         if (t.TotalMinutes < 60) return $"{(int)t.TotalMinutes}m {t.Seconds:00}s";
-        return $"{(int)t.TotalHours}h {t.Minutes:00}m";
+        if (t.TotalDays < 1) return $"{(int)t.TotalHours}h {t.Minutes:00}m";
+        return $"{(int)t.TotalDays}d {t.Hours}h";
+    }
+
+    // ── Queue ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The step at the front of the queue, offered to the user: the instruction, who asked and when, what will be
+    /// recorded, and Start / Skip. Calm on purpose (neutral frame, no pulse, one accent button): the user is not
+    /// required to act now, and nothing is recorded until Start.
+    /// </summary>
+    private void DrawQueueCard(in QueueView q, PanelTheme th, double now, DateTime utc)
+    {
+        var next = q.Next!;
+        var dl = ImGui.GetWindowDrawList();
+        var font = ImGui.GetFont();
+        var f = ImGui.GetFontSize();
+        var small = f * 0.85f;
+        var mid = MathF.Round(f * 1.2f);
+        var tone = ToneNeutral;
+        var p = ImGui.GetCursorScreenPos();
+        var x0 = p.X + GuideEdge;
+        var w = GuideWidth - GuideEdge * 2;
+        const float pad = 12f;
+        var innerW = w - pad * 2;
+        var headH = f + 12;
+        var btnH = f + 10;
+        const float specIndent = 14f;
+
+        // Text, then measure: the card background needs the full height.
+        var meta = QueueMetaLine(next, utc);
+        var watchText = "Will record: " + string.Join(", ", next.Watch.Select(QueueWatchSummary));
+        const string hint = "Nothing is recorded until you press Start, then do it.";
+        var instrSize = font.CalcTextSizeA(mid, float.MaxValue, innerW, next.Instruction);
+        var noteSize = next.Note != null ? font.CalcTextSizeA(f, float.MaxValue, innerW, next.Note) : default;
+        var specSizes = _guideUi.QueueWatchOpen
+            ? next.Watch.Select(s => font.CalcTextSizeA(small, float.MaxValue, innerW - specIndent, s)).ToArray() : [];
+        var bodyH = instrSize.Y + 4 + small + 6
+                    + (next.Note != null ? noteSize.Y + 4 : 0)
+                    + f + 4 + specSizes.Sum(s => s.Y + 2)
+                    + small + 8 + btnH;
+        var h = headH + bodyH + 10;
+        var min = new Vector2(x0, p.Y + GuideEdge);
+        var max = new Vector2(x0 + w, p.Y + GuideEdge + h);
+
+        dl.AddRectFilled(min, max, U(th.Card, 0.94f), 6f);
+        var flashT = (now - _guideUi.QueueArrivedAt) / GuideFlashSec;
+        if (flashT < 1) dl.AddRectFilled(min, max, U(tone, 0.28f * (float)(1 - flashT)), 6f);
+        dl.AddRect(min, max, U(tone, 0.55f), 6f, ImDrawFlags.None, 1f);
+
+        // Header: clock glyph + label, the experiment, then (right) how many more wait.
+        var hy = min.Y + headH * 0.5f;
+        var x = min.X + pad;
+        DrawQueueGlyph(dl, new Vector2(x + 6, hy), U(tone));
+        x += 18;
+        const string label = "QUEUED FOR YOU";
+        dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(tone), label);
+        x += ImGui.CalcTextSize(label).X * (small / f) + 10;
+        var rx = max.X - pad;
+        if (q.QueuedCount > 1)
+        {
+            var t = $"+{q.QueuedCount - 1} more";
+            var tw = ImGui.CalcTextSize(t).X * (small / f);
+            var pillW = tw + 12;
+            var pillH = small + 6;
+            var pmin = new Vector2(rx - pillW, hy - pillH * 0.5f);
+            dl.AddRectFilled(pmin, pmin + new Vector2(pillW, pillH), U(th.Tile), pillH * 0.5f);
+            dl.AddRect(pmin, pmin + new Vector2(pillW, pillH), U(th.Border, 0.6f), pillH * 0.5f);
+            dl.AddText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(th.TextDim), t);
+            rx -= pillW + 10;
+        }
+        var title = next.Title ?? $"{next.Experiment}: {next.Label}";
+        if (rx - x > 40) dl.AddText(new Vector2(x, hy - f * 0.5f), U(th.TextDim), GuideClipText(title, rx - x));
+
+        // Body
+        var y = min.Y + headH + 2;
+        var bx = min.X + pad;
+        dl.AddText(font, mid, new Vector2(bx, y), U(th.Text), next.Instruction, innerW);
+        y += instrSize.Y + 4;
+        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim), GuideClipText(meta, innerW));
+        y += small + 6;
+        if (next.Note != null)
+        {
+            dl.AddText(font, f, new Vector2(bx, y), U(th.TextDim), next.Note, innerW);
+            y += noteSize.Y + 4;
+        }
+
+        // "Will record" line: a disclosure that opens the exact watch specs, for the developer who wants to know.
+        var watchOpen = _guideUi.QueueWatchOpen;
+        ImGui.SetCursorScreenPos(new Vector2(bx, y));
+        ImGui.InvisibleButton("##queue_watch", new Vector2(innerW, f + 2));
+        var watchHov = ImGui.IsItemHovered();
+        if (ImGui.IsItemClicked()) _guideUi.QueueWatchOpen = !watchOpen;
+        if (watchHov) ImGui.SetTooltip(watchOpen ? "Hide the exact watch specs" : "Show the exact watch specs");
+        var wc = U(watchHov ? th.Text : th.TextDim);
+        var ty = y + f * 0.5f;
+        if (watchOpen) dl.AddTriangleFilled(new Vector2(bx, ty - 2), new Vector2(bx + 7, ty - 2), new Vector2(bx + 3.5f, ty + 2.5f), wc);
+        else dl.AddTriangleFilled(new Vector2(bx + 1, ty - 3.5f), new Vector2(bx + 5.5f, ty), new Vector2(bx + 1, ty + 3.5f), wc);
+        dl.AddText(new Vector2(bx + specIndent, y), wc, GuideClipText(watchText, innerW - specIndent));
+        y += f + 4;
+        if (watchOpen)
+            for (var i = 0; i < next.Watch.Length; i++)
+            {
+                dl.AddText(font, small, new Vector2(bx + specIndent, y), U(th.TextDim, 0.85f), next.Watch[i], innerW - specIndent);
+                y += specSizes[i].Y + 2;
+            }
+
+        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim, 0.9f), GuideClipText(hint, innerW));
+        y += small + 8;
+
+        // Buttons: Start (the one accented control on the card) and Skip.
+        var startW = QueuePillButton(dl, "##queue_start", new Vector2(bx, y), btnH, "Start recording", true, th, out var startClick,
+            "Start recording now, then do the action above. The agent reads the result later.");
+        if (startClick)
+        {
+            var r = QueueStart(next.Id, "hud");
+            if (r["error"] != null) LogError($"[GuidePanel] start refused: {r["error"]} {r["message"]}");
+        }
+        QueuePillButton(dl, "##queue_skip", new Vector2(bx + startW + 8, y), btnH, "Skip", false, th, out var skipClick,
+            "Skip this step. It is marked cancelled; an agent can queue it again.");
+        if (skipClick) QueueCancel(next.Id);
+
+        ImGui.SetCursorScreenPos(p);
+        ImGui.Dummy(new Vector2(GuideWidth, h + GuideEdge * 2));
+    }
+
+    /// <summary>One line standing in for the queue card while the live card has the user's attention.</summary>
+    private void DrawQueueStrip(in QueueView q, PanelTheme th)
+    {
+        var next = q.Next!;
+        var dl = ImGui.GetWindowDrawList();
+        var font = ImGui.GetFont();
+        var f = ImGui.GetFontSize();
+        var small = f * 0.85f;
+        var p = ImGui.GetCursorScreenPos();
+        var x0 = p.X + GuideEdge;
+        var w = GuideWidth - GuideEdge * 2;
+        const float pad = 12f;
+        var h = f + 10;
+        var min = new Vector2(x0, p.Y);
+        var max = new Vector2(x0 + w, p.Y + h);
+        dl.AddRectFilled(min, max, U(th.Card, 0.92f), 5f);
+        dl.AddRect(min, max, U(ToneNeutral, 0.4f), 5f);
+
+        ImGui.SetCursorScreenPos(min);
+        ImGui.InvisibleButton("##queue_strip", new Vector2(w, h));
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip($"Queued next: {next.Instruction}\nFinish or dismiss the current step first; this card then offers Start.");
+
+        var hy = min.Y + h * 0.5f;
+        var x = min.X + pad;
+        DrawQueueGlyph(dl, new Vector2(x + 6, hy), U(ToneNeutral));
+        x += 18;
+        const string label = "NEXT";
+        dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(ToneNeutral), label);
+        x += ImGui.CalcTextSize(label).X * (small / f) + 10;
+        var rx = max.X - pad;
+        if (q.QueuedCount > 1)
+        {
+            var t = $"+{q.QueuedCount - 1} more";
+            var tw = ImGui.CalcTextSize(t).X * (small / f);
+            dl.AddText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(th.TextDim, 0.8f), t);
+            rx -= tw + 10;
+        }
+        if (rx - x > 40) dl.AddText(new Vector2(x, hy - f * 0.5f), U(th.TextDim), GuideClipText(next.Instruction, rx - x));
+
+        ImGui.SetCursorScreenPos(p);
+        ImGui.Dummy(new Vector2(GuideWidth, h + GuideEdge));
+    }
+
+    /// <summary>A pill button drawn on the draw list over an InvisibleButton (takes the mouse only over itself). Returns its width.</summary>
+    private static float QueuePillButton(ImDrawListPtr dl, string id, Vector2 pos, float h, string text, bool primary, PanelTheme th,
+        out bool clicked, string tooltip)
+    {
+        var f = ImGui.GetFontSize();
+        var glyphW = primary ? 12f : 0f;
+        var w = ImGui.CalcTextSize(text).X + glyphW + 24;
+        ImGui.SetCursorScreenPos(pos);
+        ImGui.InvisibleButton(id, new Vector2(w, h));
+        var hov = ImGui.IsItemHovered();
+        clicked = ImGui.IsItemClicked();
+        if (hov) ImGui.SetTooltip(tooltip);
+        var max = pos + new Vector2(w, h);
+        var cy = pos.Y + h * 0.5f;
+        if (primary)
+        {
+            // Dark text on the bright accent, like the check on a captured dot.
+            var ink = U(new Vector4(0.05f, 0.08f, 0.06f, 1f));
+            dl.AddRectFilled(pos, max, U(ToneAccent, hov ? 1f : 0.82f), h * 0.5f);
+            var tx = pos.X + 12;
+            dl.AddTriangleFilled(new Vector2(tx, cy - 4.5f), new Vector2(tx + 7, cy), new Vector2(tx, cy + 4.5f), ink);
+            dl.AddText(new Vector2(pos.X + 12 + glyphW, cy - f * 0.5f), ink, text);
+            dl.AddText(new Vector2(pos.X + 12.6f + glyphW, cy - f * 0.5f), ink, text);   // faux bold
+        }
+        else
+        {
+            dl.AddRectFilled(pos, max, U(th.Tile, hov ? 1f : 0.8f), h * 0.5f);
+            dl.AddRect(pos, max, U(th.Border, 0.7f), h * 0.5f);
+            dl.AddText(new Vector2(pos.X + 12, cy - f * 0.5f), U(hov ? th.Text : th.TextDim), text);
+        }
+        return w;
+    }
+
+    /// <summary>12 px clock: the step waits for the user, not the other way round.</summary>
+    private static void DrawQueueGlyph(ImDrawListPtr dl, Vector2 c, uint col)
+    {
+        dl.AddCircle(c, 5.5f, col, 16, 1.4f);
+        dl.AddLine(c, new Vector2(c.X, c.Y - 3.5f), col, 1.4f);
+        dl.AddLine(c, new Vector2(c.X + 2.6f, c.Y + 1.2f), col, 1.4f);
+    }
+
+    /// <summary>"Claude asked 3h 05m ago - do it 2x": who, when, how many repeats.</summary>
+    private static string QueueMetaLine(QueuedStep s, DateTime utc)
+    {
+        var who = string.IsNullOrWhiteSpace(s.By) ? "An agent" : s.By;
+        var line = $"{who} asked {GuideElapsed(utc - s.QueuedAt)} ago";
+        if (s.Repeats > 1) line += $" - do it {s.Repeats}x";
+        return line;
+    }
+
+    /// <summary>A watch spec in plain words: "memory of PlayerStashTabs[33] (72 bytes)", "value of Life.CurHP", "items of ...".</summary>
+    private static string QueueWatchSummary(string raw)
+    {
+        var w = ParseWatch(raw);
+        if (w == null) return raw;
+        var (kind, path, size, labels) = w.Value;
+        var name = QueueShortPath(path);
+        return kind switch
+        {
+            "memory" => $"memory of {name}" + (size > 0 ? $" ({size} bytes)" : ""),
+            "collection" => $"items of {name}" + (labels.Length > 0 ? $" ({string.Join(", ", labels)})" : ""),
+            _ => $"value of {name}",
+        };
+    }
+
+    /// <summary>The last one or two segments of a walker path, splitting only on dots outside brackets.</summary>
+    private static string QueueShortPath(string path)
+    {
+        var cuts = new List<int>();
+        var depth = 0;
+        for (var i = 0; i < path.Length; i++)
+        {
+            var ch = path[i];
+            if (ch is '[' or '(') depth++;
+            else if (ch is ']' or ')') depth--;
+            else if (ch == '.' && depth == 0) cuts.Add(i);
+        }
+        if (cuts.Count == 0) return path;
+        // Keep two segments when the last one alone is uninformative (e.g. "Value", "[3]", "Count").
+        var last = path[(cuts[^1] + 1)..];
+        var twoSegments = cuts.Count > 1 && (last.Length <= 5 || last.StartsWith('[')) ? path[(cuts[^2] + 1)..] : last;
+        return twoSegments;
     }
 }

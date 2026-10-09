@@ -235,7 +235,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessHudMethod(method, parameters) ?? ProcessIntrospectionMethod(method, parameters)
                          ?? ProcessScriptMethod(method, parameters) ?? ProcessMapMethod(method, parameters)
                          ?? ProcessExploreMethod(method, parameters) ?? ProcessMemoryMethod(method, parameters)
-                         ?? ProcessGuideMethod(method, parameters) ?? ProcessDataMethod(method, parameters);
+                         ?? ProcessGuideMethod(method, parameters) ?? ProcessDataMethod(method, parameters)
+                         ?? ProcessExperimentMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
@@ -278,6 +279,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         // Plugin reloads requested over the bridge run here, on the main thread, like the menu's Reload button.
         RunPendingReload();
         RunPendingScript();
+        RunQueuedStep();
 
         var now = DateTime.UtcNow;
 
