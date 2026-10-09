@@ -236,7 +236,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessScriptMethod(method, parameters) ?? ProcessMapMethod(method, parameters)
                          ?? ProcessExploreMethod(method, parameters) ?? ProcessMemoryMethod(method, parameters)
                          ?? ProcessGuideMethod(method, parameters) ?? ProcessDataMethod(method, parameters)
-                         ?? ProcessExperimentMethod(method, parameters);
+                         ?? ProcessExperimentMethod(method, parameters) ?? ProcessObserveMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
@@ -280,6 +280,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         RunPendingReload();
         RunPendingScript();
         RunQueuedStep();
+        ObserveTick();
 
         var now = DateTime.UtcNow;
 
