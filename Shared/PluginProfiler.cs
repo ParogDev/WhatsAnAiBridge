@@ -151,9 +151,19 @@ public partial class WhatsAnAiBridge
                 catch (Exception ex) { if (refused.Count < 20) refused.Add($"{m.DeclaringType?.Name}.{m.Name}: {ex.GetType().Name}"); }
             }
             var patchMs = sw.ElapsedMilliseconds;
+            var (ohTicks, ohBytes) = ProfCalibrate(harmony, pre, post);
+            ProfStats.Clear();
             _profOn = true;
             await System.Threading.Tasks.Task.Delay(duration);
             _profOn = false;
+            // Remove the hooks' own cost (measured on an empty method) from every call's self numbers.
+            foreach (var st in ProfStats.Values)
+            {
+                st.Self = Math.Max(0, st.Self - (long)(st.Calls * ohTicks));
+                st.Inclusive = Math.Max(0, st.Inclusive - (long)(st.Calls * ohTicks));
+                st.AllocSelf = Math.Max(0, st.AllocSelf - (long)(st.Calls * ohBytes));
+                st.AllocInclusive = Math.Max(0, st.AllocInclusive - (long)(st.Calls * ohBytes));
+            }
             try { harmony.UnpatchAll(harmony.Id); } catch { }
             double Ms(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
             var stats = ProfStats.ToArray();
@@ -163,7 +173,8 @@ public partial class WhatsAnAiBridge
                 ["id"] = id, ["status"] = "done", ["plugin"] = label, ["durationMs"] = duration,
                 ["methodsPatched"] = patched, ["methodsCapped"] = targets.Count >= max, ["patchMs"] = patchMs, ["refused"] = refused, ["calls"] = totalCalls,
                 ["selfTotalMsPerSecond"] = Math.Round(stats.Sum(kv => Ms(kv.Value.Self)) * 1000.0 / duration, 3),
-                ["note"] = "self = inclusive minus profiled callees (BCL/HUD calls count as self). Per-call overhead ~0.1-0.3 us inflates tiny hot methods.",
+                ["hookOverhead"] = new JObject { ["usPerCall"] = Math.Round(ohTicks * 1e6 / Stopwatch.Frequency, 3), ["bytesPerCall"] = Math.Round(ohBytes, 1) },
+                ["note"] = "self = inclusive minus profiled callees (BCL/HUD calls count as self). The hooks' own cost (hookOverhead, measured on an empty method) is subtracted per call.",
                 ["top"] = new JArray(stats.OrderByDescending(kv => kv.Value.Self).Take(25).Select(kv => new JObject
                 {
                     ["method"] = $"{kv.Key.DeclaringType?.Name}.{kv.Key.Name}",
@@ -188,5 +199,27 @@ public partial class WhatsAnAiBridge
             lock (ProfJobs) ProfJobs[id] = result;
         });
         return job;
+    }
+}
+
+public partial class WhatsAnAiBridge
+{
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static int ProfCalibrationTarget(int x) => x + 1;
+
+    /// <summary>The hooks' own time and allocation per call: an empty method patched like the targets, called 2000 times.
+    /// Without this, every profiled call carries the prefix/postfix cost (Harmony loads __originalMethod inside the window).</summary>
+    private static (double ticks, double bytes) ProfCalibrate(Harmony harmony, HarmonyMethod pre, HarmonyMethod post)
+    {
+        var m = typeof(WhatsAnAiBridge).GetMethod(nameof(ProfCalibrationTarget), BindingFlags.Static | BindingFlags.NonPublic);
+        if (m == null) return (0, 0);
+        try { harmony.Patch(m, prefix: pre, postfix: post); } catch { return (0, 0); }
+        ProfStats.Clear();
+        _profOn = true;
+        var x = 0;
+        for (var i = 0; i < 2000; i++) x = ProfCalibrationTarget(x);
+        _profOn = false;
+        try { harmony.Unpatch(m, HarmonyPatchType.All, harmony.Id); } catch { }
+        return ProfStats.TryGetValue(m, out var s) && s.Calls > 0 && x > 0 ? ((double)s.Self / s.Calls, (double)s.AllocSelf / s.Calls) : (0, 0);
     }
 }
