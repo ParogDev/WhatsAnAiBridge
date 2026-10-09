@@ -53,6 +53,7 @@ public partial class WhatsAnAiBridge
         public bool Collected;
         public bool Chain;                 // starts by itself when the previous step of the same experiment is captured
         public JArray? Highlight;          // targets shown (guide.highlight) while the step records
+        public JObject? Flow;              // guided flow (guide.flow) run from Start until the step ends
         public string? Error;
         public List<QueuedCapture> Captures = new();
     }
@@ -130,7 +131,7 @@ public partial class WhatsAnAiBridge
         {
             Id = Guid.NewGuid().ToString("N")[..10], Experiment = experiment, Label = Clip(p?["label"]?.ToString(), 40) ?? "step",
             Instruction = instruction!, Title = Clip(p?["title"]?.ToString(), 80), Note = Clip(p?["note"]?.ToString(), 300),
-            By = Clip(p?["by"]?.ToString(), 40), Watch = watch, Chain = p?["chain"]?.Value<bool>() == true, Highlight = p?["highlight"] as JArray,
+            By = Clip(p?["by"]?.ToString(), 40), Watch = watch, Chain = p?["chain"]?.Value<bool>() == true, Highlight = p?["highlight"] as JArray, Flow = p?["flow"] as JObject,
             Repeats = Math.Clamp(p?["repeats"]?.Value<int>() ?? 1, 1, 10),
             SettleMs = Math.Clamp(p?["settleMs"]?.Value<int>() ?? 500, 100, 5000),
             TimeoutMs = Math.Clamp(p?["timeoutMs"]?.Value<int>() ?? 120_000, 5_000, 600_000),
@@ -251,6 +252,7 @@ public partial class WhatsAnAiBridge
             if (run.BeforeKey == "")
             {
                 if (step.Highlight != null) HighlightSet(new JObject { ["targets"] = step.Highlight.DeepClone(), ["title"] = step.Title });
+                if (step.Flow != null && run.Repeat == 1) FlowSet(step.Flow.DeepClone());
                 run.Before = CaptureWatch(step.Watch);
                 run.BeforeKey = run.LastKey = Fingerprint(run.Before);
                 run.Last = run.Before;
@@ -322,6 +324,7 @@ public partial class WhatsAnAiBridge
             SaveQueue();
         }
         if (step.Highlight != null) HighlightSet(new JObject { ["clear"] = true });
+        if (step.Flow != null) FlowSet(new JObject { ["stop"] = true });
         GuideSet(new JObject { ["status"] = status == "captured" ? "captured" : "failed", ["detail"] = detail });
         if (status != "captured") GuideLog(new JObject { ["text"] = $"'{step.Label}': {detail}", ["kind"] = "warn" });
         if (status != "captured") return;

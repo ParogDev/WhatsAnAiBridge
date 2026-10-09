@@ -8,22 +8,37 @@ namespace WhatsAnAiBridge;
 
 using GuideSnap = (string? title, string? instruction, int? step, int? steps, string status, string? detail,
     DateTime updatedAt, DateTime? instructionSince, int rev, WhatsAnAiBridge.GuideLogEntry[] log);
+using FlowSnap = (string? title, (string label, string state)[] steps, string? showing, string status, int rev);
 
 /// <summary>
-/// In-HUD agent guide panel (ImGui): the agent's current instruction for the user as a sticky card, and a short
-/// "combat log" of what the agent is doing under it. One surface over the state in AgentGuide.cs (GuideSnapshot,
-/// taken once per frame; the only write is GuideDismiss). Loud only while the user must act (status waiting, and
-/// failed: the step needs redoing), quiet for progress and results, hidden when there is nothing to say.
+/// In-HUD agent guide panel (ImGui): the agent's current instruction for the user as a sticky card. One surface over
+/// the state in AgentGuide.cs (GuideSnapshot, taken once per frame; the only write is GuideDismiss). Loud only while
+/// the user must act (status waiting, and failed: the step needs redoing), quiet for progress and results, hidden
+/// when there is nothing to say.
+/// The agent's log is not a panel: each new line is a small dark toast under the card for ~3 s (no window, no
+/// input), and the full recent log appears as a selectable sheet only while the user HOLDS SHIFT.
+/// A guided flow (GuideFlow.cs) adds a checklist of its steps to the card, re-read every frame from FlowSnapshot():
+/// done steps get a check, the current one the accent badge, later ones a dim ring; a step going back animates out.
 /// Steps an agent QUEUED (ExperimentQueue.cs) get their own calm card under the live one: what to do, what will be
 /// recorded, and a Start button - nothing is captured until the user presses it.
-/// Game-agnostic: ImGui only; nothing here touches ExileCore* directly.
+/// Game-agnostic: ImGui only; nothing here touches ExileCore* directly (Input comes from the per-game GlobalUsings).
 /// </summary>
 public partial class WhatsAnAiBridge
 {
     private const float GuideWidth = 520f;   // fits the gap between the stash (x 0..665) and the inventory at 1080p
     private const float GuideEdge = 4f;      // inset so the pulse glow is not clipped by the window rect
-    private const int GuideLogRows = 6;
-    private const double GuideQuietHideSec = 120, GuideCapturedLoudSec = 4, GuideFlashSec = 0.9, GuideLogFlashSec = 1.5;
+    private const double GuideQuietHideSec = 120, GuideCapturedLoudSec = 4, GuideFlashSec = 0.9;
+    // Toasts: a line shows for ToastSec, the last ToastFadeSec of it fading; at most ToastMax at once.
+    private const double GuideToastSec = 3.0, GuideToastFadeSec = 0.6, GuideToastInSec = 0.15;
+    private const int GuideToastMax = 3;
+    // Log sheet: Shift must be held for HoldSec before it opens (a tap in combat does nothing); it fades on release.
+    private const double GuideSheetHoldSec = 0.2, GuideSheetInSec = 0.15, GuideSheetOutSec = 0.2;
+    private const int GuideSheetLines = 20, GuideSheetRowsMax = 24;
+    // Flow plan: a finished flow keeps its "all done" line on the card for this long, then the card is as usual.
+    // Rows slide to their new place over SlideSec when the plan re-orders; a step coming back is marked for UndoSec.
+    private const double GuideFlowDoneShowSec = 3.0, GuideFlowSlideSec = 0.28, GuideFlowUndoSec = 0.6, GuideFlowPopSec = 0.3;
+    private const int GuideFlowNextMax = 4;      // "then" rows under the current action; the rest is "+N more"
+    private const float GuideRailW = 24f;        // the badge column left of the instruction and the plan rows
 
     /// <summary>Panel-local state: what the panel last saw, for the arrival and change animations.</summary>
     private sealed class GuideUiState
@@ -31,13 +46,29 @@ public partial class WhatsAnAiBridge
         public int SeenRev = -1;
         public DateTime? SeenSince;
         public string SeenStatus = "";
-        public DateTime SeenLastLogAt = DateTime.MinValue;
         public double ArrivedAt = -1e9;    // ImGui time the current instruction appeared
         public double StatusAt = -1e9;     // ImGui time the status last changed
-        public double LogAt = -1e9;        // ImGui time the newest log line arrived
         public string? SeenQueueTop;       // id of the queued step at the front last frame
         public double QueueArrivedAt = -1e9; // ImGui time a new step reached the front of the queue
         public bool QueueWatchOpen;        // the "Will record" line expanded to the exact watch specs
+        // Where the panel window is, so toasts and the log sheet (no window / their own window) sit under it.
+        public Vector2 WinPos = new(float.NaN, float.NaN);
+        public float WinH;                 // 0 while the window is not drawn
+        // Shift-held log sheet.
+        public double ShiftDownAt = -1e9;  // ImGui time Shift went down (sheet opens HoldSec later)
+        public double ShiftUpAt = -1e9;    // ImGui time Shift was released while the sheet was open
+        public bool SheetOpen;
+        // Flow plan: the plan last frame and when it changed (rows slide from their old place), how many steps were
+        // done (a drop = the user went back: the done line is marked), and when the flow ended.
+        public int FlowRev = -1;
+        public string FlowStatus = "idle";
+        public string[] FlowPlan = [];
+        public string[] FlowPlanPrev = [];
+        public double FlowPlanAt = -1e9;
+        public int FlowDoneCount;
+        public double FlowDoneAt = -1e9;
+        public bool FlowUndo;              // the last done-count change was a step coming back
+        public double FlowEndedAt = -1e9;  // ImGui time the flow left "running"
         public string? LastError;
     }
 
@@ -82,6 +113,13 @@ public partial class WhatsAnAiBridge
 
     // ── Frame ────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The guided flow as the card shows it this frame: whether the flow section is drawn at all (running, or done
+    /// within the last seconds), the live plan (first entry = what to do now; empty once the flow ended), the labels
+    /// of the steps already done, and how many steps there are.
+    /// </summary>
+    private readonly record struct FlowView(bool Show, bool Running, string[] Plan, string[] DoneLabels, int StepCount);
+
     private void DrawGuidePanel()
     {
         if (!Settings.ShowAgentGuide.Value) return;
@@ -89,9 +127,28 @@ public partial class WhatsAnAiBridge
         var g = GuideSnapshot();
         // Once per frame: it takes the queue lock. Open steps only, in queue order.
         var q = QueueViewOf(QueueSnapshot());
+        var fl = FlowSnapshot();
+        var plan = fl.status == "running" ? FlowPlan() : [];
         var now = ImGui.GetTime();
         var utc = DateTime.UtcNow;
         ObserveGuide(g, q, now);
+        ObserveFlow(fl, plan, now);
+        var th = PanelTheme.Current();
+        var fv = new FlowView(
+            fl.status == "running" || (fl.status == "done" && now - _guideUi.FlowEndedAt < GuideFlowDoneShowSec),
+            fl.status == "running", plan, fl.steps.Where(s => s.state == "done").Select(s => s.label).ToArray(), fl.steps.Length);
+
+        // The log lives outside the window: toasts (no input) or, while Shift is held, its own selectable sheet.
+        // Both anchor under the panel's last known rectangle, so they show even while the panel is hidden.
+        var io = ImGui.GetIO();
+        var defaultPos = new Vector2(MathF.Round((io.DisplaySize.X - GuideWidth) * 0.5f), 84);
+        if (float.IsNaN(_guideUi.WinPos.X)) _guideUi.WinPos = defaultPos;
+        try
+        {
+            var anchor = new Vector2(_guideUi.WinPos.X, _guideUi.WinPos.Y + _guideUi.WinH + (_guideUi.WinH > 0 ? 2 : 0));
+            if (!DrawGuideLogSheet(g, th, now, anchor)) DrawGuideToasts(g, th, now, utc, anchor);
+        }
+        catch (Exception ex) { GuideReport(ex); }
 
         // Visibility: a card exists while there is an instruction or a non-idle status. The panel hides itself once
         // everything is quiet (idle / captured / done / info) and nothing happened for two minutes; waiting, failed
@@ -99,15 +156,12 @@ public partial class WhatsAnAiBridge
         // A queued step keeps the panel up too (calmly): the user may come back hours later and must find it.
         var hasCard = g.instruction != null || g.status != "idle";
         var needsUser = g.status is "waiting" or "failed" or "detected" or "settling";
-        var lastActivity = g.updatedAt;
-        if (g.log.Length > 0 && g.log[^1].At > lastActivity) lastActivity = g.log[^1].At;
-        var quietFor = (utc - lastActivity).TotalSeconds;
-        if (!needsUser && q.Next == null && quietFor > GuideQuietHideSec) return;
-        if (!hasCard && q.Next == null && g.log.Length == 0) return;
+        var quietFor = (utc - g.updatedAt).TotalSeconds;
+        var hide = (!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null);
+        if (hide) { _guideUi.WinH = 0; return; }
 
-        var io = ImGui.GetIO();
         // Default: top centre, under the skill bar; clear of the stash (left) and the inventory (right) at 1080p.
-        ImGui.SetNextWindowPos(new Vector2(MathF.Round((io.DisplaySize.X - GuideWidth) * 0.5f), 84), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowPos(defaultPos, ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowSizeConstraints(new Vector2(GuideWidth, 0), new Vector2(GuideWidth, float.MaxValue));
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
@@ -120,16 +174,11 @@ public partial class WhatsAnAiBridge
         var shown = ImGui.Begin("Agent Guide###bridge_guide_panel", flags);
         try
         {
-            if (shown) DrawGuideBody(g, q, hasCard, needsUser, now, utc);
+            _guideUi.WinPos = ImGui.GetWindowPos();
+            _guideUi.WinH = shown ? ImGui.GetWindowSize().Y : 0;
+            if (shown) DrawGuideBody(g, q, fv, hasCard, needsUser, th, now, utc);
         }
-        catch (Exception ex)
-        {
-            if (_guideUi.LastError != ex.Message)
-            {
-                _guideUi.LastError = ex.Message;
-                LogError($"[GuidePanel] {ex}");
-            }
-        }
+        catch (Exception ex) { GuideReport(ex); }
         finally
         {
             ImGui.End();
@@ -137,7 +186,14 @@ public partial class WhatsAnAiBridge
         }
     }
 
-    /// <summary>Notice what changed since last frame, so arrivals can flash and the log can highlight its newest line.</summary>
+    private void GuideReport(Exception ex)
+    {
+        if (_guideUi.LastError == ex.Message) return;
+        _guideUi.LastError = ex.Message;
+        LogError($"[GuidePanel] {ex}");
+    }
+
+    /// <summary>Notice what changed since last frame, so arrivals can flash.</summary>
     private void ObserveGuide(in GuideSnap g, in QueueView q, double now)
     {
         var u = _guideUi;
@@ -163,23 +219,46 @@ public partial class WhatsAnAiBridge
             // A status that asks for the user again should catch the eye like a new instruction does.
             if (!first && g.status is "waiting" or "failed") u.ArrivedAt = now;
         }
-        // The newest line's timestamp identifies it even once the log is full and old lines fall off the front.
-        var lastAt = g.log.Length > 0 ? g.log[^1].At : DateTime.MinValue;
-        if (lastAt != u.SeenLastLogAt)
+    }
+
+    /// <summary>
+    /// Notice the flow re-planning: a changed plan slides its rows, a drop in done steps (the user went back, e.g.
+    /// closed a dialog) marks the done line, and leaving "running" starts the short "all done" display.
+    /// </summary>
+    private void ObserveFlow(in FlowSnap fl, string[] plan, double now)
+    {
+        var u = _guideUi;
+        var first = u.FlowRev < 0;
+        var statusChanged = fl.status != u.FlowStatus;
+        if (statusChanged)
         {
-            if (!first && g.log.Length > 0) u.LogAt = now;
-            u.SeenLastLogAt = lastAt;
+            if (!first && u.FlowStatus == "running") u.FlowEndedAt = now;
+            u.FlowStatus = fl.status;
         }
+        var doneCount = 0;
+        foreach (var s in fl.steps) if (s.state == "done") doneCount++;
+        if (doneCount != u.FlowDoneCount)
+        {
+            u.FlowUndo = !first && !statusChanged && fl.status == "running" && doneCount < u.FlowDoneCount;
+            u.FlowDoneAt = first ? -1e9 : now;
+            u.FlowDoneCount = doneCount;
+        }
+        if (!plan.SequenceEqual(u.FlowPlan))
+        {
+            u.FlowPlanPrev = u.FlowPlan;
+            u.FlowPlan = plan;
+            u.FlowPlanAt = first || statusChanged ? -1e9 : now;   // a new flow's rows appear with the card, no slide
+        }
+        u.FlowRev = fl.rev;
     }
 
     // ── Body ─────────────────────────────────────────────────────────
 
-    private void DrawGuideBody(in GuideSnap g, in QueueView q, bool hasCard, bool needsUser, double now, DateTime utc)
+    private void DrawGuideBody(in GuideSnap g, in QueueView q, in FlowView fv, bool hasCard, bool needsUser, PanelTheme th, double now, DateTime utc)
     {
-        var th = PanelTheme.Current();
         if (hasCard)
         {
-            DrawGuideCard(g, q.Running, th, now, utc);
+            DrawGuideCard(g, q.Running, fv, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
         if (q.Next != null)
@@ -190,10 +269,9 @@ public partial class WhatsAnAiBridge
             else DrawQueueCard(q, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
-        if (g.log.Length > 0) DrawGuideLog(g, th, now);
     }
 
-    private void DrawGuideCard(in GuideSnap g, QueuedStep? running, PanelTheme th, double now, DateTime utc)
+    private void DrawGuideCard(in GuideSnap g, QueuedStep? running, in FlowView fv, PanelTheme th, double now, DateTime utc)
     {
         var dl = ImGui.GetWindowDrawList();
         var font = ImGui.GetFont();
@@ -214,25 +292,45 @@ public partial class WhatsAnAiBridge
         var big = MathF.Round(f * 1.5f);
         var headH = f + 12;
 
-        // Measure first: the card background needs the full height.
+        // Measure first: the card background needs the full height. A flow adds a badge rail left of the text: the
+        // done line above the instruction, the "now" badge on the instruction, the next actions as rows under it.
+        var flow = fv.Show && !compact;
+        var rail = flow ? GuideRailW : 0f;
+        var textW = innerW - rail;
+        var rowH = f + 6;
         var bodyH = 0f;
         string? sub = GuideSubline(g, now);
         Vector2 instrSize = default, subSize = default, detailSize = default;
+        string? doneLine = null;
+        var nextRows = Array.Empty<string>();
+        var moreRows = 0;
+        if (flow)
+        {
+            if (!fv.Running) doneLine = fv.StepCount == 1 ? "Done" : $"All {fv.StepCount} steps done";
+            else if (fv.DoneLabels.Length > 0) doneLine = "Done: " + string.Join(", ", fv.DoneLabels);
+            if (doneLine != null) bodyH += small + 6;
+            if (fv.Plan.Length > 1)
+            {
+                nextRows = fv.Plan.Skip(1).Take(GuideFlowNextMax).ToArray();
+                moreRows = fv.Plan.Length - 1 - nextRows.Length;
+            }
+        }
         if (!compact && g.instruction != null)
         {
-            instrSize = font.CalcTextSizeA(loud ? big : f, float.MaxValue, innerW, g.instruction);
+            instrSize = font.CalcTextSizeA(loud ? big : f, float.MaxValue, textW, g.instruction);
             bodyH += instrSize.Y + 4;
         }
         if (!compact && sub != null)
         {
-            subSize = font.CalcTextSizeA(f, float.MaxValue, innerW, sub);
+            subSize = font.CalcTextSizeA(f, float.MaxValue, textW, sub);
             bodyH += subSize.Y + 4;
         }
         if (!compact && g.detail != null && g.detail != sub)
         {
-            detailSize = font.CalcTextSizeA(f, float.MaxValue, innerW, g.detail);
+            detailSize = font.CalcTextSizeA(f, float.MaxValue, textW, g.detail);
             bodyH += detailSize.Y + 4;
         }
+        if (nextRows.Length > 0) bodyH += 2 + nextRows.Length * rowH + (moreRows > 0 ? small + 4 : 0);
         var h = headH + (bodyH > 0 ? bodyH + 6 : 2);
         var min = new Vector2(x0, p.Y + GuideEdge);
         var max = new Vector2(x0 + w, p.Y + GuideEdge + h);
@@ -333,21 +431,78 @@ public partial class WhatsAnAiBridge
         {
             var y = min.Y + headH + 2;
             var bx = min.X + pad;
+            var tx = bx + rail;                 // text column (the rail holds the badges)
+            var cx = bx + GuideRailW * 0.5f - 2; // badge centre in the rail
+            if (doneLine != null)
+            {
+                // Steps already done, collapsed to one dim line. A step coming back (the user went back) marks it
+                // for a moment: neutral wash, text at full strength, the check greyed - calm, but legible.
+                var undo = _guideUi.FlowUndo ? (float)((now - _guideUi.FlowDoneAt) / GuideFlowUndoSec) : 1f;
+                var mark = undo < 1 ? 1f - undo : 0f;
+                var ly = y + (small + 2) * 0.5f;
+                if (mark > 0) dl.AddRectFilled(new Vector2(bx - 4, y - 2), new Vector2(max.X - pad + 4, y + small + 4), U(ToneNeutral, 0.14f * mark), 3f);
+                var pop = fv.Running ? 1f : HlEase((now - _guideUi.FlowEndedAt) / GuideFlowPopSec);
+                DrawFlowCheck(dl, new Vector2(cx, ly), 6f, mark > 0 ? ToneNeutral : ToneOk, pop, fv.Running ? 0.75f : 1f);
+                var dcol = mark > 0 ? U(th.Text, 0.6f + 0.4f * mark) : U(th.TextDim);
+                dl.AddText(font, small, new Vector2(tx, ly - small * 0.5f), dcol, GuideClipText(doneLine, textW));
+                y += small + 6;
+            }
+            var instrY = y;
             if (g.instruction != null)
             {
                 var col = g.status is "captured" or "done" or "detected" or "settling" ? U(th.Text, 0.85f) : U(th.Text);
-                dl.AddText(font, loud ? big : f, new Vector2(bx, y), col, g.instruction, innerW);
+                if (flow && fv.Running)
+                {
+                    // The "now" badge: the same filled accent disc with the step number as the in-game highlight badge.
+                    var lineH = loud ? big : f;
+                    DrawFlowBadge(dl, new Vector2(cx, y + lineH * 0.5f), 7.5f, 0, g.step?.ToString(), 1f, th);
+                }
+                dl.AddText(font, loud ? big : f, new Vector2(tx, y), col, g.instruction, textW);
                 y += instrSize.Y + 4;
             }
             if (sub != null)
             {
-                dl.AddText(font, f, new Vector2(bx, y), U(look.Tone, 0.95f), sub, innerW);
+                dl.AddText(font, f, new Vector2(tx, y), U(look.Tone, 0.95f), sub, textW);
                 y += subSize.Y + 4;
             }
             if (g.detail != null && g.detail != sub)
             {
-                dl.AddText(font, f, new Vector2(bx, y), U(th.TextDim), g.detail, innerW);
+                dl.AddText(font, f, new Vector2(tx, y), U(th.TextDim), g.detail, textW);
                 y += detailSize.Y + 4;
+            }
+            if (nextRows.Length > 0)
+            {
+                // The rest of the plan, best order from here, as dim rows on the rail. When the plan re-orders a row
+                // slides from where its text was last frame; a row new to the plan fades in.
+                y += 2;
+                var listY = y;
+                var k = HlEase((now - _guideUi.FlowPlanAt) / GuideFlowSlideSec);
+                float YOf(int i) => i <= 0 ? instrY : listY + Math.Min(i - 1, nextRows.Length) * rowH;
+                var railTop = instrY + (loud ? big : f) * 0.5f + 9;
+                var railBottom = listY + (nextRows.Length - 1) * rowH + rowH * 0.5f - 7;
+                if (railBottom > railTop) dl.AddLine(new Vector2(cx, railTop), new Vector2(cx, railBottom), U(ToneNeutral, 0.3f), 1f);
+                for (var i = 0; i < nextRows.Length; i++)
+                {
+                    var label = nextRows[i];
+                    var planIdx = i + 1;
+                    var prevIdx = Array.IndexOf(_guideUi.FlowPlanPrev, label);
+                    var ry = YOf(planIdx);
+                    var alpha = 1f;
+                    if (k < 1)
+                    {
+                        if (prevIdx >= 0) ry = YOf(prevIdx) + (ry - YOf(prevIdx)) * k;
+                        else alpha = k;
+                    }
+                    var rcy = ry + rowH * 0.5f;
+                    DrawFlowBadge(dl, new Vector2(cx, rcy), 5f, 1, null, alpha, th);
+                    dl.AddText(new Vector2(tx, rcy - f * 0.5f), U(th.TextDim, 0.9f * alpha), GuideClipText(label, textW));
+                }
+                y += nextRows.Length * rowH;
+                if (moreRows > 0)
+                {
+                    dl.AddText(font, small, new Vector2(tx, y + 1), U(th.TextDim, 0.7f), $"+{moreRows} more");
+                    y += small + 4;
+                }
             }
         }
 
@@ -411,96 +566,96 @@ public partial class WhatsAnAiBridge
         }
     }
 
-    // ── Log ──────────────────────────────────────────────────────────
+    // ── Flow glyphs ──────────────────────────────────────────────────
 
-    /// <summary>The agent's log as a compact combat log: the newest lines at the bottom, older ones fading.</summary>
-    private void DrawGuideLog(in GuideSnap g, PanelTheme th, double now)
+    /// <summary>
+    /// The plan's rail badge, matching the in-game highlight badge: state 0 = the action to take now (filled accent
+    /// disc, the step number in ink), 1 = a later action (dim neutral ring, no number).
+    /// </summary>
+    private static void DrawFlowBadge(ImDrawListPtr dl, Vector2 c, float r, int state, string? n, float alpha, PanelTheme th)
     {
-        var dl = ImGui.GetWindowDrawList();
+        if (state == 0)
+        {
+            dl.AddCircleFilled(c, r, U(ToneAccent, alpha), 20);
+            if (n != null)
+            {
+                var f = ImGui.GetFontSize();
+                var small = f * 0.85f;
+                var tw = ImGui.CalcTextSize(n).X * (small / f);
+                var tp = new Vector2(c.X - tw * 0.5f, c.Y - small * 0.5f);
+                var ink = U(new Vector4(0.05f, 0.08f, 0.06f, 1f), alpha);
+                dl.AddText(ImGui.GetFont(), small, tp, ink, n);
+                dl.AddText(ImGui.GetFont(), small, tp + new Vector2(0.6f, 0), ink, n);   // faux bold
+            }
+        }
+        else
+        {
+            dl.AddCircleFilled(c, r, U(th.Card, 0.9f * alpha), 16);
+            dl.AddCircle(c, r, U(ToneNeutral, 0.7f * alpha), 16, 1.2f);
+        }
+    }
+
+    /// <summary>A disc with a check, as on a done highlight step. pop 0..1 scales the check in.</summary>
+    private static void DrawFlowCheck(ImDrawListPtr dl, Vector2 c, float r, Vector4 tone, float pop, float alpha)
+    {
+        dl.AddCircleFilled(c, r, U(tone, 0.85f * alpha), 20);
+        var s = (0.4f + 0.6f * pop) * (r / 7f);
+        var ck = U(new Vector4(0.05f, 0.08f, 0.06f, 1f), alpha);
+        dl.AddLine(new Vector2(c.X - 3.6f * s, c.Y + 0.2f * s), new Vector2(c.X - 1f * s, c.Y + 2.8f * s), ck, 1.6f);
+        dl.AddLine(new Vector2(c.X - 1f * s, c.Y + 2.8f * s), new Vector2(c.X + 3.8f * s, c.Y - 2.8f * s), ck, 1.6f);
+    }
+
+    // ── Log: toasts ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Each new log line as a small dark toast under the panel for ~3 s: newest on top (older ones slide down to
+    /// make room), the last 0.6 s fading, at most three at once. Drawn on the background draw list: no window, so
+    /// the mouse passes straight through to the game. Nothing stays.
+    /// </summary>
+    private void DrawGuideToasts(in GuideSnap g, PanelTheme th, double now, DateTime utc, Vector2 anchor)
+    {
+        if (g.log.Length == 0) return;
+        var dl = ImGui.GetBackgroundDrawList();
         var font = ImGui.GetFont();
         var f = ImGui.GetFontSize();
         var small = f * 0.85f;
-        var open = Settings.GuideLogOpen.Value;
-        var p = ImGui.GetCursorScreenPos();
-        var x0 = p.X + GuideEdge;
-        var w = GuideWidth - GuideEdge * 2;
-        const float pad = 10f;
-        var headH = f + 6;
-        var rowH = f + 4;
-        var shown = Math.Min(GuideLogRows, g.log.Length);
-        var h = headH + (open ? shown * rowH + 6 : 0);
-        var min = new Vector2(x0, p.Y);
-        var max = new Vector2(x0 + w, p.Y + h);
-
-        dl.AddRectFilled(min, max, U(th.Card, 0.92f), 5f);
-        dl.AddRect(min, max, U(th.Border, 0.5f), 5f);
-
-        // Header: disclosure, title, and (collapsed) the newest line so the log is never fully silent.
-        ImGui.SetCursorScreenPos(min);
-        ImGui.InvisibleButton("##guide_log_head", new Vector2(w, headH));
-        var hov = ImGui.IsItemHovered();
-        if (ImGui.IsItemClicked()) Settings.GuideLogOpen.Value = !open;
-        if (hov) ImGui.SetTooltip(open ? "Collapse the agent log" : "Expand the agent log");
-        var hy = min.Y + headH * 0.5f;
-        var col = U(hov ? th.Text : th.TextDim);
-        var tx = min.X + pad;
-        if (open) dl.AddTriangleFilled(new Vector2(tx, hy - 2), new Vector2(tx + 7, hy - 2), new Vector2(tx + 3.5f, hy + 2.5f), col);
-        else dl.AddTriangleFilled(new Vector2(tx + 1, hy - 3.5f), new Vector2(tx + 5.5f, hy), new Vector2(tx + 1, hy + 3.5f), col);
-        var title = "AGENT LOG";
-        dl.AddText(font, small, new Vector2(tx + 13, hy - small * 0.5f), col, title);
-        var titleW = ImGui.CalcTextSize(title).X * (small / f);
-        var count = g.log.Length.ToString();
-        var countW = ImGui.CalcTextSize(count).X * (small / f);
-        dl.AddText(font, small, new Vector2(max.X - pad - countW, hy - small * 0.5f), U(th.TextDim, 0.7f), count);
-        if (!open)
+        var rowH = small + 8;
+        const float gap = 3f, pad = 8f;
+        var maxW = GuideWidth - GuideEdge * 2;
+        var x0 = anchor.X + GuideEdge;
+        // The newest toast's slide-in pushes the older ones down with it.
+        var newestAge = (utc - g.log[^1].At).TotalSeconds;
+        var push = (float)(1 - HlEase(newestAge / GuideToastInSec));
+        var y = anchor.Y + GuideEdge;
+        var shown = 0;
+        for (var i = g.log.Length - 1; i >= 0 && shown < GuideToastMax; i--)
         {
-            var last = g.log[^1];
-            var lx = tx + 13 + titleW + 10;
-            var avail = max.X - pad - countW - 8 - lx;
-            if (avail > 60)
-            {
-                dl.AddRectFilled(new Vector2(lx, hy - 5), new Vector2(lx + 3, hy + 5), U(GuideKindTone(last.Kind, th)), 1f);
-                dl.AddText(new Vector2(lx + 8, hy - f * 0.5f), U(th.TextDim), GuideClipText(last.Text, avail - 8));
-            }
+            var e = g.log[i];
+            var age = (utc - e.At).TotalSeconds;
+            if (age >= GuideToastSec) break;
+            var alpha = (float)Math.Clamp((GuideToastSec - age) / GuideToastFadeSec, 0, 1) * HlEase(age / GuideToastInSec);
+            if (shown > 0) y -= push * (rowH + gap);   // older rows catch up with the push from above
+            var tone = GuideKindTone(e.Kind, th);
+            var tail = shown == 0 ? "shift: log" : null;
+            var tailW = tail != null ? ImGui.CalcTextSize(tail).X * (small / f) + 10 : 0f;
+            var textMax = maxW - pad * 2 - 3 - 6 - tailW;
+            var text = GuideClipText(e.Text, textMax * (f / small)); // clip measured at the small size
+            var textW = ImGui.CalcTextSize(text).X * (small / f);
+            var w = pad + 3 + 6 + textW + tailW + pad;
+            var min = new Vector2(x0, y);
+            var max = new Vector2(x0 + w, y + rowH);
+            // Fixed dark ink, low contrast: a toast is for the corner of the eye, whatever the HUD theme.
+            dl.AddRectFilled(min, max, U(GuideToastInk, 0.8f * alpha), 4f);
+            dl.AddRectFilled(new Vector2(min.X + pad, min.Y + 4), new Vector2(min.X + pad + 3, max.Y - 4), U(tone, 0.8f * alpha), 1f);
+            var tcol = e.Kind == "agent" ? U(th.Text, 0.78f * alpha) : U(tone, 0.9f * alpha);
+            dl.AddText(font, small, new Vector2(min.X + pad + 9, min.Y + 4), tcol, text);
+            if (tail != null) dl.AddText(font, small, new Vector2(max.X - pad - tailW + 10, min.Y + 4), U(th.TextDim, 0.45f * alpha), tail);
+            y += rowH + gap;
+            shown++;
         }
-
-        if (open)
-        {
-            var y = min.Y + headH + 2;
-            var timeW = ImGui.CalcTextSize("00:00:00").X;
-            var textX = min.X + pad + timeW + 8 + 3 + 7;
-            var textW = max.X - pad - textX;
-            var newestFlash = (now - _guideUi.LogAt) / GuideLogFlashSec;
-            for (var i = g.log.Length - shown; i < g.log.Length; i++)
-            {
-                var e = g.log[i];
-                var idx = i - (g.log.Length - shown);
-                var age = shown > 1 ? (float)idx / (shown - 1) : 1f;     // 0 oldest .. 1 newest
-                var alpha = 0.55f + 0.45f * age;   // floor keeps the oldest line legible over bright game UI
-                var tone = GuideKindTone(e.Kind, th);
-                var rowMin = new Vector2(min.X + 4, y);
-                var rowMax = new Vector2(max.X - 4, y + rowH);
-                if (i == g.log.Length - 1 && newestFlash < 1)
-                    dl.AddRectFilled(rowMin, rowMax, U(tone, 0.22f * (float)(1 - newestFlash)), 3f);
-
-                ImGui.SetCursorScreenPos(rowMin);
-                ImGui.InvisibleButton("##guide_log_" + i, rowMax - rowMin);
-                var rowHov = ImGui.IsItemHovered();
-
-                dl.AddText(new Vector2(min.X + pad, y + 2), U(th.TextDim, alpha * 0.9f), e.At.ToLocalTime().ToString("HH:mm:ss"));
-                var bx = min.X + pad + timeW + 8;
-                dl.AddRectFilled(new Vector2(bx, y + 3), new Vector2(bx + 3, y + rowH - 3), U(tone, alpha), 1f);
-                var textCol = e.Kind == "agent" ? th.Text : tone;
-                var clipped = GuideClipText(e.Text, textW);
-                dl.AddText(new Vector2(textX, y + 2), U(textCol, alpha), clipped);
-                if (rowHov && !ReferenceEquals(clipped, e.Text)) ImGui.SetTooltip(e.Text);
-                y += rowH;
-            }
-        }
-
-        ImGui.SetCursorScreenPos(p);
-        ImGui.Dummy(new Vector2(GuideWidth, h + GuideEdge));
     }
+
+    private static readonly Vector4 GuideToastInk = new(0.07f, 0.07f, 0.09f, 1f);
 
     private static Vector4 GuideKindTone(string kind, PanelTheme th) => kind switch
     {
@@ -509,6 +664,151 @@ public partial class WhatsAnAiBridge
         "warn" => ToneWarn,
         _ => th.TextDim,
     };
+
+    // ── Log: Shift-held sheet ────────────────────────────────────────
+
+    /// <summary>
+    /// While Shift is held (0.2 s, so a tap in combat does nothing) the recent log opens as a sheet under the panel:
+    /// the last 20 lines, newest at the bottom, in a read-only text field so lines can be selected and copied with
+    /// ctrl+c, plus a Copy all pill. It fades out on release and takes no input while fading. Key state comes from
+    /// the HUD's Input (GetKeyState), which sees Shift while the game has focus - ImGui only gets keys sent to the
+    /// overlay window. Returns true while the sheet is on screen (toasts then stay quiet).
+    /// </summary>
+    private bool DrawGuideLogSheet(in GuideSnap g, PanelTheme th, double now, Vector2 anchor)
+    {
+        var u = _guideUi;
+        var shift = g.log.Length > 0 && Input.GetKeyState(System.Windows.Forms.Keys.ShiftKey);
+        if (shift) { if (u.ShiftDownAt < 0) u.ShiftDownAt = now; }
+        else
+        {
+            if (u.SheetOpen && u.ShiftDownAt >= 0) u.ShiftUpAt = now;
+            u.ShiftDownAt = -1;
+        }
+        var held = shift && now - u.ShiftDownAt >= GuideSheetHoldSec;
+        if (held) u.SheetOpen = true;
+        var fading = !held && u.SheetOpen && now - u.ShiftUpAt < GuideSheetOutSec;
+        if (!held && !fading) { u.SheetOpen = false; return false; }
+
+        var alpha = held ? HlEase((now - u.ShiftDownAt - GuideSheetHoldSec) / GuideSheetInSec) : 1f - (float)((now - u.ShiftUpAt) / GuideSheetOutSec);
+        if (held) alpha = MathF.Max(alpha, 0.35f);   // visible from the first frame, then eases in
+        var font = ImGui.GetFont();
+        var f = ImGui.GetFontSize();
+        var small = f * 0.85f;
+        const float pad = 10f;
+        var w = GuideWidth - GuideEdge * 2;
+        var innerW = w - pad * 2;
+        var headH = f + 12;
+        var lineH = ImGui.GetTextLineHeight();
+
+        // Text: "HH:mm:ss  kind    text", long lines wrapped under their text column, newest last. Rows are counted
+        // from the newest so the sheet never needs to scroll: the oldest lines give way.
+        var timeCol = "00:00:00  ";
+        var kindW = "result  ".Length;
+        var indent = new string(' ', timeCol.Length + kindW);
+        var indentW = ImGui.CalcTextSize(indent).X;
+        var lines = new List<string>();
+        var rows = 0;
+        for (var i = g.log.Length - 1; i >= 0 && lines.Count < GuideSheetLines; i--)
+        {
+            var e = g.log[i];
+            var kind = e.Kind == "agent" ? "" : e.Kind;
+            var head = e.At.ToLocalTime().ToString("HH:mm:ss") + "  " + kind.PadRight(kindW);
+            var wrapped = GuideWrapLines(e.Text, innerW - indentW - 8);
+            if (rows + wrapped.Count > GuideSheetRowsMax && lines.Count > 0) break;
+            var sb = new System.Text.StringBuilder(head);
+            for (var k = 0; k < wrapped.Count; k++) { if (k > 0) sb.Append('\n').Append(indent); sb.Append(wrapped[k]); }
+            lines.Add(sb.ToString());
+            rows += wrapped.Count;
+        }
+        lines.Reverse();
+        var text = string.Join("\n", lines);
+        var boxH = rows * lineH + 10;
+        var h = headH + boxH + pad;
+
+        ImGui.SetNextWindowPos(new Vector2(anchor.X + GuideEdge, anchor.Y + GuideEdge), ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new Vector2(w, h), ImGuiCond.Always);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 6f);
+        ImGui.PushStyleVar(ImGuiStyleVar.Alpha, Math.Clamp(alpha, 0.02f, 1f));
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, U(th.Card, 0.96f));
+        var flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoCollapse
+                    | ImGuiWindowFlags.NoNav | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoSavedSettings
+                    | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse;
+        if (!held) flags |= ImGuiWindowFlags.NoInputs;
+        var shown = ImGui.Begin("Agent Log###bridge_guide_log", flags);
+        try
+        {
+            if (shown)
+            {
+                var dl = ImGui.GetWindowDrawList();
+                var min = ImGui.GetWindowPos();
+                var max = min + new Vector2(w, h);
+                dl.AddRect(min, max, U(th.Border, 0.6f), 6f);
+                // Header: title, count, how to keep it, Copy all.
+                var hy = min.Y + headH * 0.5f;
+                var x = min.X + pad;
+                dl.AddRectFilled(new Vector2(x, hy - 5), new Vector2(x + 3, hy + 5), U(ToneNeutral, 0.9f), 1f);
+                const string title = "AGENT LOG";
+                dl.AddText(font, small, new Vector2(x + 9, hy - small * 0.5f), U(th.TextDim), title);
+                x += 9 + ImGui.CalcTextSize(title).X * (small / f) + 10;
+                var copyW = ImGui.CalcTextSize("Copy all").X + 24;
+                var hint = $"last {lines.Count} of {g.log.Length} - hold Shift, select, ctrl+c";
+                var hintW = max.X - pad - copyW - 10 - x;
+                if (hintW > 40) dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(th.TextDim, 0.7f), GuideClipText(hint, hintW * (f / small)));
+                var btnH = small + 8;
+                QueuePillButton(dl, "##guide_log_copy", new Vector2(max.X - pad - copyW, hy - btnH * 0.5f), btnH, "Copy all", false, th,
+                    out var copy, "Copy these lines to the clipboard");
+                if (copy) ImGui.SetClipboardText(string.Join("\n", lines));
+
+                // The text: read-only, so it is selectable; frame transparent so it reads as part of the card.
+                ImGui.SetCursorScreenPos(new Vector2(min.X + pad, min.Y + headH));
+                ImGui.PushStyleColor(ImGuiCol.FrameBg, 0);
+                ImGui.PushStyleColor(ImGuiCol.Text, U(th.Text, 0.9f));
+                ImGui.PushStyleColor(ImGuiCol.TextSelectedBg, U(ToneAccent, 0.35f));
+                ImGui.PushStyleColor(ImGuiCol.ScrollbarBg, 0);
+                ImGui.PushStyleColor(ImGuiCol.ScrollbarGrab, U(th.Text, 0.18f));
+                ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(4, 4));
+                ImGui.InputTextMultiline("##guide_log_text", ref text, (uint)text.Length + 1, new Vector2(innerW, boxH),
+                    ImGuiInputTextFlags.ReadOnly | ImGuiInputTextFlags.NoHorizontalScroll);
+                ImGui.PopStyleVar();
+                ImGui.PopStyleColor(5);
+            }
+        }
+        finally
+        {
+            ImGui.End();
+            ImGui.PopStyleColor();
+            ImGui.PopStyleVar(4);
+        }
+        return true;
+    }
+
+    /// <summary>Word-wraps to lines of at most <paramref name="maxW"/> px (a word longer than that is cut).</summary>
+    private static List<string> GuideWrapLines(string s, float maxW)
+    {
+        var lines = new List<string>();
+        if (maxW < 20 || ImGui.CalcTextSize(s).X <= maxW) { lines.Add(s); return lines; }
+        var words = s.Split(' ');
+        var cur = new System.Text.StringBuilder();
+        foreach (var word in words)
+        {
+            var candidate = cur.Length == 0 ? word : cur + " " + word;
+            if (ImGui.CalcTextSize(candidate).X <= maxW) { cur.Clear(); cur.Append(candidate); continue; }
+            if (cur.Length > 0) { lines.Add(cur.ToString()); cur.Clear(); }
+            var rest = word;
+            while (ImGui.CalcTextSize(rest).X > maxW && rest.Length > 1)
+            {
+                int lo = 1, hi = rest.Length - 1;
+                while (lo < hi) { var mid = (lo + hi + 1) / 2; if (ImGui.CalcTextSize(rest[..mid]).X <= maxW) lo = mid; else hi = mid - 1; }
+                lines.Add(rest[..lo]);
+                rest = rest[lo..];
+            }
+            cur.Append(rest);
+        }
+        if (cur.Length > 0) lines.Add(cur.ToString());
+        return lines;
+    }
 
     // ── Text helpers ─────────────────────────────────────────────────
 

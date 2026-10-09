@@ -23,6 +23,7 @@ public partial class WhatsAnAiBridge
     {
         public RawDatFile(IMemory m, Func<long> address) : base(m, address) { }
         public long First => FirstRecord;
+        public long Last => LastRecord;
         public long Length => RecordLength;
         public int Count => NumberOfRecords;
     }
@@ -244,6 +245,9 @@ public partial class WhatsAnAiBridge
         var cache = _datRanges;
         if (cache == null || (DateTime.UtcNow - cache.Value.at).TotalSeconds > 60)
         {
+            // Only First/Last here: asking the HUD for a table's record count or length makes it work out the stride, and it
+            // logs (on screen) "Cannot calculate stride" for every table it can't - so that is done lazily, below, only for
+            // the one table a pointer falls into.
             var list = new List<(long, long, long, string, RawDatFile)>();
             var m = GameController.Memory;
             foreach (var (name, info) in GameController.Files.AllFiles)
@@ -252,17 +256,25 @@ public partial class WhatsAnAiBridge
                 try
                 {
                     var d = new RawDatFile(m, () => info.Ptr);
-                    int c = d.Count; long l = d.Length;
-                    if (c > 0 && l > 0) list.Add((d.First, d.First + c * l, l, name, d));
+                    long first = d.First, last = d.Last;
+                    if (first > 0 && last > first) list.Add((first, last, 0, name, d));
                 }
                 catch { }
             }
             cache = (DateTime.UtcNow, list);
             _datRanges = cache;
         }
-        foreach (var (start, end, len, file, _) in cache.Value.ranges)
+        var ranges = cache.Value.ranges;
+        for (int i = 0; i < ranges.Count; i++)
         {
-            if (ptr < start || ptr >= end || (ptr - start) % len != 0) continue;
+            var (start, end, len, file, dat) = ranges[i];
+            if (ptr < start || ptr >= end) continue;
+            if (len == 0)
+            {
+                try { len = dat.Length; } catch { len = -1; }
+                ranges[i] = (start, end, len, file, dat);
+            }
+            if (len <= 0 || (ptr - start) % len != 0) continue;
             var row = (ptr - start) / len;
             // Label with the row's first text field when it has one.
             string label = "";
