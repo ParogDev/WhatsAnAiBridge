@@ -239,7 +239,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessExperimentMethod(method, parameters) ?? ProcessObserveMethod(method, parameters)
                          ?? ProcessHighlightMethod(method, parameters) ?? ProcessFlowMethod(method, parameters)
                          ?? ProcessTraceMethod(method, parameters) ?? ProcessTrackerMethod(method, parameters)
-                         ?? ProcessLayoutMethod(method, parameters);
+                         ?? ProcessLayoutMethod(method, parameters) ?? ProcessMotionMethod(method, parameters)
+                         ?? ProcessLabMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
@@ -356,6 +357,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         DrawStatsPanel();
         DrawGuidePanel();
         DrawHighlights();
+        RenderLabFrame();
         TrackerFrame();   // last: as late in the frame as a plugin can sample
     }
 
