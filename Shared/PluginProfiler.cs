@@ -119,7 +119,8 @@ public partial class WhatsAnAiBridge
         {
             if (t.ContainsGenericParameters) continue;
             if (filter != null && t.FullName?.Contains(filter, StringComparison.OrdinalIgnoreCase) != true) continue;
-            foreach (var m in t.GetMethods(decl).Cast<MethodBase>())
+            // Instance constructors too: per-frame object construction (e.g. a state rebuilt each frame) is otherwise the caller's self time.
+            foreach (var m in t.GetMethods(decl).Cast<MethodBase>().Concat(t.GetConstructors(any | BindingFlags.DeclaredOnly)))
             {
                 if (m.IsAbstract || m.IsGenericMethodDefinition || m.ContainsGenericParameters) continue;
                 if (methodFilter != null && !m.Name.Contains(methodFilter, StringComparison.OrdinalIgnoreCase)) continue;
