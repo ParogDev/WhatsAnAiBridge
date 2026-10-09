@@ -301,6 +301,10 @@ public partial class WhatsAnAiBridge
                 ["allocMBPerSecond"] = Math.Round((GC.GetTotalAllocatedBytes() - gcAlloc0) / 1048576.0 / secs, 1),
                 // Bytes the HUD fetched from the game (leaf backend). If allocation tracks this, page buffers are not pooled.
                 ["fetchedMBPerSecond"] = Math.Round(Interlocked.Read(ref _trFetchBytes) / 1048576.0 / secs, 1),
+                ["fetchedPagesPerFrame"] = Math.Round(Interlocked.Read(ref _trFetchBytes) / 4096.0 / frames),
+                // How many arrays per size ArrayPool<byte>.Shared keeps (the page cache rents from it): fewer than the pages
+                // cycled per frame means most become garbage. Set by DOTNET_SYSTEM_BUFFERS_SHAREDARRAYPOOL_* at startup.
+                ["sharedArrayPool"] = SharedArrayPoolLimits(),
             };
             JObject Alloc(long[] a) => new(Enumerable.Range(0, Math.Min(a.Length, TrPluginNames.Count)).Where(k => a[k] > 0).OrderByDescending(k => a[k]).Take(12)
                 .Select(k => new JProperty(TrPluginNames[k], Math.Round(a[k] / 1024.0 / frames, 1))));
@@ -440,6 +444,29 @@ public partial class WhatsAnAiBridge
                 .Select(kv => new JProperty(kv.Key < TrPluginNames.Count ? TrPluginNames[kv.Key] : $"#{kv.Key}", Stats(kv.Value)))),
             ["pluginRenderMs"] = new JObject(plugin.OrderByDescending(kv => kv.Value.Average()).Take(12)
                 .Select(kv => new JProperty(kv.Key < TrPluginNames.Count ? TrPluginNames[kv.Key] : $"#{kv.Key}", Stats(kv.Value)))),
+        };
+    }
+}
+
+public partial class WhatsAnAiBridge
+{
+    private static JObject? _poolLimits;
+
+    /// <summary>ArrayPool&lt;byte&gt;.Shared limits, read once from the runtime's SharedArrayPoolStatics (null fields when that internal type moves).</summary>
+    private static JObject SharedArrayPoolLimits()
+    {
+        if (_poolLimits != null) return _poolLimits;
+        const BindingFlags sf = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
+        var st = typeof(System.Buffers.ArrayPool<byte>).Assembly.GetType("System.Buffers.SharedArrayPoolStatics");
+        int? Get(string name) => st?.GetField(name, sf)?.GetValue(null) is int v ? v : null;
+        var partitions = Get("s_partitionCount");
+        var perPartition = Get("s_maxArraysPerPartition");
+        return _poolLimits = new JObject
+        {
+            ["partitions"] = partitions, ["maxArraysPerPartition"] = perPartition,
+            ["arraysPerSize"] = partitions * perPartition,
+            ["envMaxArraysPerPartition"] = Environment.GetEnvironmentVariable("DOTNET_SYSTEM_BUFFERS_SHAREDARRAYPOOL_MAXARRAYSPERPARTITION"),
+            ["broken"] = st == null ? "System.Buffers.SharedArrayPoolStatics not found in this runtime" : partitions == null || perPartition == null ? "SharedArrayPoolStatics fields s_partitionCount/s_maxArraysPerPartition not found" : null,
         };
     }
 }
