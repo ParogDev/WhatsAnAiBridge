@@ -94,11 +94,32 @@ public partial class WhatsAnAiBridge
     private static void PreRender() => Rec(KRenderBegin, 0);
     private static void PostRender() => Rec(KRenderEnd, 0);
     private static void PostPresent() => Rec(KPresentEnd, 0);
-    private static void PrePlugin(MethodBase __originalMethod) { if (_trOn && TrPluginIdx.TryGetValue(__originalMethod, out var i)) Rec(KPluginBegin, i); }
-    private static void PostPlugin(MethodBase __originalMethod) { if (_trOn && TrPluginIdx.TryGetValue(__originalMethod, out var i)) Rec(KPluginEnd, i); }
+    // Allocation per plugin: bytes this thread allocated between entry and exit (GC.GetAllocatedBytesForCurrentThread
+    // is a cheap counter read). Garbage per frame is what drives the HUD's GC pauses (frame-time spikes).
+    private static readonly long[] TrRenderAlloc = new long[512], TrTickAlloc = new long[512];
+    private static void PrePlugin(MethodBase __originalMethod, out long __state)
+    {
+        __state = GC.GetAllocatedBytesForCurrentThread();
+        if (_trOn && TrPluginIdx.TryGetValue(__originalMethod, out var i)) Rec(KPluginBegin, i);
+    }
+    private static void PostPlugin(MethodBase __originalMethod, long __state)
+    {
+        if (!_trOn || !TrPluginIdx.TryGetValue(__originalMethod, out var i)) return;
+        Rec(KPluginEnd, i);
+        if (i < TrRenderAlloc.Length) Interlocked.Add(ref TrRenderAlloc[i], GC.GetAllocatedBytesForCurrentThread() - __state);
+    }
     private static readonly Dictionary<MethodBase, int> TrTickIdx = new();
-    private static void PreTick(MethodBase __originalMethod) { if (_trOn && TrTickIdx.TryGetValue(__originalMethod, out var i)) Rec(KTickBegin, i); }
-    private static void PostTick(MethodBase __originalMethod) { if (_trOn && TrTickIdx.TryGetValue(__originalMethod, out var i)) Rec(KTickEnd, i); }
+    private static void PreTick(MethodBase __originalMethod, out long __state)
+    {
+        __state = GC.GetAllocatedBytesForCurrentThread();
+        if (_trOn && TrTickIdx.TryGetValue(__originalMethod, out var i)) Rec(KTickBegin, i);
+    }
+    private static void PostTick(MethodBase __originalMethod, long __state)
+    {
+        if (!_trOn || !TrTickIdx.TryGetValue(__originalMethod, out var i)) return;
+        Rec(KTickEnd, i);
+        if (i < TrTickAlloc.Length) Interlocked.Add(ref TrTickAlloc[i], GC.GetAllocatedBytesForCurrentThread() - __state);
+    }
 
     // Memory reads. Both HUDs read through an IMemoryBackend: a caching PagedMemoryBackend (pages cached per frame, last
     // frame's pages prefetched at NotifyFrame) over a leaf that reads the game. Its methods are obfuscated on PoE2 (Harmony
@@ -106,7 +127,7 @@ public partial class WhatsAnAiBridge
     // (its snapshot viewer uses it) - gets a wrapper around the paged backend (when a plugin consumes a value), and the
     // paged backend's leaf field gets one too (when that data was taken from the game). Both are put back when the trace
     // ends. A read matches a watched range on overlap (the leaf reads whole pages).
-    private static long _trLogicalAll, _trFetchAll;
+    private static long _trLogicalAll, _trFetchAll, _trFetchBytes;
 
     private sealed class TimingBackend(IMemoryBackend inner, bool fetch) : IMemoryBackend
     {
@@ -116,6 +137,7 @@ public partial class WhatsAnAiBridge
             if (fetch)
             {
                 var ok = Inner.TryReadMemory(address, target);   // data is the game's as of the end of the read
+                if (_trOn) Interlocked.Add(ref _trFetchBytes, target.Length);
                 MatchRead(address.ToInt64(), target.Length, KFetchCamera, ref _trFetchAll);
                 return ok;
             }
@@ -257,7 +279,10 @@ public partial class WhatsAnAiBridge
             TraceJobs[id] = job;
         }
         _trIdx = 0;
-        _trLogicalAll = 0; _trFetchAll = 0;
+        Array.Clear(TrRenderAlloc); Array.Clear(TrTickAlloc);
+        int gc0 = GC.CollectionCount(0), gc1 = GC.CollectionCount(1), gc2 = GC.CollectionCount(2);
+        var gcPause0 = GC.GetTotalPauseDuration(); var gcAlloc0 = GC.GetTotalAllocatedBytes();
+        _trLogicalAll = 0; _trFetchAll = 0; _trFetchBytes = 0;
         _trOn = true;
         var started = Stopwatch.GetTimestamp();
         System.Threading.Tasks.Task.Run(async () =>
@@ -267,6 +292,19 @@ public partial class WhatsAnAiBridge
             try { _harmony.UnpatchAll(_harmony.Id); } catch { }
             try { unwrap?.Invoke(); } catch { }
             var result = AnalyzeTrace(Math.Min(_trIdx, TraceCap), started);
+            var secs = duration / 1000.0;
+            var frames = Math.Max(1, result["frames"]?.Value<int>() ?? 1);
+            result["gc"] = new JObject
+            {
+                ["gen0"] = GC.CollectionCount(0) - gc0, ["gen1"] = GC.CollectionCount(1) - gc1, ["gen2"] = GC.CollectionCount(2) - gc2,
+                ["pauseMsTotal"] = Math.Round((GC.GetTotalPauseDuration() - gcPause0).TotalMilliseconds, 1),
+                ["allocMBPerSecond"] = Math.Round((GC.GetTotalAllocatedBytes() - gcAlloc0) / 1048576.0 / secs, 1),
+                // Bytes the HUD fetched from the game (leaf backend). If allocation tracks this, page buffers are not pooled.
+                ["fetchedMBPerSecond"] = Math.Round(Interlocked.Read(ref _trFetchBytes) / 1048576.0 / secs, 1),
+            };
+            JObject Alloc(long[] a) => new(Enumerable.Range(0, Math.Min(a.Length, TrPluginNames.Count)).Where(k => a[k] > 0).OrderByDescending(k => a[k]).Take(12)
+                .Select(k => new JProperty(TrPluginNames[k], Math.Round(a[k] / 1024.0 / frames, 1))));
+            result["pluginAllocKBPerFrame"] = new JObject { ["render"] = Alloc(TrRenderAlloc), ["tick"] = Alloc(TrTickAlloc) };
             result["id"] = id; result["status"] = "done"; result["durationMs"] = duration; result["patches"] = report; result["watch"] = job["watch"];
             lock (TraceJobs) TraceJobs[id] = result;
         });
