@@ -19,6 +19,7 @@ public partial class WhatsAnAiBridge
     private List<StatDto>? _statsSnapshot;
     private DateTime _statsSnapshotAt = DateTime.MinValue;
     private readonly Dictionary<(int id, int value), string?> _statTextCache = new();
+    private readonly Dictionary<int, StatDto> _statDtoById = new();
 
     private StatsUiState StatsUi => Settings.StatsUi ??= new StatsUiState();
 
@@ -31,17 +32,23 @@ public partial class WhatsAnAiBridge
         if (_statsSnapshot != null && now - _statsSnapshotAt < StatsSnapshotTtl)
             return _statsSnapshot;
 
-        var result = new List<StatDto>();
         var stats = GameController.Player?.GetComponent<Stats>()?.StatDictionary;
+        _statsSnapshotAt = now;
+        // Unchanged stats keep the same list: consumers (the panel's row index and sort) skip work on the same reference,
+        // and nothing is allocated while the character stands still.
+        if (_statsSnapshot != null && SameStats(_statsSnapshot, stats)) return _statsSnapshot;
+
+        var result = new List<StatDto>(stats?.Count ?? 0);
         if (stats != null)
         {
             var records = GameController.Files.Stats?.recordsById;
             foreach (var kv in stats)
             {
                 var id = (int)kv.Key;
+                if (_statDtoById.TryGetValue(id, out var known) && known.Value == kv.Value) { result.Add(known); continue; }
                 var record = records != null && records.TryGetValue(id, out var r) ? r : null;
                 var key = record?.Key ?? kv.Key.ToString();
-                result.Add(new StatDto
+                var dto = new StatDto
                 {
                     Id = id,
                     Key = key,
@@ -49,13 +56,27 @@ public partial class WhatsAnAiBridge
                     Text = TranslateStat(kv.Key, kv.Value),
                     Category = StatCategories.For(key),
                     IsLocal = record?.IsLocal == true ? true : null,
-                });
+                };
+                _statDtoById[id] = dto;
+                result.Add(dto);
             }
         }
 
         _statsSnapshot = result;
-        _statsSnapshotAt = now;
         return result;
+    }
+
+    private static bool SameStats(List<StatDto> prev, IReadOnlyDictionary<GameStat, int>? stats)
+    {
+        if (stats == null) return prev.Count == 0;
+        if (stats.Count != prev.Count) return false;
+        var i = 0;
+        foreach (var kv in stats)
+        {
+            var p = prev[i++];
+            if (p.Id != (int)kv.Key || p.Value != kv.Value) return false;
+        }
+        return true;
     }
 
     private string? TranslateStat(GameStat stat, int value)

@@ -16,7 +16,7 @@ namespace WhatsAnAiBridge;
 /// not abstract; never the protected IL stubs - plugins are compiled from source, but checked anyway) with a
 /// prefix/postfix that keeps a per-thread call stack, so each method gets calls, inclusive and self time (inclusive
 /// minus its profiled callees). Then everything is unpatched. Overhead: roughly 0.1-0.3 µs per call, reported.
-/// Off unless Settings.AllowHudInstrumentation. profile.plugin {name | assembly+filter, durationMs?, maxMethods?} -> {id};
+/// Off unless Settings.AllowHudInstrumentation. profile.plugin {name | assembly+filter, method?, durationMs?, maxMethods?} -> {id};
 /// profile.result {id}. assembly= profiles part of a HUD assembly (e.g. ExileCore2, filter=EntityListWrapper).
 /// </summary>
 public partial class WhatsAnAiBridge
@@ -61,6 +61,14 @@ public partial class WhatsAnAiBridge
         Interlocked.Add(ref s.AllocSelf, alloc - childAlloc);
     }
 
+    private static bool IsInstrumentationCode(MethodBase m)
+    {
+        static bool Hit(string? s) => s != null && (s.Contains("Prof", StringComparison.Ordinal) || s.Contains("Trace", StringComparison.Ordinal)
+            || s.Contains("Harmony", StringComparison.Ordinal) || s.Contains("SelfPerf", StringComparison.Ordinal));
+        // Closures and state machines carry the outer method's name in their own (<ProfileStart>b__0, <>c__DisplayClass).
+        return Hit(m.Name) || Hit(m.DeclaringType?.Name) || Hit(m.DeclaringType?.DeclaringType?.Name);
+    }
+
     private JObject ProfileStart(JToken? p)
     {
         if (!Settings.AllowHudInstrumentation.Value)
@@ -70,6 +78,7 @@ public partial class WhatsAnAiBridge
         var duration = Math.Clamp(p?["durationMs"]?.Value<int>() ?? 3000, 500, 20_000);
         var asmName = p?["assembly"]?.ToString();
         var filter = p?["filter"]?.ToString();
+        var methodFilter = p?["method"]?.ToString();
         var max = Math.Clamp(p?["maxMethods"]?.Value<int>() ?? 600, 10, 3000);
         const BindingFlags any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         Assembly? asm;
@@ -95,7 +104,12 @@ public partial class WhatsAnAiBridge
             if (asm == null) return Err("not_found", $"Could not reach {name}'s plugin object (PluginWrapper.Plugin)");
             label = wrapper.Name;
         }
-        if (asm == typeof(WhatsAnAiBridge).Assembly) return Err("refused", "The bridge does not profile itself.");
+        if (!string.IsNullOrWhiteSpace(methodFilter)) label += $" (methods ~{methodFilter})";
+        var self = asm == typeof(WhatsAnAiBridge).Assembly;
+        // The bridge profiles a filtered part of itself only, never the profiler/trace code that runs the patching
+        // (patching the method that applies the patches, or the hooks themselves, would recurse or deadlock).
+        if (self && string.IsNullOrWhiteSpace(filter) && string.IsNullOrWhiteSpace(methodFilter))
+            return Err("bad_request", "Profiling the bridge needs method= (a method name substring, e.g. Stats) or filter= (a type name substring).");
 
         const BindingFlags decl = any | BindingFlags.Static | BindingFlags.DeclaredOnly;
         var targets = new List<MethodBase>();
@@ -108,6 +122,8 @@ public partial class WhatsAnAiBridge
             foreach (var m in t.GetMethods(decl).Cast<MethodBase>())
             {
                 if (m.IsAbstract || m.IsGenericMethodDefinition || m.ContainsGenericParameters) continue;
+                if (methodFilter != null && !m.Name.Contains(methodFilter, StringComparison.OrdinalIgnoreCase)) continue;
+                if (self && IsInstrumentationCode(m)) continue;
                 byte[]? il;
                 try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { continue; }
                 if (il == null || il.Length <= 8 || TraceIsStub(m)) continue;
