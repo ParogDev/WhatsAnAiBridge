@@ -36,7 +36,7 @@ public partial class WhatsAnAiBridge
 
     // Camera/entity kinds come in pairs (entity = camera + 1): MatchRead relies on it.
     private const byte KUpdateBegin = 1, KUpdateEnd = 2, KRenderBegin = 3, KRenderEnd = 4, KPresentEnd = 6,
-        KReadCamera = 7, KReadEntity = 8, KPluginBegin = 9, KPluginEnd = 10, KFetchCamera = 11, KFetchEntity = 12, KCacheCycle = 13;
+        KReadCamera = 7, KReadEntity = 8, KPluginBegin = 9, KPluginEnd = 10, KFetchCamera = 11, KFetchEntity = 12, KCacheCycle = 13, KTickBegin = 14, KTickEnd = 15;
 
     private static readonly Dictionary<string, JObject> TraceJobs = new();
     private Harmony? _harmony;
@@ -96,6 +96,9 @@ public partial class WhatsAnAiBridge
     private static void PostPresent() => Rec(KPresentEnd, 0);
     private static void PrePlugin(MethodBase __originalMethod) { if (_trOn && TrPluginIdx.TryGetValue(__originalMethod, out var i)) Rec(KPluginBegin, i); }
     private static void PostPlugin(MethodBase __originalMethod) { if (_trOn && TrPluginIdx.TryGetValue(__originalMethod, out var i)) Rec(KPluginEnd, i); }
+    private static readonly Dictionary<MethodBase, int> TrTickIdx = new();
+    private static void PreTick(MethodBase __originalMethod) { if (_trOn && TrTickIdx.TryGetValue(__originalMethod, out var i)) Rec(KTickBegin, i); }
+    private static void PostTick(MethodBase __originalMethod) { if (_trOn && TrTickIdx.TryGetValue(__originalMethod, out var i)) Rec(KTickEnd, i); }
 
     // Memory reads. Both HUDs read through an IMemoryBackend: a caching PagedMemoryBackend (pages cached per frame, last
     // frame's pages prefetched at NotifyFrame) over a leaf that reads the game. Its methods are obfuscated on PoE2 (Harmony
@@ -193,7 +196,7 @@ public partial class WhatsAnAiBridge
 
         var report = new JObject { ["patched"] = new JArray(), ["refused"] = new JArray() };
         _harmony ??= new Harmony("whatsanaibridge.pipeline-trace");
-        TrPluginIdx.Clear(); TrPluginNames.Clear();
+        TrPluginIdx.Clear(); TrTickIdx.Clear(); TrPluginNames.Clear();
         var asms = AppDomain.CurrentDomain.GetAssemblies();
         Type? T(string asmName, string typeName) => asms.FirstOrDefault(a => a.GetName().Name == asmName)?.GetType(typeName);
         const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
@@ -235,6 +238,12 @@ public partial class WhatsAnAiBridge
                 TrPluginIdx[render] = TrPluginNames.Count;
                 TrPluginNames.Add(t.Name);
                 Patch(render, $"{t.Name}.Render", nameof(PrePlugin), nameof(PostPlugin));
+                // Tick too: HealthBars, for one, positions its bars there, not in Render.
+                if (t.GetMethod("Tick", all, null, Type.EmptyTypes, null) is { } tick)
+                {
+                    TrTickIdx[tick] = TrPluginNames.Count - 1;
+                    Patch(tick, $"{t.Name}.Tick", nameof(PreTick), nameof(PostTick));
+                }
             }
         }
         var unwrap = WrapMemoryBackends(report, out var whyNoReads);
@@ -290,6 +299,8 @@ public partial class WhatsAnAiBridge
         var frames = new List<TraceFrame>();
         var plugin = new Dictionary<int, List<double>>();
         var pluginOpen = new Dictionary<int, long>();
+        var tick = new Dictionary<int, List<double>>();
+        var tickOpen = new Dictionary<int, long>();
         var cur = new TraceFrame();
         bool inFrame = false;
         long lastCamFetch = 0;
@@ -314,6 +325,10 @@ public partial class WhatsAnAiBridge
                 case KReadCamera: cur.CamRead = t; cur.CamData = lastCamFetch; cur.CamReads++; break;
                 case KReadEntity: cur.EntRead = t; cur.EntData = lastEntFetch.GetValueOrDefault(TrArg[i]); cur.EntReads++; break;
                 case KCacheCycle: if (cur.Cycle == 0) cur.Cycle = t; cur.Cycles++; break;
+                case KTickBegin: tickOpen[(int)TrArg[i]] = t; break;
+                case KTickEnd:
+                    if (tickOpen.Remove((int)TrArg[i], out var tb)) (tick.TryGetValue((int)TrArg[i], out var tl) ? tl : tick[(int)TrArg[i]] = new()).Add(ms(t - tb));
+                    break;
                 case KPluginBegin: pluginOpen[(int)TrArg[i]] = t; break;
                 case KPluginEnd:
                     if (pluginOpen.Remove((int)TrArg[i], out var b)) (plugin.TryGetValue((int)TrArg[i], out var l) ? l : plugin[(int)TrArg[i]] = new()).Add(ms(t - b));
@@ -378,6 +393,8 @@ public partial class WhatsAnAiBridge
                 ["cameraReads"] = PerFrame(f => f.CamReads), ["entityReads"] = PerFrame(f => f.EntReads),
                 ["watchedFetches"] = PerFrame(f => f.Fetches), ["cacheCycles"] = PerFrame(f => f.Cycles),
             },
+            ["pluginTickMs"] = new JObject(tick.OrderByDescending(kv => kv.Value.Average()).Take(12)
+                .Select(kv => new JProperty(kv.Key < TrPluginNames.Count ? TrPluginNames[kv.Key] : $"#{kv.Key}", Stats(kv.Value)))),
             ["pluginRenderMs"] = new JObject(plugin.OrderByDescending(kv => kv.Value.Average()).Take(12)
                 .Select(kv => new JProperty(kv.Key < TrPluginNames.Count ? TrPluginNames[kv.Key] : $"#{kv.Key}", Stats(kv.Value)))),
         };

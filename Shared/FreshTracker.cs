@@ -18,7 +18,7 @@ namespace WhatsAnAiBridge;
 /// square, HUD: magenta square; pure colours for tools/fidelity) for screenshots. path= tracks other entities.
 /// Offsets are not hard-coded: at start the matrix and the position are located in fresh bytes by matching the HUD's own
 /// values (camera +0x100 and Render +0x138 on PoE2 in 2026-10). If a match is lost the start fails naming that link.
-/// Read-only (game memory reads like any HUD read; nothing patched). tracker.start {durationMs?, entities?, draw?, path?, delayMs?} -> {id};
+/// Read-only (game memory reads like any HUD read; nothing patched). tracker.start {durationMs?, entities?, draw?, path?, entityId?, delayMs?} -> {id};
 /// tracker.result {id}; tracker.stop.
 /// </summary>
 public partial class WhatsAnAiBridge
@@ -72,7 +72,9 @@ public partial class WhatsAnAiBridge
         if (camOff < 0) return Err("calibration_failed", $"Camera matrix not found in the first 0x400 bytes of Camera @0x{cam.Address:X} (does Camera.Snapshot.Matrix still come from the camera struct?)");
         // Players by default (they move); path= tracks any entity whose metadata path contains it (static anchors).
         var pathFilter = p?["path"]?.Value<string>();
-        IEnumerable<Entity> players = string.IsNullOrWhiteSpace(pathFilter)
+        var entityId = p?["entityId"]?.Value<long?>();
+        IEnumerable<Entity> players = entityId is { } eid ? GameController.Entities.Where(e => e.Id == eid)
+            : string.IsNullOrWhiteSpace(pathFilter)
             ? GameController.EntityListWrapper.ValidEntitiesByType.TryGetValue(EntityType.Player, out var list) ? list : []
             : GameController.Entities.Where(e => e.Path?.Contains(pathFilter, StringComparison.OrdinalIgnoreCase) == true);
         var job = new TrackerJob { Id = Guid.NewGuid().ToString("N")[..10], Until = DateTime.UtcNow.AddMilliseconds(duration), Draw = p?["draw"]?.Value<bool>() ?? false, DelayMs = Math.Clamp(p?["delayMs"]?.Value<double>() ?? 0, 0, 100), CamOffset = camOff, CamAddress = cam.Address, PosOffset = -1 };
@@ -103,6 +105,7 @@ public partial class WhatsAnAiBridge
     /// <summary>Runs at the end of Render: one sample per frame while a tracker run is active.</summary>
     private void TrackerFrame()
     {
+        MotionTick();
         var job = _tracker;
         if (job == null) return;
         if (DateTime.UtcNow > job.Until || !GameController.InGame) { FinishTracker(job); return; }
