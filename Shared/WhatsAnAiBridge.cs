@@ -240,7 +240,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessHighlightMethod(method, parameters) ?? ProcessFlowMethod(method, parameters)
                          ?? ProcessTraceMethod(method, parameters) ?? ProcessTrackerMethod(method, parameters)
                          ?? ProcessLayoutMethod(method, parameters) ?? ProcessMotionMethod(method, parameters)
-                         ?? ProcessLabMethod(method, parameters) ?? ProcessProfileMethod(method, parameters);
+                         ?? ProcessLabMethod(method, parameters) ?? ProcessProfileMethod(method, parameters)
+                         ?? ProcessSelfPerfMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
@@ -281,11 +282,13 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
     public override void Render()
     {
         // Plugin reloads requested over the bridge run here, on the main thread, like the menu's Reload button.
-        RunPendingReload();
-        RunPendingScript();
-        RunQueuedStep();
-        ObserveTick();
-        FlowTick();
+        _selfFrames++;
+        var sp = SelfStart(); RunPendingReload(); SelfEnd(0, sp);
+        sp = SelfStart(); RunPendingScript(); SelfEnd(1, sp);
+        sp = SelfStart(); RunQueuedStep(); SelfEnd(2, sp);
+        sp = SelfStart(); ObserveTick(); SelfEnd(3, sp);
+        sp = SelfStart(); FlowTick(); SelfEnd(4, sp);
+        sp = SelfStart();   // ipcAndRecording: ends before DrawStatusHud
 
         var now = DateTime.UtcNow;
 
@@ -353,12 +356,13 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         _status.RecordingElapsedMs = _isRecording ? (now - _recordingStart).TotalMilliseconds : 0;
         _status.RecordingFile = _currentRecordingPath ?? "";
 
-        DrawStatusHud();
-        DrawStatsPanel();
-        DrawGuidePanel();
-        DrawHighlights();
-        RenderLabFrame();
-        TrackerFrame();   // last: as late in the frame as a plugin can sample
+        SelfEnd(5, sp);
+        sp = SelfStart(); DrawStatusHud(); SelfEnd(6, sp);
+        sp = SelfStart(); DrawStatsPanel(); SelfEnd(7, sp);
+        sp = SelfStart(); DrawGuidePanel(); SelfEnd(8, sp);
+        sp = SelfStart(); DrawHighlights(); SelfEnd(9, sp);
+        sp = SelfStart(); RenderLabFrame(); SelfEnd(10, sp);
+        sp = SelfStart(); TrackerFrame(); SelfEnd(11, sp);   // last: as late in the frame as a plugin can sample
     }
 
     // ── Status HUD ──────────────────────────────────────────────────

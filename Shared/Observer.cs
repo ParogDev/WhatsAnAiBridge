@@ -34,6 +34,7 @@ public partial class WhatsAnAiBridge
     private readonly HashSet<string> _obsUnmappedSeen = new();   // by first text (stable when indexes shift), else "#index"
     private readonly Dictionary<long, string> _obsPanelNames = new();   // address -> property name seen when it opened
     private readonly HashSet<string> _obsEntityTypes = new();
+    private readonly HashSet<string> _obsSeenPaths = new();   // entity paths already examined (string work only once each)
     private string? _obsArea;
     private int _obsLevel = -1;
     private const int ObsRing = 1000;
@@ -183,6 +184,39 @@ public partial class WhatsAnAiBridge
         }
     }
 
+    // IsVisibleLocal on a UI element costs ~3.6 KB of allocation the first time each frame (the HUD caches the whole
+    // element struct), ~450 KB per check for IngameUi's ~120 children. The flag is one bit of the element's memory:
+    // find which (word offset, bit) matches IsVisibleLocal on every child once, then read 8 bytes per child.
+    private int _obsFlagOff = -1, _obsFlagBit = -1;   // -1 = not calibrated yet; _obsFlagOff -2 = no unique match (fall back)
+
+    private bool ObsVisible(UiElement e)
+    {
+        if (_obsFlagOff >= 0)
+        {
+            return (RawRead<ulong>(e.Address + _obsFlagOff) >> _obsFlagBit & 1) != 0;
+        }
+        return e.IsVisibleLocal;
+    }
+
+    private void ObsCalibrateFlag(List<UiElement> kids)
+    {
+        var vis = kids.Select(k => k.IsVisibleLocal).ToArray();
+        if (vis.Count(v => v) < 2 || vis.Count(v => !v) < 2) return;   // need both kinds to tell the bit apart
+        var mem = kids.Select(k => GameController.Memory.ReadBytes(k.Address, 0x400)).ToArray();
+        if (mem.Any(m => m is not { Length: 0x400 })) return;
+        var found = new List<(int off, int bit)>();
+        for (var off = 0; off + 8 <= 0x400; off += 8)
+            for (var bit = 0; bit < 64; bit++)
+            {
+                var ok = true;
+                for (var i = 0; i < kids.Count && ok; i++) ok = ((BitConverter.ToUInt64(mem[i], off) >> bit & 1) != 0) == vis[i];
+                if (ok) found.Add((off, bit));
+            }
+        if (found.Count == 1) (_obsFlagOff, _obsFlagBit) = found[0];
+        else _obsFlagOff = -2;   // none or ambiguous: keep the HUD property (correct, just allocating)
+        LogMessage(found.Count == 1 ? $"[Observe] visibility flag at +0x{_obsFlagOff:X} bit {_obsFlagBit}" : $"[Observe] visibility flag: {found.Count} candidates, using IsVisibleLocal");
+    }
+
     private void ObservePanels()
     {
         var ui = GameController.IngameState?.IngameUi;
@@ -191,15 +225,16 @@ public partial class WhatsAnAiBridge
         var now = new Dictionary<long, (int index, UiElement e)>();
         for (int i = 0; i < kids.Count; i++)
             if (kids[i] is { Address: not 0 } e) now[e.Address] = (i, e);
+        if (_obsFlagOff == -1) ObsCalibrateFlag(now.Values.Select(v => v.e).ToList());
         if (_obsVisible == null)
         {
-            _obsVisible = now.ToDictionary(kv => kv.Key, kv => kv.Value.e.IsVisibleLocal);
+            _obsVisible = now.ToDictionary(kv => kv.Key, kv => ObsVisible(kv.Value.e));
             return;
         }
         Dictionary<long, string>? names = null;
         foreach (var (addr, (index, e)) in now)
         {
-            var vis = e.IsVisibleLocal;
+            var vis = ObsVisible(e);
             var known = _obsVisible.TryGetValue(addr, out var was);
             if (known && was == vis) continue;
             _obsVisible[addr] = vis;
@@ -264,10 +299,11 @@ public partial class WhatsAnAiBridge
 
     private void ObserveEntities()
     {
+        if (_obsSeenPaths.Count > 50_000) _obsSeenPaths.Clear();
         foreach (var e in GameController.EntityListWrapper.ValidEntitiesByType.SelectMany(kv => kv.Value))
         {
             var path = e.Path;
-            if (string.IsNullOrEmpty(path)) continue;
+            if (string.IsNullOrEmpty(path) || !_obsSeenPaths.Add(path)) continue;   // most paths were seen before: skip the string work
             var parts = path.Split('/');
             var key = string.Join("/", parts.Take(Math.Min(4, parts.Length)));
             if (_obsEntityTypes.Count >= 3000 || !_obsEntityTypes.Add(key)) continue;
