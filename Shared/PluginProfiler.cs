@@ -21,11 +21,12 @@ namespace WhatsAnAiBridge;
 /// </summary>
 public partial class WhatsAnAiBridge
 {
-    private sealed class ProfStat { public long Calls, Inclusive, Self; }
+    private sealed class ProfStat { public long Calls, Inclusive, Self, AllocInclusive, AllocSelf; }
 
     private static volatile bool _profOn;
     private static readonly ConcurrentDictionary<MethodBase, ProfStat> ProfStats = new();
-    [ThreadStatic] private static Stack<long>? _profChild;   // per frame on the stack: callee time accumulated so far
+    // Per frame on the stack: callee time and callee allocation accumulated so far, and this call's allocation start.
+    [ThreadStatic] private static Stack<(long childTime, long childAlloc, long allocStart)>? _profChild;
     private static readonly Dictionary<string, JObject> ProfJobs = new();
     private Harmony? _profHarmony;
 
@@ -40,7 +41,7 @@ public partial class WhatsAnAiBridge
     {
         // __state = start timestamp when this call pushed a frame, 0 when profiling was off at entry (nothing to pop).
         if (!_profOn) { __state = 0; return; }
-        (_profChild ??= new Stack<long>()).Push(0);
+        (_profChild ??= new Stack<(long, long, long)>()).Push((0, 0, GC.GetAllocatedBytesForCurrentThread()));
         __state = Stopwatch.GetTimestamp();
     }
 
@@ -48,13 +49,16 @@ public partial class WhatsAnAiBridge
     {
         if (__state == 0 || _profChild is not { Count: > 0 } stack) return;
         var incl = Stopwatch.GetTimestamp() - __state;
-        var children = stack.Pop();   // always pop what the prefix pushed, even if profiling just ended
-        if (stack.Count > 0) stack.Push(stack.Pop() + incl);   // our inclusive time is our caller's callee time
+        var (childTime, childAlloc, allocStart) = stack.Pop();   // always pop what the prefix pushed, even if profiling just ended
+        var alloc = GC.GetAllocatedBytesForCurrentThread() - allocStart;
+        if (stack.Count > 0) { var c = stack.Pop(); stack.Push((c.childTime + incl, c.childAlloc + alloc, c.allocStart)); }   // ours counts as our caller's callee
         if (!_profOn) return;
         var s = ProfStats.GetOrAdd(__originalMethod, _ => new ProfStat());
         Interlocked.Increment(ref s.Calls);
         Interlocked.Add(ref s.Inclusive, incl);
-        Interlocked.Add(ref s.Self, incl - children);
+        Interlocked.Add(ref s.Self, incl - childTime);
+        Interlocked.Add(ref s.AllocInclusive, alloc);
+        Interlocked.Add(ref s.AllocSelf, alloc - childAlloc);
     }
 
     private JObject ProfileStart(JToken? p)
@@ -150,6 +154,18 @@ public partial class WhatsAnAiBridge
                     ["selfMsPerSecond"] = Math.Round(Ms(kv.Value.Self) * 1000.0 / duration, 3),
                     ["inclMsPerSecond"] = Math.Round(Ms(kv.Value.Inclusive) * 1000.0 / duration, 3),
                     ["selfUsPerCall"] = Math.Round(Ms(kv.Value.Self) * 1000.0 / Math.Max(1, kv.Value.Calls), 2),
+                    ["allocSelfKBPerSecond"] = Math.Round(kv.Value.AllocSelf / 1024.0 * 1000.0 / duration, 1),
+                    ["allocInclKBPerSecond"] = Math.Round(kv.Value.AllocInclusive / 1024.0 * 1000.0 / duration, 1),
+                })),
+                // Where the garbage comes from (GC pauses at high fps): self = bytes allocated in the method minus its
+                // profiled callees, so BCL work it calls (LINQ, string building) counts as its own.
+                ["allocTotalKBPerSecond"] = Math.Round(stats.Sum(kv => kv.Value.AllocSelf) / 1024.0 * 1000.0 / duration, 1),
+                ["topAlloc"] = new JArray(stats.Where(kv => kv.Value.AllocSelf > 0).OrderByDescending(kv => kv.Value.AllocSelf).Take(15).Select(kv => new JObject
+                {
+                    ["method"] = $"{kv.Key.DeclaringType?.Name}.{kv.Key.Name}",
+                    ["calls"] = kv.Value.Calls,
+                    ["allocSelfKBPerSecond"] = Math.Round(kv.Value.AllocSelf / 1024.0 * 1000.0 / duration, 1),
+                    ["bytesPerCall"] = kv.Value.Calls == 0 ? 0 : kv.Value.AllocSelf / kv.Value.Calls,
                 })),
             };
             lock (ProfJobs) ProfJobs[id] = result;
