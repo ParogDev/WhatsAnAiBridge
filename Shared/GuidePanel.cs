@@ -859,7 +859,7 @@ public partial class WhatsAnAiBridge
     /// <summary>
     /// Upper-case a toast line the way the brand book says: words become caps, identifiers keep their case so they
     /// stay recognisable - a word with an inner '_', '.', '/', ':', '[', '<', '{' or '#', a CamelCase bump, or a 0x
-    /// prefix (fire_damage_resistance_%, findings.json, GameController.Player, ReAgent, 0x3D). Trailing punctuation
+    /// prefix, signed or not (fire_damage_resistance_%, findings.json, GameController.Player, ReAgent, +0x3D). Trailing punctuation
     /// does not count. ASCII only, like all HUD text.
     /// </summary>
     internal static string GuideCaps(string s)
@@ -876,7 +876,7 @@ public partial class WhatsAnAiBridge
 
     private static bool GuideIsIdentifier(string w)
     {
-        if (w.StartsWith("0x", StringComparison.Ordinal)) return true;
+        if (w.TrimStart('+', '-').StartsWith("0x", StringComparison.Ordinal)) return true;
         for (var i = 0; i < w.Length; i++)
         {
             var c = w[i];
