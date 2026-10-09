@@ -38,6 +38,10 @@ public class WhatsAnAiBridgeSettings : ISettings
     // it is arbitrary code in the HUD process. See Shared\ScriptRunner.cs.
     public ToggleNode AllowCSharpScripts { get; set; } = new(false);
 
+    // Render-fidelity research: let pipeline.trace patch the HUD's own unprotected code (Harmony) for a few seconds to
+    // time reads, plugin Render and Present. Off by default; never patches protected methods. See Shared\PipelineTrace.cs.
+    public ToggleNode AllowHudInstrumentation { get; set; } = new(false);
+
     // Player-stats view state shared with the MCP App / agents (pins, filter, selection, sort).
     // Persisted here so it survives HUD restarts; Rev keeps increasing across restarts.
     public StatsUiState StatsUi { get; set; } = new();
