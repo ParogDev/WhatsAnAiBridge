@@ -48,6 +48,14 @@ public partial class WhatsAnAiBridge
             _obs = File.Exists(f) ? JsonConvert.DeserializeObject<ObserveState>(File.ReadAllText(f)) ?? new() : new();
         }
         catch { _obs = new(); }
+        // Continue the sequence from the journal: an agent waiting with since=<seq> across a HUD restart must not miss events.
+        try
+        {
+            var j = Path.Combine(ObsDir, "journal.jsonl");
+            if (File.Exists(j) && File.ReadLines(j).LastOrDefault(l => l.Length > 0) is { } last)
+                _obsSeq = JObject.Parse(last)["seq"]?.Value<long>() ?? 0;
+        }
+        catch { }
         return _obs;
     }
 
