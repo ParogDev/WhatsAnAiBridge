@@ -32,8 +32,12 @@ public partial class WhatsAnAiBridge
         if (_statsSnapshot != null && now - _statsSnapshotAt < StatsSnapshotTtl)
             return _statsSnapshot;
 
-        var stats = GameController.Player?.GetComponent<Stats>()?.StatDictionary;
+        var statsComp = GameController.Player?.GetComponent<Stats>();
         _statsSnapshotAt = now;
+        // The dictionary costs ~60-150 us per read: skip it while the raw stat bytes are unchanged (StatsRaw.cs).
+        if (_statsSnapshot != null && StatsUnchangedRaw(statsComp?.Address ?? 0, now)) return _statsSnapshot;
+        var stats = statsComp?.StatDictionary;
+        StatsRawAfterRead(statsComp?.Address ?? 0, stats, now);
         // Unchanged stats keep the same list: consumers (the panel's row index and sort) skip work on the same reference,
         // and nothing is allocated while the character stands still.
         if (_statsSnapshot != null && SameStats(_statsSnapshot, stats)) return _statsSnapshot;

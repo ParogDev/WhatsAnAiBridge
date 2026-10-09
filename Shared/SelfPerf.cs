@@ -43,6 +43,7 @@ public partial class WhatsAnAiBridge
             ["totalUsPerFrame"] = Math.Round(_selfTicks.Sum() * 1e6 / Stopwatch.Frequency / frames, 1),
             ["totalBytesPerFrame"] = _selfBytes.Sum() / frames,
             ["steps"] = steps,
+            ["statsRawCheck"] = JObject.FromObject(StatsRawStatus()),
         };
         Array.Clear(_selfTicks); Array.Clear(_selfBytes); _selfFrames = 0; _selfSince = Stopwatch.GetTimestamp();
         return o.ToString(Newtonsoft.Json.Formatting.None);
