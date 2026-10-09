@@ -230,6 +230,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     private string ProcessTcpRequest(string method, JToken? parameters)
     {
+        try { ObsAgent(method, parameters); } catch { }   // the observer's agent lane (ObserveHud.cs)
         // Structured methods (named params, stateless): stats.*, recording.* and hud.*
         var structured = ProcessStatsMethod(method, parameters) ?? ProcessRecordingMethod(method, parameters)
                          ?? ProcessHudMethod(method, parameters) ?? ProcessIntrospectionMethod(method, parameters)

@@ -14,8 +14,9 @@ namespace WhatsAnAiBridge;
 /// they open, since they may be closed when the agent looks. Events go to an in-memory ring (sequence numbers) and
 /// &lt;BridgeDirectory&gt;\observe\journal.jsonl; the on/off state survives HUD restarts (observe\state.json).
 ///   observe.start {} / observe.stop {} / observe.status {}
-///   observe.events {since?, kinds?, limit?}     kinds: ui | area | level | entity
-/// Runs from Render every 500 ms while on and in game (a UI scan costs ~1-3 ms; entities every 2 s).
+///   observe.events {since?, kinds?, limit?}     kinds: layer | layer.noisy | ui | area | level | entity | hud | agent
+/// Runs from Render while on and in game: panels at 10 Hz (2 Hz until the visibility bit is calibrated), area and level
+/// every 500 ms, entities every 2 s, layers at their own rates, HUD hiccups every frame (ObserveHud.cs).
 /// </summary>
 public partial class WhatsAnAiBridge
 {
@@ -31,8 +32,10 @@ public partial class WhatsAnAiBridge
     private ObserveState? _obs;
     private readonly List<JObject> _obsEvents = new();
     private long _obsSeq;
-    private DateTime _obsLastTick = DateTime.MinValue, _obsLastEntities = DateTime.MinValue;
+    private DateTime _obsLastTick = DateTime.MinValue, _obsLastEntities = DateTime.MinValue, _obsLastPanels = DateTime.MinValue;
     private Dictionary<long, bool>? _obsVisible;              // top-level panel address -> visible
+    private Dictionary<long, (int index, UiElement e)>? _obsKids;   // top-level panels by address, listed once a second
+    private DateTime _obsKidsAt;
     private readonly HashSet<string> _obsUnmappedSeen = new();   // by first text (stable when indexes shift), else "#index"
     private readonly Dictionary<long, string> _obsPanelNames = new();   // address -> property name seen when it opened
     private readonly HashSet<string> _obsEntityTypes = new();
@@ -190,19 +193,24 @@ public partial class WhatsAnAiBridge
 
     private void ObserveTick()
     {
-        if (!Obs().Enabled || !GameController.InGame) return;
+        if (!Obs().Enabled || !GameController.InGame) { _obsFrameAt = 0; return; }
         var now = DateTime.UtcNow;
+        ObserveHudFrame();
         try { ObserveLayers(now); } catch (Exception ex) { LogError($"[Observe] layers: {ex.Message}"); }
-        if ((now - _obsLastTick).TotalMilliseconds < 500) return;
-        _obsLastTick = now;
+        // Panels at 10 Hz once the visibility bit is calibrated (8 bytes per panel), so a panel lines up with 10 Hz
+        // server changes; 2 Hz while it falls back to IsVisibleLocal (~3.6 KB allocated per panel).
+        var panelsDue = (now - _obsLastPanels).TotalMilliseconds >= (_obsFlagOff >= 0 ? 100 : 500);
+        var slowDue = (now - _obsLastTick).TotalMilliseconds >= 500;
+        if (!panelsDue && !slowDue) return;
         try
         {
-            ObserveArea();
+            if (slowDue) { _obsLastTick = now; ObserveArea(); }
+            _obsLastPanels = now;
             ObservePanels();
             if ((now - _obsLastEntities).TotalSeconds >= 2) { _obsLastEntities = now; ObserveEntities(); }
         }
         catch (Exception ex) { LogError($"[Observe] {ex.Message}"); }
-        ObsFlush();
+        if (slowDue) ObsFlush();
     }
 
     private void ObserveArea()
@@ -259,10 +267,18 @@ public partial class WhatsAnAiBridge
     {
         var ui = GameController.IngameState?.IngameUi;
         if (ui == null) return;
-        var kids = ui.Children;
-        var now = new Dictionary<long, (int index, UiElement e)>();
-        for (int i = 0; i < kids.Count; i++)
-            if (kids[i] is { Address: not 0 } e) now[e.Address] = (i, e);
+        // The top-level children (~120 wrapper objects, ~13 KB) are listed once a second, not on every 10 Hz scan:
+        // panels are created at area load and then only shown and hidden.
+        var at = DateTime.UtcNow;
+        if (_obsKids == null || _obsVisible == null || (at - _obsKidsAt).TotalSeconds >= 1)
+        {
+            _obsKidsAt = at;
+            var kids = ui.Children;
+            _obsKids = new Dictionary<long, (int index, UiElement e)>();
+            for (int i = 0; i < kids.Count; i++)
+                if (kids[i] is { Address: not 0 } k) _obsKids[k.Address] = (i, k);
+        }
+        var now = _obsKids;
         if (_obsFlagOff == -1) ObsCalibrateFlag(now.Values.Select(v => v.e).ToList());
         if (_obsVisible == null)
         {
