@@ -675,6 +675,7 @@ public partial class WhatsAnAiBridge
                     {
                         x.LaterCount++; x.Status = "queued"; x.Urgency = "calm"; x.ShownAt = x.VisibleSince = null;
                         x.QueuedAt = now; x.EligibleAt = now.AddSeconds(hold);
+                        x.TtlSec = Math.Clamp(Math.Max(x.TtlSec, hold + 600), AttnTtlMin, AttnTtlMax);   // the hold must not use up its time in line
                         _attnTurnEnded[x.SessionId] = now;
                     }
                     _attnSeq++;
