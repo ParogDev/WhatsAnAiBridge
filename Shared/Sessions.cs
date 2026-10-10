@@ -35,6 +35,27 @@ public partial class WhatsAnAiBridge
         public DateTime HelloAt, LastSeen;
         public long ClientId;              // the connection it last spoke on
         public bool Connected;
+        public string Name = "";           // what the player reads (RenameLocked): never a system folder, unique among the connected
+    }
+
+    /// <summary>
+    /// One agent as the in-game UI shows it: its readable name, what it asks of the user right now (a step to do, a
+    /// question, a flow, a step recording) and what else it is doing (a measurement, a reload, a lease).
+    /// </summary>
+    internal sealed record AgentView(string Name, string? Label, string[] Asks, string[] Doing);
+
+    /// <summary>
+    /// The agents the in-game UI may mention, rebuilt by SessionsTick at 4 Hz (read per frame by reference, no lock):
+    /// only connected sessions with something going on, plus HUD-run work asking the user under a name nobody is
+    /// connected as. Idle and disconnected sessions are left out (session.list keeps them). Names maps every known
+    /// label to its display name.
+    /// </summary>
+    internal sealed record AgentsView(AgentView[] Active, IReadOnlyDictionary<string, string> Names)
+    {
+        public static readonly AgentsView Empty = new([], new Dictionary<string, string>());
+        /// <summary>Two or more agents active: the card says whose step it is.</summary>
+        public bool Ambiguous => Active.Length >= 2;
+        public string NameOf(string? label) => label == null ? "" : Names.TryGetValue(label, out var n) ? n : BaseDisplayName(label, null);
     }
 
     internal sealed class Lease
@@ -70,6 +91,7 @@ public partial class WhatsAnAiBridge
     private readonly List<Lease> _leases = new();
     private readonly List<RestartRequest> _restarts = new();
     private int _leaseSeq, _restartSeq;
+    private volatile AgentsView _agentsView = AgentsView.Empty;
     private long _reqClientId;                         // the connection of the request being served (set in DrainRequests)
     private DateTime _sessionsTickAt = DateTime.MinValue;
     private static readonly TimeSpan SessionForget = TimeSpan.FromMinutes(30), RestartGoExpiry = TimeSpan.FromMinutes(3), RestartKeep = TimeSpan.FromMinutes(20);
@@ -121,16 +143,25 @@ public partial class WhatsAnAiBridge
             s.LastSeen = DateTime.UtcNow;
             // Another entry still bound to this connection (a client that re-identified) is no longer on it.
             foreach (var o in _sessions.Values) if (o != s && o.ClientId == _reqClientId) o.Connected = false;
+            RenameLocked();
             var others = _sessions.Values.Count(o => o != s && o.Connected);
-            return new JObject { ["ok"] = true, ["id"] = s.Id, ["label"] = s.Label, ["others"] = others, ["holdSec"] = Settings.RestartHoldSec.Value };
+            return new JObject { ["ok"] = true, ["id"] = s.Id, ["label"] = s.Label, ["name"] = s.Name, ["others"] = others, ["holdSec"] = Settings.RestartHoldSec.Value };
         }
     }
 
-    /// <summary>A connection closed (TcpBridgeServer.ClientClosed): its session is disconnected, its leases stay until they expire.</summary>
+    /// <summary>
+    /// A connection closed (TcpBridgeServer.ClientClosed): its session is disconnected, its leases stay until they expire,
+    /// and a step it left asking the user to act is cleared from the card (nobody would read the answer).
+    /// </summary>
     private void SessionDisconnected(long clientId)
     {
+        var gone = new List<string>();
         lock (_sessionLock)
-            foreach (var s in _sessions.Values) if (s.ClientId == clientId) { s.Connected = false; s.LastSeen = DateTime.UtcNow; }
+            foreach (var s in _sessions.Values)
+                if (s.ClientId == clientId && s.Connected) { s.Connected = false; s.LastSeen = DateTime.UtcNow; gone.Add(s.Id); }
+        if (gone.Count > 0) lock (_sessionLock) RenameLocked();
+        // Outside the sessions lock: the guide lock is only ever taken inside it, never around it (AgentGuide.cs).
+        foreach (var id in gone) GuideOwnerGone(id);
     }
 
     /// <summary>Record that the current session spoke (called per request; cheap).</summary>
@@ -156,7 +187,7 @@ public partial class WhatsAnAiBridge
                 ["holdSec"] = Settings.RestartHoldSec.Value,
                 ["sessions"] = new JArray(_sessions.Values.OrderByDescending(s => s.Connected).ThenBy(s => s.HelloAt).Select(s => new JObject
                 {
-                    ["id"] = s.Id, ["label"] = s.Label, ["branch"] = s.Branch, ["cwd"] = s.Cwd, ["pid"] = s.Pid, ["kind"] = s.Kind,
+                    ["id"] = s.Id, ["label"] = s.Label, ["name"] = DisplayNameLocked(s), ["branch"] = s.Branch, ["cwd"] = s.Cwd, ["pid"] = s.Pid, ["kind"] = s.Kind,
                     ["connected"] = s.Connected, ["helloAt"] = s.HelloAt.ToString("O"), ["lastSeen"] = s.LastSeen.ToString("O"),
                     ["leases"] = _leases.Count(l => l.Session == s.Id),
                     ["doing"] = new JArray(blockers.Where(b => b.Who == s.Label).Select(b => b.Label)),
@@ -175,6 +206,112 @@ public partial class WhatsAnAiBridge
             _sessions.Remove(k);
         _restarts.RemoveAll(r => r.Status != "waiting" && r.Status != "go" && now - (r.DecidedAt ?? r.At) > RestartKeep);
     }
+
+    // ── Names the player reads ───────────────────────────────────────
+    // A session's label is its MCP server's git branch (worktree-aware), its folder name without one, or HEXILE_AGENT.
+    // That identifies it for agents and logs (session.list keeps it), but the in-game UI shows a name instead: never a
+    // system folder (a server started from C:\Windows\System32 is Claude Desktop's), without a worktree's random
+    // "-1a2b3c" tail, and unique among the connected sessions (two servers on main read "main" and "main (shell)").
+
+    private static readonly HashSet<string> SystemFolders = new(StringComparer.OrdinalIgnoreCase)
+        { "System32", "SysWOW64", "Windows", "WinSxS", "Program Files", "Program Files (x86)", "ProgramData", "Users", "AppData", "Local", "Roaming", "Temp" };
+
+    /// <summary>The readable name of a label (no uniqueness: RenameLocked adds that among the connected).</summary>
+    internal static string BaseDisplayName(string label, string? cwd)
+    {
+        var l = label.Trim();
+        if (l.StartsWith("ps:", StringComparison.Ordinal)) return (l.Length > 3 ? l[3..] : "script") + " (script)";
+        // Only a label that is a folder name says nothing; an explicit name (HEXILE_AGENT, a branch) is kept wherever it runs.
+        if (l.Length == 0 || SystemFolders.Contains(l) || (l.Length == 2 && l[1] == ':'))
+            return cwd != null && IsSystemCwd(cwd) && cwd.Contains("Windows", StringComparison.OrdinalIgnoreCase) ? "Claude Desktop" : "Claude";
+        if (l.StartsWith("detached@", StringComparison.Ordinal)) return "detached checkout";
+        // Worktree branches end in a random hex tail ("cranky-wilbur-f2659c"): it tells nothing to the player.
+        var dash = l.LastIndexOf('-');
+        if (dash > 0 && l.Length - dash - 1 == 6 && l.AsSpan(dash + 1).IndexOfAnyExcept("0123456789abcdef") < 0) l = l[..dash];
+        return l;
+    }
+
+    /// <summary>A working directory no agent session is about: Windows itself, Program Files, a drive root, the user folder.</summary>
+    private static bool IsSystemCwd(string cwd)
+    {
+        try
+        {
+            var full = System.IO.Path.GetFullPath(cwd).TrimEnd('\\', '/');
+            bool Under(Environment.SpecialFolder f)
+            {
+                var d = Environment.GetFolderPath(f);
+                return d.Length > 0 && (full.Equals(d.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) || full.StartsWith(d.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase));
+            }
+            if (Under(Environment.SpecialFolder.Windows) || Under(Environment.SpecialFolder.ProgramFiles) || Under(Environment.SpecialFolder.ProgramFilesX86)) return true;
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).TrimEnd('\\');
+            return full.Length <= 3 || full.Equals(home, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Give every session its display name: base names, then tell the connected ones that read the same apart.</summary>
+    private void RenameLocked()
+    {
+        foreach (var s in _sessions.Values) s.Name = BaseDisplayName(s.Label, s.Cwd);
+        foreach (var group in _sessions.Values.Where(s => s.Connected).GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+        {
+            var list = group.OrderBy(s => s.HelloAt).ToList();
+            // By kind first (one per client type reads naturally), then by number for what is still the same.
+            foreach (var s in list.Skip(1)) s.Name += s.Kind switch { "mcp-http" => " (shell)", _ => "" };
+            var n = 1;
+            foreach (var s in list.Skip(1).Where(s => list.Count(o => o.Name.Equals(s.Name, StringComparison.OrdinalIgnoreCase)) > 1)) s.Name += $" {++n}";
+        }
+    }
+
+    /// <summary>The display name for a label (the connected session holding it, else its base name).</summary>
+    internal string SessionDisplayName(string label) { lock (_sessionLock) return DisplayNameOfLocked(label); }
+
+    private string DisplayNameOfLocked(string label) =>
+        _sessions.Values.Where(s => s.Label == label).OrderByDescending(s => s.Connected).ThenByDescending(s => s.LastSeen).FirstOrDefault()?.Name is { Length: > 0 } n
+            ? n : BaseDisplayName(label, null);
+
+    private static string DisplayNameLocked(SessionInfo s) => s.Name.Length > 0 ? s.Name : BaseDisplayName(s.Label, s.Cwd);
+
+    /// <summary>
+    /// Rebuild the in-game view of the agents (SessionsTick, 4 Hz): the connected sessions with something going on,
+    /// each with what it asks of the user (pilot blockers: a step, a question, a flow, a recording step) and what else
+    /// it does. HUD-run work asking the user under a name no connected session has (a queued step "by Claude") is its
+    /// own entry. Blockers name sessions by label; a label two connected sessions share goes to the newest.
+    /// </summary>
+    private void AgentsViewRebuildLocked()
+    {
+        var blockers = BlockersLocked(null);
+        var names = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var s in _sessions.Values.OrderBy(s => s.Connected).ThenBy(s => s.LastSeen)) names[s.Label] = DisplayNameLocked(s);   // connected, newest win
+        var byLabel = _sessions.Values.Where(s => s.Connected).GroupBy(s => s.Label).ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.HelloAt).First());
+        var list = new List<AgentView>();
+        foreach (var g in blockers.Where(b => b.Who != null).GroupBy(b => b.Who!))
+        {
+            var connected = byLabel.ContainsKey(g.Key);
+            var asks = g.Where(b => b.Kind == "pilot").Select(b => b.Label).Distinct().ToArray();
+            var doing = g.Where(b => b.Kind != "pilot").Select(b => b.Label).Distinct().ToArray();
+            // A gone session's own leases and measurements end by themselves; only what still asks the user is shown.
+            if (!connected && asks.Length == 0) continue;
+            list.Add(new AgentView(names.TryGetValue(g.Key, out var n) ? n : BaseDisplayName(g.Key, null), g.Key, asks, connected ? doing : []));
+        }
+        // Agents that are asking come first, then by name: the strip and the hover list read in that order.
+        var active = list.OrderByDescending(a => a.Asks.Length > 0).ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+        // Same as last time: keep the instance, so the UI (which recomposes its text when the reference changes) does nothing.
+        var old = _agentsView;
+        if (SameAgents(old.Active, active) && old.Names.Count == names.Count && names.All(kv => old.Names.TryGetValue(kv.Key, out var v) && v == kv.Value)) return;
+        _agentsView = new AgentsView(active, names);
+    }
+
+    private static bool SameAgents(AgentView[] a, AgentView[] b)
+    {
+        if (a.Length != b.Length) return false;
+        for (var i = 0; i < a.Length; i++)
+            if (a[i].Name != b[i].Name || a[i].Label != b[i].Label || !a[i].Asks.SequenceEqual(b[i].Asks) || !a[i].Doing.SequenceEqual(b[i].Doing)) return false;
+        return true;
+    }
+
+    /// <summary>The agents the in-game UI may mention (rebuilt at 4 Hz; no lock).</summary>
+    internal AgentsView AgentsSnapshot() => _agentsView;
 
     // ── Leases ───────────────────────────────────────────────────────
 
@@ -298,7 +435,7 @@ public partial class WhatsAnAiBridge
             else
             {
                 RestartEvaluateLocked(req, now);
-                var what = reason != null ? $"{me.Label} wants to restart the HUD ({reason})" : $"{me.Label} wants to restart the HUD";
+                var what = reason != null ? $"{DisplayNameLocked(me)} wants to restart the HUD ({reason})" : $"{DisplayNameLocked(me)} wants to restart the HUD";
                 GuideLog(new JObject
                 {
                     ["text"] = req.Blockers.Count > 0 ? $"{what}: waiting for {RestartBlockersText(req)}" : $"{what}: in {Settings.RestartHoldSec.Value} s unless you say Not now",
@@ -350,13 +487,13 @@ public partial class WhatsAnAiBridge
         foreach (var o in _restarts.Where(r => r != req && r.Status == "waiting")) { o.Status = "merged"; o.Into = req.Id; o.By = req.Who; o.DecidedAt = now; }
         // Over blockers (the user's Restart now): tell their holders in the log, so the loss has a reason.
         if (req.Blockers.Count > 0)
-            GuideLog(new JObject { ["text"] = $"You let {req.Who} restart the HUD over {RestartBlockersText(req)}", ["kind"] = "warn", ["title"] = "HUD restart" });
+            GuideLog(new JObject { ["text"] = $"You let {DisplayNameOfLocked(req.Who)} restart the HUD over {RestartBlockersText(req)}", ["kind"] = "warn", ["title"] = "HUD restart" });
         else
-            GuideLog(new JObject { ["text"] = $"{req.Who} is restarting the HUD now" + (req.Reason != null ? $" ({req.Reason})" : ""), ["kind"] = "step", ["title"] = "HUD restart" });
+            GuideLog(new JObject { ["text"] = $"{DisplayNameOfLocked(req.Who)} is restarting the HUD now" + (req.Reason != null ? $" ({req.Reason})" : ""), ["kind"] = "step", ["title"] = "HUD restart" });
     }
 
-    private static string RestartBlockersText(RestartRequest req) =>
-        string.Join(", ", req.Blockers.Take(3).Select(b => b.Who != null ? $"{b.Who}'s {b.Label}" : b.Label)) + (req.Blockers.Count > 3 ? $" (+{req.Blockers.Count - 3})" : "");
+    private string RestartBlockersText(RestartRequest req) =>
+        string.Join(", ", req.Blockers.Take(3).Select(b => b.Who != null ? $"{DisplayNameOfLocked(b.Who)}'s {b.Label}" : b.Label)) + (req.Blockers.Count > 3 ? $" (+{req.Blockers.Count - 3})" : "");
 
     private JObject RestartJsonLocked(RestartRequest r)
     {
@@ -399,7 +536,7 @@ public partial class WhatsAnAiBridge
             if (req is { Status: "waiting" })
             {
                 req.Status = "denied"; req.By = "user"; req.DecidedAt = DateTime.UtcNow;
-                GuideLog(new JObject { ["text"] = $"Not now: {req.Who}'s HUD restart was declined", ["kind"] = "result", ["title"] = "HUD restart" });
+                GuideLog(new JObject { ["text"] = $"Not now: {DisplayNameOfLocked(req.Who)}'s HUD restart was declined", ["kind"] = "result", ["title"] = "HUD restart" });
             }
         }
     }
@@ -410,8 +547,11 @@ public partial class WhatsAnAiBridge
         var now = DateTime.UtcNow;
         if ((now - _sessionsTickAt).TotalMilliseconds < 250) return;
         _sessionsTickAt = now;
+        // A waiting step whose agent went quiet (guide.set expiresSec) leaves the card (AgentGuide.cs; its own lock, first).
+        GuideExpireTick(now);
         lock (_sessionLock)
         {
+            AgentsViewRebuildLocked();
             if (_sessions.Count == 0 && _leases.Count == 0 && _restarts.Count == 0) return;
             SessionsExpireLocked(now);
             foreach (var r in _restarts.Where(r => r.Status == "waiting").OrderBy(r => r.At).ToList())
@@ -420,7 +560,7 @@ public partial class WhatsAnAiBridge
             foreach (var r in _restarts.Where(r => r.Status == "go" && now - r.DecidedAt!.Value > RestartGoExpiry))
             {
                 r.Status = "expired";
-                GuideLog(new JObject { ["text"] = $"{r.Who} was granted a HUD restart but didn't restart it", ["kind"] = "warn", ["title"] = "HUD restart" });
+                GuideLog(new JObject { ["text"] = $"{DisplayNameOfLocked(r.Who)} was granted a HUD restart but didn't restart it", ["kind"] = "warn", ["title"] = "HUD restart" });
             }
         }
     }

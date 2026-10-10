@@ -10,15 +10,17 @@ namespace WhatsAnAiBridge;
 ///   - the restart card: an agent waits to restart the HUD. Blocked, it lists what it waits for (whose test, how long
 ///     left) in the warn tone; free, it counts down the hold in the accent tone. Restart now grants it over the
 ///     blockers; Not now denies it. Calm like the queue card: a restart is routine, the user only needs the choice.
-///   - the sessions strip: one line naming the connected agents, shown while the panel is up and two or more share
-///     the HUD, so "DO THIS NOW" and a measurement card never read as one voice. Hover for what each is doing.
+///   - the "who is asking" strip: one line naming the agents that ask the user for something right now, shown only
+///     while two or more do (and the panel is up anyway), so two requests never read as one voice. Hover for what each
+///     asks. Idle and disconnected sessions, branches and folders never appear: they are nothing the player can act on.
+/// Agents are named by their readable name (AgentsView.NameOf: never a system folder, no worktree hash tail, unique).
 /// Same rules as the rest of the panel: ASCII only, glyphs on the draw list, colours from PanelTheme plus the fixed tones.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
     private const int RestartBlockersShown = 3;
 
-    private void DrawRestartCard(RestartRequest rr, PanelTheme th, double now, DateTime utc)
+    private void DrawRestartCard(RestartRequest rr, AgentsView ag, PanelTheme th, double now, DateTime utc)
     {
         var dl = ImGui.GetWindowDrawList();
         var font = ImGui.GetFont();
@@ -41,7 +43,8 @@ public partial class WhatsAnAiBridge
         var lead = blocked
             ? (rr.Blockers.Count == 1 ? "Waits for:" : $"Waits for {rr.Blockers.Count} things:")
             : secondsToGo > 0 ? $"Restarts in {secondsToGo} s - nothing running would be lost." : "Restarting now.";
-        var meta = $"{rr.Who} asked {GuideElapsed(utc - rr.At)} ago" + (rr.Reason != null ? $" - {rr.Reason}" : "");
+        var who = ag.NameOf(rr.Who);
+        var meta = $"{who} asked {GuideElapsed(utc - rr.At)} ago" + (rr.Reason != null ? $" - {rr.Reason}" : "");
         var bodyH = f + 4                                   // lead line
                     + (blocked ? shown * (small + 3) + (rr.Blockers.Count > shown ? small + 3 : 0) : 0)
                     + small + 8                             // meta
@@ -64,8 +67,8 @@ public partial class WhatsAnAiBridge
         dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(tone), label);
         x += ImGui.CalcTextSize(label).X * (small / f) + 10;
         var rx = max.X - pad;
-        var whoW = ImGui.CalcTextSize(rr.Who).X * (small / f);
-        if (rx - whoW > x) { dl.AddText(font, small, new Vector2(rx - whoW, hy - small * 0.5f), U(th.TextDim), rr.Who); rx -= whoW + 10; }
+        var whoW = ImGui.CalcTextSize(who).X * (small / f);
+        if (rx - whoW > x) { dl.AddText(font, small, new Vector2(rx - whoW, hy - small * 0.5f), U(th.TextDim), who); rx -= whoW + 10; }
 
         // Body: the lead line, then the blockers as bullets (whose, what, how long left).
         var y = min.Y + headH + 2;
@@ -77,7 +80,7 @@ public partial class WhatsAnAiBridge
             for (var i = 0; i < shown; i++)
             {
                 var b = rr.Blockers[i];
-                var line = (b.Who != null ? $"{b.Who}: " : "") + b.Label;
+                var line = (b.Who != null ? $"{ag.NameOf(b.Who)}: " : "") + b.Label;
                 if (b.Until is DateTime u && u > utc) line += $" ({GuideElapsed(u - utc)} left)";
                 if (b.Yours) line += " (its own)";
                 dl.AddCircleFilled(new Vector2(bx + 4, y + small * 0.5f), 2f, U(th.TextDim), 8);
@@ -95,7 +98,7 @@ public partial class WhatsAnAiBridge
 
         // Buttons: Restart now (primary) and Not now. The tooltip says what Restart now would interrupt.
         var interrupt = blocked
-            ? "Restart now anyway. It interrupts " + string.Join(", ", rr.Blockers.Take(3).Select(b => b.Who != null ? $"{b.Who}'s {b.Label}" : b.Label)) + "; they are told why in the log."
+            ? "Restart now anyway. It interrupts " + string.Join(", ", rr.Blockers.Take(3).Select(b => b.Who != null ? $"{ag.NameOf(b.Who)}'s {b.Label}" : b.Label)) + "; they are told why in the log."
             : "Don't wait the countdown.";
         QueuePillButton(dl, "##restart_now", new Vector2(bx, y), btnH, "Restart now", true, th, out var nowClick, interrupt);
         if (nowClick) RestartAllow(rr.Id);
@@ -122,7 +125,13 @@ public partial class WhatsAnAiBridge
         dl.AddTriangleFilled(tip - dir * 3.2f, tip + dir * 1.2f + n * 2.6f, tip + dir * 1.2f - n * 2.6f, col);
     }
 
-    private void DrawSessionsStrip(SessionInfo[] sessions, PanelTheme th, DateTime utc)
+    /// <summary>
+    /// "WHO IS ASKING  Claude, Tester": the agents that ask the user for something right now, by readable name, askers
+    /// first (AgentsView's order). Drawn only when two or more ask (DrawGuideBody). Hover: one line per agent, "Name:
+    /// what it asks" in plain words, with what else it does after a dash. Nothing about idle or gone sessions, branches
+    /// or folders: the player can act on none of it.
+    /// </summary>
+    private void DrawSessionsStrip(AgentsView ag, PanelTheme th)
     {
         var dl = ImGui.GetWindowDrawList();
         var font = ImGui.GetFont();
@@ -138,36 +147,40 @@ public partial class WhatsAnAiBridge
         dl.AddRectFilled(min, max, U(th.Card, 0.92f), 5f);
         dl.AddRect(min, max, U(ToneNeutral, 0.4f), 5f);
 
-        // The line is recomposed only when the connected set changes (no per-frame string building).
+        // The line and the hover text are recomposed only when the agents view changes (Sessions.cs rebuilds it at 4 Hz,
+        // and only while something is going on): no per-frame string building.
         var u = _guideUi;
-        var connected = sessions.Where(s => s.Connected).Select(s => s.Label).OrderBy(l => l, StringComparer.Ordinal).ToArray();
-        if (u.SessionsLabels == null || !connected.SequenceEqual(u.SessionsLabels))
+        if (!ReferenceEquals(u.SessionsAgents, ag))
         {
-            u.SessionsLabels = connected;
-            u.SessionsLine = string.Join("  -  ", connected);
+            u.SessionsAgents = ag;
+            var sb = new System.Text.StringBuilder();
+            var tip = new System.Text.StringBuilder();
+            foreach (var x1 in ag.Active)
+            {
+                if (x1.Asks.Length == 0) continue;
+                if (sb.Length > 0) sb.Append(", ");
+                sb.Append(x1.Name);
+                for (var i = 0; i < x1.Asks.Length; i++)
+                {
+                    if (tip.Length > 0) tip.Append('\n');
+                    tip.Append(x1.Name).Append(": ").Append(AskWords(x1.Asks[i]));
+                    if (i == 0 && x1.Doing.Length > 0) tip.Append(" - also ").Append(string.Join(", ", x1.Doing));
+                }
+            }
+            u.SessionsLine = sb.ToString();
+            u.SessionsTip = tip.ToString();
         }
 
         ImGui.SetCursorScreenPos(min);
         ImGui.InvisibleButton("##sessions_strip", new Vector2(w, h));
-        if (ImGui.IsItemHovered())
-        {
-            // Only on hover: what each one is doing right now, from the HUD's own state (Sessions.cs).
-            var blockers = BlockersSnapshot();
-            var lines = sessions.OrderByDescending(s => s.Connected).Select(s =>
-            {
-                var doing = string.Join("; ", blockers.Where(b => b.Who == s.Label).Select(b => b.Label));
-                var tail = doing.Length > 0 ? doing : s.Connected ? "idle" : $"disconnected {GuideElapsed(utc - s.LastSeen)} ago";
-                var where = s.Branch != null && s.Branch != s.Label ? $" [{s.Branch}]" : "";
-                return $"{s.Label}{where}: {tail}";
-            });
-            ImGui.SetTooltip("Agents on this HUD\n" + string.Join("\n", lines));
-        }
+        // The hover, in the toast family under the card's stack: one line per ask, "Name: what it asks".
+        if (ImGui.IsItemHovered() && u.SessionsTip != null) GuideHover("Who is asking you for something", u.SessionsTip, null, null, ToneNeutral);
 
         var hy = min.Y + h * 0.5f;
         var x = min.X + pad;
         DrawSessionsGlyph(dl, new Vector2(x + 6, hy), U(ToneNeutral));
         x += 18;
-        var label = $"{connected.Length} AGENTS";
+        const string label = "WHO IS ASKING";
         dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(ToneNeutral), label);
         x += ImGui.CalcTextSize(label).X * (small / f) + 10;
         var rx = max.X - pad;
@@ -175,6 +188,18 @@ public partial class WhatsAnAiBridge
 
         ImGui.SetCursorScreenPos(p);
         ImGui.Dummy(new Vector2(GuideWidth, h + GuideEdge));
+    }
+
+    /// <summary>
+    /// A pilot blocker's label (Sessions.cs BlockersLocked) as the strip's hover says it: the step itself for "waiting
+    /// for the user: X" (the strip already says it is asking), "asks: X" for a question, the rest as written.
+    /// </summary>
+    private static string AskWords(string ask)
+    {
+        const string waiting = "waiting for the user: ", question = "question for the user: ";
+        if (ask.StartsWith(waiting, StringComparison.Ordinal)) return ask[waiting.Length..];
+        if (ask.StartsWith(question, StringComparison.Ordinal)) return "asks: " + ask[question.Length..];
+        return ask;
     }
 
     /// <summary>12 px "several" glyph: two overlapping rings.</summary>
