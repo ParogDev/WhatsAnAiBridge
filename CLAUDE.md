@@ -76,7 +76,7 @@ Offsets move and HUD APIs change with patches. Code that looks things up must sa
   - **hud** lane (`Shared/ObserveHud.cs`): a frame at least 50 ms and 2.5x the moving average becomes `{cause: spike, intervalMs, typicalMs, gcMs, gen0..2}` (one per 2 s, the rest counted in `suppressed`; gaps over 1.5 s are the overlay hidden or a load, skipped); plugin reloads `{cause: reload, plugin, ok, durationMs}`. So HUD hiccups aren't read as game events.
   - **agent** lane: every bridge call that changes what the user sees or what the HUD does (`AgentMethods`: guide, highlight, flow, experiment, reload, settings, focus, script, measurements, stats view, layer specs) as `{method, params}`, long strings clipped, secret settings values redacted.
   - Area and level changes, and new entity metadata prefixes (every 2 s).
-  - Events go to a ring of 1000 and to `<BridgeDirectory>\observe\journal.jsonl`. The on/off state survives restarts (`observe\state.json`).
+  - Events go to a ring of 1000 and to `<BridgeDirectory>\observe\journal.jsonl`, rotated to `journal.1.jsonl` at 128 MB (one generation kept; at start the sequence continues from both). The on/off state survives restarts (`observe\state.json`).
 - Structured methods with named params: `stats.*` (shared stats view), `recording.*` (stateless playback), and `hud.*` (dev loop):
   - `hud.plugins` lists loaded and failed source plugins.
   - `hud.reload_plugin {name}` queues a recompile of one source plugin, like the menu's Reload button. It runs in `Render` on the main thread, and the HUD pauses while compiling. The bridge refuses to reload itself. The setting is `AllowPluginReload`.
