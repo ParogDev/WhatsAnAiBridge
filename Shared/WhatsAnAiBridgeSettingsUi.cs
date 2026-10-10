@@ -198,6 +198,16 @@ public class WhatsAnAiBridgeSettingsUi
             "Show Agent Guide", "In-game card with what the agent asks you to do next, plus its log. Hides itself when idle");
         Hotkey("cb_lk", s.AgentLogHotkey, dl, x, cx, ref y,
             "Agent Log Hotkey (toggle)", "Opens the recent agent log under the card to select and copy lines. None: the log only shows as toasts");
+        Toggle("cb_ta", s.ToastAgent, dl, x, cx, ref y,
+            "Toasts: Agent Activity", "A grey toast for every agent tool call. Off: those lines only go to the log sheet");
+        Toggle("cb_ts", s.ToastStep, dl, x, cx, ref y,
+            "Toasts: Steps", "A toast when a guided step starts or is queued");
+        Toggle("cb_tr", s.ToastResult, dl, x, cx, ref y,
+            "Toasts: Results", "A toast for results and the 3 s done receipt");
+        Toggle("cb_tw", s.ToastWarn, dl, x, cx, ref y,
+            "Toasts: Warnings", "Amber toasts");
+        Toggle("cb_te", s.ToastError, dl, x, cx, ref y,
+            "Toasts: Errors", "Red toasts");
 
         SectionHeader(dl, x, ref y, "Query Limits");
         IntSlider("cb_er", s.MaxEntityRange, dl, x, cx, ref y, sw,
