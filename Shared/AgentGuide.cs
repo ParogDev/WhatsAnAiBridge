@@ -103,7 +103,8 @@ public partial class WhatsAnAiBridge
         {
             _guide.Log.Add(new GuideLogEntry { At = DateTime.UtcNow, Kind = kind, Text = text!, Title = string.IsNullOrWhiteSpace(title) ? null : title });
             if (_guide.Log.Count > GuideLogMax) _guide.Log.RemoveRange(0, _guide.Log.Count - GuideLogMax);
-            _guide.UpdatedAt = DateTime.UtcNow;
+            // No UpdatedAt here: the quiet clock counts what the user saw (a toast that showed, GuideToastFeed.cs), not every
+            // line; agent lines for each tool call are off by default and would keep the quiet card awake forever.
             _guide.Rev++;
             return new JObject { ["ok"] = true, ["rev"] = _guide.Rev };
         }

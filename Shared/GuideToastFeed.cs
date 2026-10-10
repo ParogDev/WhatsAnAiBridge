@@ -47,6 +47,7 @@ public partial class WhatsAnAiBridge
 
     private readonly List<GuideToast> _toasts = new();   // oldest first
     private GuideLogEntry? _toastSeen;                    // the last log line fed to the stack
+    private DateTime _toastShownAt = DateTime.MinValue;   // the last toast that showed (or repeat that bumped one): the quiet clock
     private bool _toastHolding;
     private int _toastHeld;                               // lines held since the hold started
     private GuideLogEntry? _toastHeldLast;
@@ -175,6 +176,7 @@ public partial class WhatsAnAiBridge
             top.Count++;
             top.CountText = "x" + top.Count;
             top.At = e.At;
+            _toastShownAt = e.At;
             return;
         }
         PushGuideToast(g, e.Kind, e.Title, e.Text, e.At, false, 1);
@@ -186,6 +188,7 @@ public partial class WhatsAnAiBridge
         t.TitleCaps = GuideToastTitle(new GuideLogEntry { Kind = kind, Title = title, Text = text }, g);
         t.TextCaps = GuideCaps(summary ? "Latest: " + text : text);
         _toasts.Add(t);
+        if (at > _toastShownAt) _toastShownAt = at;
     }
 
     /// <summary>The line says what a visible highlight already says: equal to a box's label or the highlight's title

@@ -184,7 +184,9 @@ public partial class WhatsAnAiBridge
         // "done" is not a card: it became a 3 s result toast when the status arrived (ObserveGuide), and the card hides.
         var hasCard = (g.instruction != null || g.status != "idle") && g.status != "done";
         var needsUser = g.status is "waiting" or "failed" or "detected" or "settling";
-        var quietFor = (utc - g.updatedAt).TotalSeconds;
+        // Quiet since the last state change or the last toast that actually showed (lines of kinds that are off, held or
+        // dropped lines do not wake the card).
+        var quietFor = (utc - (g.updatedAt > _toastShownAt ? g.updatedAt : _toastShownAt)).TotalSeconds;
         // A pending HUD restart (blocked, or counting down with Not now) keeps the panel up: the user must be able to answer it.
         var quiet = ((!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null)) && rs.request == null;
 
