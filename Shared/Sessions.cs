@@ -548,9 +548,12 @@ public partial class WhatsAnAiBridge
                 list.Add(new Blocker("pilot", $"waiting for the user: {_guide.Instruction}", _guide.Who, null, Yours(_guide.Who)));
         lock (_hlLock)
             foreach (var l in _hlLayers)
-                if (l.Targets.FirstOrDefault(t => t.Ask != null && t.Answer == null && !t.Expired) is { } asked)
+                // Held question strips (the attention queue: not this session's turn yet) are not in front of the player: no
+                // blocker; nor are expired questions (#76: their strips are gone).
+                if (!l.AsksHeld && l.Targets.FirstOrDefault(t => t.Ask != null && t.Answer == null && !t.Expired) is { } asked)
                     list.Add(new Blocker("pilot", $"question for the user: {asked.Ask}" + (l.Pending > 1 ? $" (+{l.Pending - 1})" : ""), l.Who, l.Until, Yours(l.Who)));
-        if (AttnFloorBlockerLocked(requesterLabel) is { } floor) list.Add(floor);   // the attention queue's floor holder (C8)
+        // The attention queue's floor holder (C8), unless what it shows is listed already (its card, flow, step or question).
+        if (AttnFloorBlockerLocked(requesterLabel) is { } floor && !list.Any(b => b.Kind == "pilot" && b.Who == floor.Who)) list.Add(floor);
         foreach (var l in _leases) list.Add(new Blocker(l.Kind, l.Label, l.Who, l.Until, l.Session == requester, l.Id));
         return list;
     }
@@ -709,8 +712,8 @@ public partial class WhatsAnAiBridge
         // The attention queue's inputs are read before the sessions lock: game reads, and the guide, flow and highlight
         // locks are only ever taken nested inside the sessions lock, never around it.
         var player = AttnSamplePlayer();
-        (string status, string? instruction, string? who) guide;
-        lock (_guideLock) guide = (_guide.Status, _guide.Instruction, _guide.Who);
+        (string status, string? instruction, string? who, string? session) guide;
+        lock (_guideLock) guide = (_guide.Status, _guide.Instruction, _guide.Who, _guide.Session);
         bool flowRunning; string? flowWho;
         lock (_flowLock) { flowRunning = _flow.Status == "running"; flowWho = _flow.Who; }
         var hlPending = HighlightPendingByLayer();

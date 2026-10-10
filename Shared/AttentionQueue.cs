@@ -471,7 +471,8 @@ public partial class WhatsAnAiBridge
         var who = item.Who;
         // A new owner: the previous holder's card goes (an instruction nobody stands behind any more). The new holder's
         // own card, and cards nobody owns (a measurement), stay.
-        effects.Add(() => GuideClearUnlessOwnedBy(who));
+        var session = item.SessionId;
+        effects.Add(() => GuideClearUnlessOwnedBy(session, who));
         if (item.HlOwner is { } layer) effects.Add(() => HighlightHoldAsks(layer, false));
         // A replayed call puts a card up at once, so it waits for the hand-over gap like an ask's visibleSince does
         // (AttnTickLocked runs it when the gap has passed, outside combat).
@@ -495,7 +496,9 @@ public partial class WhatsAnAiBridge
         var p = item.PendingParams ?? new JObject();
         var who = item.Who;
         var id = item.Id;
-        effects.Add(() => AttnReplay(method, p, who, id));
+        // A queued experiment step has no session of its own ("queue:<step>"): its card is HUD-run, so no disconnect clears it.
+        var session = item.SessionId.StartsWith("queue:", StringComparison.Ordinal) ? null : item.SessionId;
+        effects.Add(() => AttnReplay(method, p, who, session, id));
     }
 
     /// <summary>End an item (and the followers of a shared ask with it). reason: a code for agents; why: words.</summary>
@@ -533,13 +536,13 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>Replay a queued call now that its turn came (Render or the request thread, outside the sessions lock).</summary>
-    private void AttnReplay(string method, JToken p, string who, string itemId)
+    private void AttnReplay(string method, JToken p, string who, string? session, string itemId)
     {
         try
         {
             JObject r = method switch
             {
-                "guide.set" => GuideSet(p, who),
+                "guide.set" => GuideSet(p, who, session),   // stamped with the asker's session: its disconnect cleanup clears it
                 "guide.flow" => FlowStart(p, who, itemId),
                 "experiment.start" => QueueStartCore(p["id"]?.ToString(), p["from"]?.ToString() ?? "agent", itemId),
                 _ => Err("unknown_replay", method),
@@ -579,20 +582,16 @@ public partial class WhatsAnAiBridge
         AttnSaveIfChanged();
     }
 
-    /// <summary>Clear the guide card when it shows another session's instruction (a hand-over).</summary>
-    private void GuideClearUnlessOwnedBy(string who)
+    /// <summary>
+    /// Clear the guide card when it shows another owner's instruction (a hand-over): the session id decides when the card
+    /// carries one, else the label (HUD-run cards: the queue runner, a flow, a measurement name who they are for).
+    /// </summary>
+    private void GuideClearUnlessOwnedBy(string session, string who)
     {
         bool clear;
-        lock (_guideLock) clear = _guide.Who != null && _guide.Who != who && (_guide.Instruction != null || _guide.Status != "idle");
-        if (clear) GuideSet(new JObject { ["clear"] = true }, null);
-    }
-
-    /// <summary>Clear the guide card when it is this session's (cleanup after a disconnect).</summary>
-    private void GuideClearIfOwnedBy(string who)
-    {
-        bool clear;
-        lock (_guideLock) clear = _guide.Who == who;
-        if (clear) GuideSet(new JObject { ["clear"] = true }, null);
+        lock (_guideLock)
+            clear = _guide.Who != null && (_guide.Session != null ? _guide.Session != session : _guide.Who != who) && (_guide.Instruction != null || _guide.Status != "idle");
+        if (clear) GuideSet(new JObject { ["clear"] = true });
     }
 
     // ── Tick (Render, from SessionsTick at 4 Hz) ─────────────────────
@@ -640,7 +639,7 @@ public partial class WhatsAnAiBridge
     /// card went quiet, asked highlights answered or gone, waiting restarts (their arrival or end is a change), then one
     /// arbitration.
     /// </summary>
-    private void AttnTickLocked(DateTime now, AttnPlayer player, (string status, string? instruction, string? who) guide, bool flowRunning, string? flowWho,
+    private void AttnTickLocked(DateTime now, AttnPlayer player, (string status, string? instruction, string? who, string? session) guide, bool flowRunning, string? flowWho,
         Dictionary<string, int> hlPending, List<Action> effects)
     {
         AttnLoadLocked();
@@ -649,19 +648,10 @@ public partial class WhatsAnAiBridge
         var restartKey = string.Join(",", _restarts.Where(r => r.Status is "waiting" or "go").Select(r => r.Id + r.Status));
         if (restartKey != _attnRestartKey) { _attnRestartKey = restartKey; _attnSeq++; }
 
-        // A disconnected session gets AttnDisconnectGrace to come back (a reconnect keeps everything); then its items are
-        // cancelled and its card, flow and highlight layer released.
+        // A disconnected session gets AttnDisconnectGrace to come back (a reconnect keeps everything); then one cleanup
+        // releases what it left in front of the player (AttnSessionGoneLocked).
         foreach (var s in _sessions.Values.Where(s => !s.Connected && !s.AttnCleaned && s.DisconnectedAt is { } d && now - d >= AttnDisconnectGrace).ToList())
-        {
-            s.AttnCleaned = true;
-            foreach (var i in _attn.Where(i => i.SessionId == s.Id && !i.Detached && !AttnEnded.Contains(i.Status)).ToList())
-                AttnEndLocked(i, "cancelled", now, "disconnected", $"{s.Label} disconnected", effects);
-            var label = s.Label;
-            var sid = s.Id;
-            effects.Add(() => GuideClearIfOwnedBy(label));
-            if (flowRunning && flowWho == label) effects.Add(() => FlowStop());
-            effects.Add(() => HighlightDropLayer(sid));
-        }
+            AttnSessionGoneLocked(s, now, flowRunning, flowWho, effects);
 
         var h = AttnHolderLocked();
         // The card is visible once the hand-over gap has passed outside combat and pauses (C5); an ask's showTtlSec counts
@@ -678,7 +668,7 @@ public partial class WhatsAnAiBridge
         // An implicit step turn (a plain guide.set) lasts while its card asks the player to act; once the card rests
         // (captured, info, done, cleared) or belongs to someone else, the floor is free again. Not before its replay ran.
         if (h is { Implicit: true, Kind: "step", StepId: null, ReplayDue: false } && now - h.ShownAt!.Value > AttnImplicitGrace
-            && !(guide.who == h.Who && guide.instruction != null && guide.status is "waiting" or "detected" or "settling" or "failed"))
+            && !((guide.session != null ? guide.session == h.SessionId : guide.who == h.Who) && guide.instruction != null && guide.status is "waiting" or "detected" or "settling" or "failed"))
             AttnEndLocked(h, "done", now, "card_quiet", "the card went quiet", effects);
         if (h is { Implicit: true, Kind: "flow", ReplayDue: false } && now - h.ShownAt!.Value > AttnImplicitGrace && !(flowRunning && flowWho == h.Who))
             AttnEndLocked(h, "done", now, "flow_ended", "the flow ended", effects);
@@ -691,6 +681,27 @@ public partial class WhatsAnAiBridge
         }
 
         AttnArbitrateLocked(now, effects);
+    }
+
+    /// <summary>
+    /// The one cleanup for a session that left (disconnected for AttnDisconnectGrace without coming back; SessionsTick,
+    /// under the sessions lock, side effects after it): its open attention items are cancelled (the floor passes on), the
+    /// step it left waiting on the card is cleared (GuideOwnerGone: only a card stamped with its session id, only while
+    /// the player is still asked to act; a finished card stays as a receipt) and its highlight layer goes. What the HUD
+    /// runs by itself outlives its asker and ends on its own terms: a queued experiment step (Detached), and a flow
+    /// (the card and highlight of a flow belong to no session) - its turn is kept and ends with the flow.
+    /// </summary>
+    private void AttnSessionGoneLocked(SessionInfo s, DateTime now, bool flowRunning, string? flowWho, List<Action> effects)
+    {
+        s.AttnCleaned = true;
+        foreach (var i in _attn.Where(i => i.SessionId == s.Id && !i.Detached && !AttnEnded.Contains(i.Status)).ToList())
+        {
+            if (i is { Status: "showing", Kind: "flow" } && flowRunning && flowWho == i.Who) { i.Implicit = true; continue; }   // ends with the flow (AttnTickLocked)
+            AttnEndLocked(i, "cancelled", now, "disconnected", $"{s.Label} disconnected", effects);
+        }
+        var sid = s.Id;
+        effects.Add(() => GuideOwnerGone(sid));
+        effects.Add(() => HighlightDropLayer(sid));
     }
 
     // ── The card (GuidePanelAsk.cs draws it) ─────────────────────────
@@ -1073,6 +1084,19 @@ public partial class WhatsAnAiBridge
         return o;
     }
 
+    /// <summary>
+    /// The queued guide.set of a step (guide.user's "not shown yet"): the open implicit item whose call carries this
+    /// stepId, as {id, position}, or null. Taken under the sessions lock alone (GuideUser calls it after its guide lock).
+    /// </summary>
+    private JObject? AttnQueuedStep(string stepId)
+    {
+        lock (_sessionLock)
+        {
+            var i = _attn.FirstOrDefault(x => x is { Status: "queued", Pending: "guide.set" } && x.PendingParams?["stepId"]?.ToString() == stepId);
+            return i == null ? null : new JObject { ["id"] = i.Id, ["position"] = AttnPlaceLocked(i, DateTime.UtcNow).position };
+        }
+    }
+
     /// <summary>The open items of one session, for session.list (hud_sessions).</summary>
     private JArray AttnOfSessionLocked(string session, DateTime now) =>
         new(_attn.Where(i => i.SessionId == session && i.Status is "queued" or "showing").Select(i =>
@@ -1082,11 +1106,11 @@ public partial class WhatsAnAiBridge
             return o;
         }));
 
-    /// <summary>The floor holder as a restart blocker (C8), in the player's words: "whats-a-route: your answer".</summary>
+    /// <summary>The floor holder as a restart blocker (C8), in the player's words: "Claude: your answer to: Which exit?" (names: NameOf at the card).</summary>
     private Blocker? AttnFloorBlockerLocked(string? requesterLabel)
     {
         if (AttnHolderLocked() is not { } h) return null;
-        return new Blocker("pilot", h.Kind == "ask" ? "your answer" : "the step you are doing", h.Who, null, requesterLabel != null && h.Who == requesterLabel);
+        return new Blocker("pilot", h is { Kind: "ask", Question: { } q } ? $"your answer to: {q}" : h.Kind == "ask" ? "your answers" : "the step you are doing", h.Who, null, requesterLabel != null && h.Who == requesterLabel);
     }
 
     // ── Small helpers ────────────────────────────────────────────────

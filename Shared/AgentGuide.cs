@@ -14,13 +14,18 @@ namespace WhatsAnAiBridge;
 ///               title: the toast's caps title (up to 40 chars, e.g. "Low life"); without one the kind is the title
 ///   guide.state {}
 ///   guide.user  {stepId}  the user's answer to a step that offered Done: {current, mark: null|done|cancelled, markAgoMs,
-///               unseen, status}. current false: the card shows another step now (replaced, cleared, expired).
+///               unseen, status}. current false: the card shows another step now (replaced, cleared, expired), or the
+///               step's guide.set still waits its turn in the attention queue (queued: true, attention, position).
 /// A step that reads the answer passes stepId and offerDone on guide.set (await_change and the queue runner do): the
 /// card then has a Done button beside its x, and says "I can't see that change yet" once the status stayed waiting for
 /// unseenAfterSec with no Done. Done is a mark the agent reads (guide.user) and checks against what it watches;
 /// "Not done yet" takes it back; the x on such a card marks it cancelled. A step's card never outlives its asker:
-/// guide.set {clear, ifStep} clears only that step, expiresSec clears it when the agent goes quiet, and a closed
-/// connection clears the step its session left waiting (GuideOwnerGone, from Sessions.cs).
+/// guide.set {clear, ifStep} clears only that step, expiresSec clears it when the agent goes quiet, and a session that
+/// disconnected and did not come back within the grace loses the step it left waiting (GuideOwnerGone, from the one
+/// disconnect cleanup, AttentionQueue.cs AttnSessionGoneLocked).
+/// Who may write the card is the attention queue's business (AttentionQueue.cs): guide.set goes through
+/// GuideSetRequest, which queues an instruction from a session without the floor and refuses status / detail / clear
+/// on another session's card (not_your_card; ifStep is always allowed: it only ever touches the asker's own step).
 /// The state is in memory only (not saved); the panel is drawn by GuidePanel.cs. Written from the TCP thread, read in
 /// Render, so access goes through the lock.
 /// </summary>
@@ -45,7 +50,7 @@ public partial class WhatsAnAiBridge
         public DateTime UpdatedAt = DateTime.MinValue;
         public DateTime? InstructionSince;
         public string? Who;     // the session that set the instruction or status (Sessions.cs); shown when several agents are active
-        public string? Session; // that session's id: its waiting step is cleared when it disconnects (GuideOwnerGone)
+        public string? Session; // that session's id: its waiting step is cleared when it is gone (GuideOwnerGone); null for HUD-run steps
         // A step that offers Done (stepId + offerDone on guide.set): the user's mark and the "can't see it yet" clock.
         public string? StepId;
         public bool OfferDone;
@@ -213,26 +218,39 @@ public partial class WhatsAnAiBridge
         _guide.ExpiresAt = null;
     }
 
-    /// <summary>guide.user: the user's answer to a step that offered Done (the agent reads it while it waits).</summary>
+    /// <summary>
+    /// guide.user: the user's answer to a step that offered Done (the agent reads it while it waits). A step that is not on
+    /// the card says why: replaced or cleared, or still waiting for its turn in the attention queue (its guide.set was
+    /// queued: queued, attention, position), which current=false alone would not tell apart.
+    /// </summary>
     private JObject GuideUser(string? stepId)
     {
         if (string.IsNullOrWhiteSpace(stepId)) return new JObject { ["error"] = "missing_step", ["message"] = "Pass stepId: the id you gave guide.set." };
+        JObject o;
         lock (_guideLock)
         {
-            var o = new JObject { ["ok"] = true, ["stepId"] = stepId, ["current"] = _guide.StepId == stepId, ["rev"] = _guide.Rev };
-            if (_guide.StepId != stepId)
+            o = new JObject { ["ok"] = true, ["stepId"] = stepId, ["current"] = _guide.StepId == stepId, ["rev"] = _guide.Rev };
+            if (_guide.StepId == stepId)
             {
-                o["note"] = _guide.StepId == null ? "The card shows no step now (cleared or expired)." : $"The card shows another step now (by {_guide.Who ?? "unknown"}).";
+                var a = GuideAskLocked(DateTime.UtcNow);
+                o["mark"] = a.Mark;
+                if (a.Mark != null) o["markAgoMs"] = (long)(a.MarkAgoSec * 1000);
+                o["offerDone"] = a.OfferDone;
+                o["unseen"] = a.Unseen;
+                o["status"] = _guide.Status;
                 return o;
             }
-            var a = GuideAskLocked(DateTime.UtcNow);
-            o["mark"] = a.Mark;
-            if (a.Mark != null) o["markAgoMs"] = (long)(a.MarkAgoSec * 1000);
-            o["offerDone"] = a.OfferDone;
-            o["unseen"] = a.Unseen;
-            o["status"] = _guide.Status;
-            return o;
+            o["note"] = _guide.StepId == null ? "The card shows no step now (cleared or expired)." : $"The card shows another step now (by {_guide.Who ?? "unknown"}).";
         }
+        // After the guide lock (lock order: sessions, then guide): a guide.set of this step waiting for its turn.
+        if (AttnQueuedStep(stepId) is { } q)
+        {
+            o["queued"] = true;
+            o["attention"] = q["id"];
+            o["position"] = q["position"];
+            o["note"] = $"Not shown yet: your guide.set of this step waits its turn in the attention queue ({q["id"]}, position {q["position"]}).";
+        }
+        return o;
     }
 
     private GuideAskView GuideAskLocked(DateTime now)
@@ -282,23 +300,33 @@ public partial class WhatsAnAiBridge
 
     /// <summary>
     /// A step whose agent went quiet (expiresSec passed while the user was still asked to act) is cleared, so the card
-    /// and the "waiting for the user" blocker don't outlive it. From SessionsTick (Render, 4 Hz).
+    /// and the "waiting for the user" blocker don't outlive it, and the step turn it ran under (the agent's
+    /// attention.request) ends too: a quiet agent must not hold the floor. From SessionsTick (Render, 4 Hz), before the
+    /// sessions lock.
     /// </summary>
     private void GuideExpireTick(DateTime now)
     {
-        string? who, what;
+        string? who, what, session;
         lock (_guideLock)
         {
             if (_guide.ExpiresAt is not DateTime until || now < until || !GuideActive(_guide.Status)) return;
-            who = _guide.Who; what = _guide.Instruction;
+            who = _guide.Who; what = _guide.Instruction; session = _guide.Session;
             GuideClearStepLocked();
         }
         GuideLog(new JObject { ["text"] = $"{GuideWhoText(who)} stopped waiting for: {what ?? "the step"}", ["kind"] = "warn", ["title"] = "Step ended" });
+        if (session != null)
+        {
+            string? turn;
+            lock (_sessionLock) turn = AttnHolderLocked() is { Kind: "step", StepId: null } h && h.SessionId == session ? h.Id : null;
+            AttnEndById(turn, "expired", "card_expired", "its card's expiresSec passed with the agent quiet");
+        }
     }
 
     /// <summary>
-    /// The session behind the card disconnected (Sessions.cs, called outside the sessions lock): a step it left asking
-    /// the user to act is cleared. A finished card (captured, failed...) stays as a receipt.
+    /// The session behind the card is gone (it disconnected and did not come back within the grace; called from the one
+    /// disconnect cleanup, AttnSessionGoneLocked, as a side effect outside the sessions lock): a step it left asking the
+    /// user to act is cleared. Only a card stamped with that session id: HUD-run cards (queue runner, flow) carry none.
+    /// A finished card (captured, failed...) stays as a receipt.
     /// </summary>
     private void GuideOwnerGone(string sessionId)
     {
