@@ -122,7 +122,7 @@ public partial class WhatsAnAiBridge
             {
                 var t = _toasts[i];
                 if (!GuideHeldKind(t.Kind) || (utc - t.At).TotalSeconds >= GuideToastSec) continue;
-                _toastHeld += t.Count;
+                _toastHeld++;   // one update cut short, however many repeats it had merged (those were seen)
                 if (_toastHeldLast == null) _toastHeldLast = new GuideLogEntry { Kind = t.Kind, Text = t.Text, Title = t.Title, At = t.At };
                 _toasts.RemoveAt(i);
             }
