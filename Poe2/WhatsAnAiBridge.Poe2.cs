@@ -70,6 +70,10 @@ public partial class WhatsAnAiBridge
 
     private static int? ActiveWeaponSet(Entity player) => player.GetComponent<Stats>()?.ActiveWeaponSetIndex;
 
+    /// <summary>Whether highlight boxes under the world map pan container get the horizontal stretch correction
+    /// (Shared WorldMapPan; finding ui.worldmap.pan-x-underscaled, measured on PoE2 2026-10-10).</summary>
+    private static readonly bool WorldMapPanCorrected = true;
+
     // ── Game-specific UI panels ──────────────────────────────────────
 
     private static void PopulateGamePanels(UiDto dto, IngameUIElements ui)
