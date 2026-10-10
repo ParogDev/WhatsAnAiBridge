@@ -87,11 +87,19 @@ public partial class WhatsAnAiBridge
         public double FlowDoneAt = -1e9;
         public bool FlowUndo;              // the last done-count change was a step coming back
         public double FlowEndedAt = -1e9;  // ImGui time the flow left "running"
-        // Per-frame allocation guards for the card: the loud instruction's two-line wrap and the title's caps form,
+        // Per-frame allocation guards for the card: the message's and the third line's wraps and the title's caps form,
         // rebuilt only when their source string, size or width changes.
-        public string? WrapSrc, Wrap1, Wrap2;
-        public float WrapSize, WrapW;
+        public readonly GuideWrapCache MsgWrap = new(), SubWrap = new();
         public string? TitleCapsSrc, TitleCaps;
+        // The hover panel (GuideHover): where it goes this frame (the card's x, under the card's stack - toasts or the log
+        // sheet - or above the card when there is no room), and its wrapped content, rebuilt only when the texts change.
+        public float HoverX, HoverBelowY, HoverAboveY;
+        public string? HoverTitleSrc, HoverBodySrc, HoverNoteSrc, HoverFootSrc, HoverTitleCaps;
+        public readonly List<string> HoverLines = new();
+        public readonly List<byte> HoverKinds = new();   // per line: 0 body, 1 note, 2 foot
+        public float HoverTextW;
+        // The message hover's "asked by" foot, composed only when the asker's name changes.
+        public string? MsgFootName, MsgFoot;
         // Several agents active (Sessions.cs AgentsView.Ambiguous): the title row names who asked, by its readable name
         // ("Claude - Experiment: stash"), composed only when that name or the title change.
         public bool ShowWho;
@@ -251,6 +259,11 @@ public partial class WhatsAnAiBridge
         {
             var anchor = new Vector2(u.WinPos.X, u.WinPos.Y + cardH + (cardH > 0 ? 2 : 0));
             if (hide) anchor = u.Home + u.Shift;
+            // Where a hover panel may go without covering the card's own lines: under the whole stack (the log sheet
+            // raises HoverBelowY to its bottom), or above the card.
+            u.HoverX = u.WinPos.X + GuideEdge;
+            u.HoverAboveY = u.WinPos.Y;
+            u.HoverBelowY = anchor.Y + (toastsH > 0 ? toastsH : 0);
             if (!DrawGuideLogSheet(g, th, now, anchor)) { if (at.ToastsAllowed) DrawGuideToasts(th, now, utc, anchor); }
             if (at.ShowDot) DrawGuideDot(at, hovered, hasCard || q.Next != null, now);
         }
@@ -556,31 +569,39 @@ public partial class WhatsAnAiBridge
         var textMax = x0 + w - GuideToastPadX - textX;
         var msgSize = compact ? small : loud ? f * 1.3f : f;
 
-        // The third line, if any.
+        // The third line, if any. Static texts (detail, the unseen line, captured / failed / unseen sublines) wrap onto
+        // two lines; the animated ones (progress dots, checking) are short and stay one line, so nothing is re-wrapped
+        // per frame.
         string? line3 = null;
         var line3Tone = GuideToastMuted;
         var line3Done = false;
+        var line3Static = true;
         var sub = GuideSubline(g, now);
         if (!compact)
         {
-            if (sub != null) { line3 = sub; line3Tone = look.Tone; }
+            if (sub != null) { line3 = sub; line3Tone = look.Tone; line3Static = g.status is not ("detected" or "settling"); }
             // Done pressed: the agent is checking (a short state: it captures or ends unseen within seconds).
-            else if (checking) { line3 = GuideCheckingLine(now); line3Tone = look.Tone; }
+            else if (checking) { line3 = GuideCheckingLine(now); line3Tone = look.Tone; line3Static = false; }
             // Waiting for a while with no Done: the agent says plainly that it sees nothing yet. Near-white, not a tone:
             // it is the agent talking, not an error. Done stays the way to answer it.
             else if (a.Unseen) { line3 = GuideUnseenLine; line3Tone = GuideToastText; }
             else if (g.detail != null) line3 = g.detail;
-            else if (fv.Show && !fv.Running) { line3 = fv.StepCount == 1 ? "Done" : $"All {fv.StepCount} steps done"; line3Done = true; }
+            else if (fv.Show && !fv.Running) { line3 = fv.StepCount == 1 ? "Done" : $"All {fv.StepCount} steps done"; line3Done = true; line3Static = false; }
             else if (fv.Show && at.ShowPlan && fv.Plan.Length > 1)
-                line3 = "next: " + fv.Plan[1] + (fv.Plan.Length > 2 ? $"  +{fv.Plan.Length - 2} more" : "");
+            { line3 = "next: " + fv.Plan[1] + (fv.Plan.Length > 2 ? $"  +{fv.Plan.Length - 2} more" : ""); line3Static = false; }
         }
 
-        // The message: the instruction (the title when there is none; the receipt shows the title dimmed). Loud: up
-        // to two wrapped lines, so "do this now" is never clipped; the wrap is cached until the text changes.
+        // The message: the instruction (the title when there is none; the receipt shows the title dimmed). Up to
+        // three wrapped lines, loud or calm, so an instruction is never lost to ".."; the receipt is one clipped line.
+        // The wraps are cached until the text, size or width changes (GuideWrapCache: no per-frame allocation).
         var text = compact ? (g.title ?? g.instruction) : (g.instruction ?? g.title);
-        var lines = text == null ? 0 : loud ? GuideWrap2(text, msgSize, textMax) : 1;
-        var msgH = lines == 0 ? 0f : GuideToastLineGap + lines * msgSize + (lines > 1 ? 2f : 0f);
-        var h = padY + f + msgH + (line3 != null ? GuideToastLineGap + small : 0f) + padY;
+        var u = _guideUi;
+        var lines = text == null ? 0 : u.MsgWrap.Wrap(text, msgSize, textMax, compact ? 1 : GuideMsgLinesMax);
+        var msgH = lines == 0 ? 0f : GuideToastLineGap + lines * msgSize + (lines - 1) * 2f;
+        var line3X = textX + (line3Done ? 18f : 0f);
+        var line3Lines = line3 == null ? 0 : line3Static ? u.SubWrap.Wrap(line3, small, x0 + w - GuideToastPadX - line3X, GuideSubLinesMax) : 1;
+        var line3H = line3Lines == 0 ? 0f : GuideToastLineGap + line3Lines * small + (line3Lines - 1) * 2f;
+        var h = padY + f + msgH + line3H + padY;
         var min = new Vector2(x0, p.Y + GuideEdge);
         var max = new Vector2(x0 + w, p.Y + GuideEdge + h);
 
@@ -709,64 +730,202 @@ public partial class WhatsAnAiBridge
             GuideTrackedText(dl, font, small, new Vector2(x, hy - small * 0.5f), U(GuideToastMuted), t, GuideToastMsgTrack);
         }
 
-        // Message row: the instruction. Loud: big, up to two lines, faux bold. Calm: one line, clipped, with the
-        // whole text (and the title) in a tooltip when clipped.
+        // Message row: the instruction on up to three lines. Loud: big, faux bold. Calm: f; the receipt: small, muted.
         var my = min.Y + padY + f + GuideToastLineGap;
         if (text != null)
         {
-            if (loud)
+            var col = loud ? U(GuideToastText)
+                : compact ? U(GuideToastMuted)
+                : U(GuideToastText, checking || g.status is "captured" or "detected" or "settling" or "unseen" ? 0.85f : 0.95f);
+            for (var i = 0; i < lines; i++)
             {
-                var col = U(GuideToastText);
-                var u = _guideUi;
-                dl.AddText(font, msgSize, new Vector2(textX, my), col, u.Wrap1!);
-                dl.AddText(font, msgSize, new Vector2(textX + 0.6f, my), col, u.Wrap1!);
-                if (u.Wrap2 != null)
-                {
-                    dl.AddText(font, msgSize, new Vector2(textX, my + msgSize + 2f), col, u.Wrap2);
-                    dl.AddText(font, msgSize, new Vector2(textX + 0.6f, my + msgSize + 2f), col, u.Wrap2);
-                }
-            }
-            else
-            {
-                var clipped = GuideClipText(text, textMax * (f / msgSize));
-                var col = compact ? U(GuideToastMuted) : U(GuideToastText, checking || g.status is "captured" or "detected" or "settling" or "unseen" ? 0.85f : 0.95f);
-                dl.AddText(font, msgSize, new Vector2(textX, my), col, clipped);
-                if (!ReferenceEquals(clipped, text) || (g.title != null && g.instruction != null && !compact))
-                {
-                    ImGui.SetCursorScreenPos(new Vector2(textX, my));
-                    ImGui.InvisibleButton("##guide_text", new Vector2(textMax, msgSize));
-                    if (ImGui.IsItemHovered())
-                        GuideTooltip(g.title != null && g.instruction != null && !compact ? $"{g.title}\n{g.instruction}" : text);
-                }
+                var ly = my + i * (msgSize + 2f);
+                dl.AddText(font, msgSize, new Vector2(textX, ly), col, u.MsgWrap.Lines[i]);
+                if (loud) dl.AddText(font, msgSize, new Vector2(textX + 0.6f, ly), col, u.MsgWrap.Lines[i]);
             }
         }
 
-        // Third line: small, muted (the tone for a status subline), under the message.
+        // Third line(s): small, muted (the tone for a status subline), under the message.
         if (line3 != null)
         {
             var ly = min.Y + padY + f + msgH + GuideToastLineGap;
-            var lx = textX;
             if (line3Done)
             {
                 var pop = HlEase((now - _guideUi.FlowEndedAt) / GuideFlowPopSec);
-                DrawFlowCheck(dl, new Vector2(lx + 6, ly + small * 0.5f), 5.5f, ToneOk, pop, 1f);
-                lx += 18;
+                DrawFlowCheck(dl, new Vector2(textX + 6, ly + small * 0.5f), 5.5f, ToneOk, pop, 1f);
                 line3Tone = GuideToastText;
             }
-            dl.AddText(font, small, new Vector2(lx, ly), U(line3Tone, 0.9f), GuideClipText(line3, (max.X - GuideToastPadX - lx) * (f / small)));
+            var lcol = U(line3Tone, 0.9f);
+            if (line3Static)
+                for (var i = 0; i < line3Lines; i++) dl.AddText(font, small, new Vector2(line3X, ly + i * (small + 2f)), lcol, u.SubWrap.Lines[i]);
+            else
+                dl.AddText(font, small, new Vector2(line3X, ly), lcol, GuideClipText(line3, (max.X - GuideToastPadX - line3X) * (f / small)));
+        }
+
+        // Hover over the text block: the whole step in the toast-family panel under the card (title, the full
+        // instruction, the detail, who asked) whenever the card holds more than it shows - something clipped, a title,
+        // a detail, or an asker worth naming. Never a plain ImGui tooltip over the card's own lines.
+        if (text != null)
+        {
+            var clippedAny = u.MsgWrap.Clipped || (line3 != null && line3Static && u.SubWrap.Clipped);
+            var showWho = _guideUi.ShowWho && g.who != null;
+            if (clippedAny || (g.title != null && g.instruction != null) || g.detail != null || showWho)
+            {
+                ImGui.SetCursorScreenPos(new Vector2(textX, my));
+                ImGui.InvisibleButton("##guide_text", new Vector2(textMax, MathF.Max(msgSize, max.Y - padY - my)));
+                if (ImGui.IsItemHovered())
+                {
+                    string? foot = null;
+                    if (showWho)
+                    {
+                        var name = ag.NameOf(g.who);
+                        if (!string.Equals(u.MsgFootName, name, StringComparison.Ordinal)) { u.MsgFootName = name; u.MsgFoot = "Asked by " + name; }
+                        foot = u.MsgFoot;
+                    }
+                    GuideHover(g.title, g.instruction ?? g.title, g.instruction != null ? g.detail : null, foot, look.Tone);
+                }
+            }
         }
 
         ImGui.SetCursorScreenPos(p);
         ImGui.Dummy(new Vector2(GuideWidth, h + GuideEdge * 2));
     }
 
-    /// <summary>A tooltip at full opacity, whatever the card's eased alpha is (the card may be ghosted; its tooltip never is).</summary>
-    private static void GuideTooltip(string text)
+    // The card grows before it clips: the message wraps to three lines (loud or calm), the third line to two.
+    private const int GuideMsgLinesMax = 3, GuideSubLinesMax = 2;
+
+    /// <summary>
+    /// A wrapped text, cached until the text, size, width or line limit changes, so the card allocates nothing per
+    /// frame: greedy at spaces (a word longer than the width is cut), the last allowed line clipped with "..".
+    /// <see cref="Clipped"/> says whether anything was lost, so the hover can offer the whole text.
+    /// </summary>
+    private sealed class GuideWrapCache
     {
-        ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 1f);
-        ImGui.SetTooltip(text);
-        ImGui.PopStyleVar();
+        private string? _src;
+        private float _size, _w;
+        private int _max;
+        public readonly string[] Lines = new string[GuideMsgLinesMax];
+        public int Count;
+        public bool Clipped;
+
+        public int Wrap(string text, float size, float maxW, int max)
+        {
+            if (ReferenceEquals(_src, text) && _size == size && _w == maxW && _max == max) return Count;
+            _src = text; _size = size; _w = maxW; _max = max;
+            var k = size / ImGui.GetFontSize();
+            var rest = text;
+            Count = 0;
+            Clipped = false;
+            while (true)
+            {
+                if (Count == max - 1 || ImGui.CalcTextSize(rest).X * k <= maxW)
+                {
+                    var last = GuideClipText(rest, maxW / k);
+                    Clipped = !ReferenceEquals(last, rest);
+                    Lines[Count++] = last;
+                    return Count;
+                }
+                // The longest prefix ending at a space that fits; without one, a hard cut.
+                var cut = -1;
+                for (var i = rest.IndexOf(' '); i > 0; i = rest.IndexOf(' ', i + 1))
+                {
+                    if (ImGui.CalcTextSize(rest[..i]).X * k > maxW) break;
+                    cut = i;
+                }
+                if (cut <= 0)
+                {
+                    int lo = 1, hi = rest.Length - 1;
+                    while (lo < hi) { var mid = (lo + hi + 1) / 2; if (ImGui.CalcTextSize(rest[..mid]).X * k <= maxW) lo = mid; else hi = mid - 1; }
+                    cut = lo;
+                }
+                Lines[Count++] = rest[..cut].TrimEnd();
+                rest = rest[cut..].TrimStart();
+                if (rest.Length == 0) return Count;
+            }
+        }
     }
+
+    // ── Hover panel ──────────────────────────────────────────────────
+
+    /// <summary>A one-line hover in the toast family (pills, the x, the restart card's buttons): no title, the neutral tone.</summary>
+    private void GuideTooltip(string text) => GuideHover(null, text, null, null, ToneNeutral);
+
+    /// <summary>
+    /// The guide's hover, in the toast family instead of ImGui's grey box: an ink panel the card's width at most, a
+    /// hairline, the tone's stripe on the left, an optional caps title (tracked, faux bold) and the body wrapped at
+    /// 0.85 f (<paramref name="body"/> in the text colour, <paramref name="note"/> and <paramref name="foot"/> muted).
+    /// On the foreground draw list at full opacity, placed at the card's x under the card's whole stack (toasts or the
+    /// log sheet) so it never covers a line of the card, or above the card when there is no room below; kept on
+    /// screen. The wrapped lines are rebuilt only when a text changes (a per-frame string is compared by value).
+    /// </summary>
+    private void GuideHover(string? title, string? body, string? note, string? foot, Vector4 tone)
+    {
+        var u = _guideUi;
+        var font = ImGui.GetFont();
+        var f = ImGui.GetFontSize();
+        var small = f * 0.85f;
+        const float pad = 10f, lineGap = 2f;
+        var panelW = GuideWidth - GuideEdge * 2;
+        var textW = panelW - GuideToastStripe - pad * 2;
+        if (!GuideSame(u.HoverTitleSrc, title) || !GuideSame(u.HoverBodySrc, body) || !GuideSame(u.HoverNoteSrc, note) || !GuideSame(u.HoverFootSrc, foot) || u.HoverTextW != textW)
+        {
+            u.HoverTitleSrc = title; u.HoverBodySrc = body; u.HoverNoteSrc = note; u.HoverFootSrc = foot; u.HoverTextW = textW;
+            u.HoverTitleCaps = title == null ? null : GuideCaps(title);
+            u.HoverLines.Clear();
+            u.HoverKinds.Clear();
+            GuideHoverAdd(body, 0, textW * (f / small));
+            GuideHoverAdd(note, 1, textW * (f / small));
+            GuideHoverAdd(foot, 2, textW * (f / small));
+        }
+        if (u.HoverLines.Count == 0 && u.HoverTitleCaps == null) return;
+
+        // Size: as wide as the longest line needs, up to the card's width.
+        var need = 0f;
+        for (var i = 0; i < u.HoverLines.Count; i++) need = MathF.Max(need, ImGui.CalcTextSize(u.HoverLines[i]).X * (small / f));
+        var titleH = 0f;
+        if (u.HoverTitleCaps != null) { need = MathF.Max(need, GuideTrackedWidth(font, f, u.HoverTitleCaps, GuideToastTitleTrack)); titleH = f + (u.HoverLines.Count > 0 ? GuideToastLineGap : 0f); }
+        var w = MathF.Min(panelW, GuideToastStripe + pad * 2 + need);
+        var h = pad * 2 + titleH + u.HoverLines.Count * small + Math.Max(0, u.HoverLines.Count - 1) * lineGap;
+        var disp = ImGui.GetIO().DisplaySize;
+        var min = new Vector2(u.HoverX, u.HoverBelowY + 6f);
+        if (min.Y + h > disp.Y - GuideEdge) min.Y = u.HoverAboveY - 6f - h;
+        min.X = Math.Clamp(min.X, GuideEdge, MathF.Max(GuideEdge, disp.X - GuideEdge - w));
+        min.Y = MathF.Max(GuideEdge, min.Y);
+        var max = min + new Vector2(w, h);
+
+        var dl = ImGui.GetForegroundDrawList();
+        dl.AddRectFilled(min, max, U(GuideToastInk, 0.96f), 0f);
+        dl.AddRect(min, max, U(GuideToastLine), 0f);
+        dl.AddRectFilled(min, new Vector2(min.X + GuideToastStripe, max.Y), U(tone), 0f);
+        var x = min.X + GuideToastStripe + pad;
+        var y = min.Y + pad;
+        if (u.HoverTitleCaps != null)
+        {
+            var t = GuideClipTracked(u.HoverTitleCaps, font, f, GuideToastTitleTrack, w - GuideToastStripe - pad * 2);
+            var tcol = U(GuideToastText);
+            GuideTrackedText(dl, font, f, new Vector2(x, y), tcol, t, GuideToastTitleTrack);
+            GuideTrackedText(dl, font, f, new Vector2(x + 0.6f, y), tcol, t, GuideToastTitleTrack);
+            y += titleH;
+        }
+        for (var i = 0; i < u.HoverLines.Count; i++)
+        {
+            var col = u.HoverKinds[i] == 0 ? U(GuideToastText, 0.95f) : U(GuideToastMuted, u.HoverKinds[i] == 1 ? 1f : 0.85f);
+            dl.AddText(font, small, new Vector2(x, y), col, u.HoverLines[i]);
+            y += small + lineGap;
+        }
+    }
+
+    /// <summary>Wrap one part of a hover (paragraphs split at '\n') into the hover's line list, tagged with its kind.</summary>
+    private void GuideHoverAdd(string? s, byte kind, float maxW)
+    {
+        if (string.IsNullOrEmpty(s)) return;
+        var u = _guideUi;
+        foreach (var para in s.Split('\n'))
+            foreach (var line in GuideWrapLines(para, maxW)) { u.HoverLines.Add(line); u.HoverKinds.Add(kind); }
+    }
+
+    /// <summary>Same text: the same instance (the usual case: literals and cached strings), else equal by value (a per-frame string).</summary>
+    private static bool GuideSame(string? a, string? b) => ReferenceEquals(a, b) || string.Equals(a, b, StringComparison.Ordinal);
 
     /// <summary>
     /// The card's title-row pills: Primary = the one thing to press (accent fill, a check, ink text, faux bold),
@@ -780,7 +939,7 @@ public partial class WhatsAnAiBridge
     /// the draw list over an InvisibleButton (takes the mouse only over itself). Returns its width, so the caller lays the
     /// row out from the right edge inwards. Allocation-free: the label is a literal.
     /// </summary>
-    private static float GuideCardPill(ImDrawListPtr dl, string id, float rx, float cy, string label, GuidePill kind, string tooltip, out bool clicked)
+    private float GuideCardPill(ImDrawListPtr dl, string id, float rx, float cy, string label, GuidePill kind, string tooltip, out bool clicked)
     {
         var font = ImGui.GetFont();
         var f = ImGui.GetFontSize();
@@ -826,37 +985,6 @@ public partial class WhatsAnAiBridge
                 break;
         }
         return pillW;
-    }
-
-    /// <summary>
-    /// Wrap <paramref name="text"/> onto at most two lines of <paramref name="maxW"/> px at <paramref name="size"/>
-    /// (greedy, at spaces; the second line clipped with ".."), cached in the UI state until the text, size or width
-    /// changes, so the loud card allocates nothing per frame. Returns the line count (1 or 2).
-    /// </summary>
-    private int GuideWrap2(string text, float size, float maxW)
-    {
-        var u = _guideUi;
-        if (ReferenceEquals(u.WrapSrc, text) && u.WrapSize == size && u.WrapW == maxW) return u.Wrap2 == null ? 1 : 2;
-        u.WrapSrc = text; u.WrapSize = size; u.WrapW = maxW;
-        var k = size / ImGui.GetFontSize();
-        if (ImGui.CalcTextSize(text).X * k <= maxW) { u.Wrap1 = text; u.Wrap2 = null; return 1; }
-        // The longest prefix ending at a space that fits; without one, a hard cut.
-        var cut = -1;
-        for (var i = text.IndexOf(' '); i > 0; i = text.IndexOf(' ', i + 1))
-        {
-            if (ImGui.CalcTextSize(text[..i]).X * k > maxW) break;
-            cut = i;
-        }
-        if (cut <= 0)
-        {
-            int lo = 1, hi = text.Length - 1;
-            while (lo < hi) { var mid = (lo + hi + 1) / 2; if (ImGui.CalcTextSize(text[..mid]).X * k <= maxW) lo = mid; else hi = mid - 1; }
-            cut = lo;
-        }
-        u.Wrap1 = text[..cut].TrimEnd();
-        var rest = text[cut..].TrimStart();
-        u.Wrap2 = GuideClipText(rest, maxW / k);
-        return 2;
     }
 
     /// <summary>
@@ -912,22 +1040,24 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>The one-line meaning of the status, under the instruction. Progress states animate their dots.</summary>
-    private static string? GuideSubline(in GuideSnap g, double now)
+    private static string? GuideSubline(in GuideSnap g, double now) => g.status switch
     {
-        var dots = new string('.', 1 + (int)(now * 2.5) % 3);
-        return g.status switch
-        {
-            "detected" => "Change seen" + dots + " hold still while it settles",
-            "settling" => "Still changing" + dots + " keep holding still",
-            "captured" => g.detail ?? "Recorded.",
-            "failed" => g.detail ?? "Nothing lasting changed. Do it once more.",
-            "unseen" => g.detail ?? "You said done, but nothing I watch changed. I'll look for another way to see it.",
-            _ => null,
-        };
-    }
+        "detected" => GuideDotted(GuideDetectedLines, now),
+        "settling" => GuideDotted(GuideSettlingLines, now),
+        "captured" => g.detail ?? "Recorded.",
+        "failed" => g.detail ?? "Nothing lasting changed. Do it once more.",
+        "unseen" => g.detail ?? "You said done, but nothing I watch changed. I'll look for another way to see it.",
+        _ => null,
+    };
 
+    // The animated sublines: three cached strings per line, indexed by the dot count, so no frame allocates one.
+    private static readonly string[] GuideDetectedLines = GuideDottedSet("Change seen", " hold still while it settles");
+    private static readonly string[] GuideSettlingLines = GuideDottedSet("Still changing", " keep holding still");
+    private static readonly string[] GuideCheckingLines = GuideDottedSet("Got it - I'm looking for that change", "");
+    private static string[] GuideDottedSet(string head, string tail) => [head + "." + tail, head + ".." + tail, head + "..." + tail];
+    private static string GuideDotted(string[] set, double now) => set[(int)(now * 2.5) % 3];
     // Done pressed, no verdict yet: the agent's own voice, dots animated like the progress sublines.
-    private static string GuideCheckingLine(double now) => "Got it - I'm looking for that change" + new string('.', 1 + (int)(now * 2.5) % 3);
+    private static string GuideCheckingLine(double now) => GuideDotted(GuideCheckingLines, now);
     // Waiting for a while with nothing seen: the agent says so and points at the way to answer. A literal: nothing allocates.
     private const string GuideUnseenLine = "I can't see that change yet - if you already did it, press Done";
 
@@ -1374,6 +1504,7 @@ public partial class WhatsAnAiBridge
 
         ImGui.SetNextWindowPos(new Vector2(anchor.X + GuideEdge, anchor.Y + GuideEdge), ImGuiCond.Always);
         ImGui.SetNextWindowSize(new Vector2(w, h), ImGuiCond.Always);
+        u.HoverBelowY = MathF.Max(u.HoverBelowY, anchor.Y + GuideEdge + h);   // hover panels go under the sheet, not over it
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
         ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 6f);
@@ -1605,7 +1736,7 @@ public partial class WhatsAnAiBridge
         ImGui.InvisibleButton("##queue_watch", new Vector2(innerW, f + 2));
         var watchHov = ImGui.IsItemHovered();
         if (ImGui.IsItemClicked()) _guideUi.QueueWatchOpen = !watchOpen;
-        if (watchHov) ImGui.SetTooltip(watchOpen ? "Hide the exact watch specs" : "Show the exact watch specs");
+        if (watchHov) GuideTooltip(watchOpen ? "Hide the exact watch specs" : "Show the exact watch specs");
         var wc = U(watchHov ? th.Text : th.TextDim);
         var ty = y + f * 0.5f;
         if (watchOpen) dl.AddTriangleFilled(new Vector2(bx, ty - 2), new Vector2(bx + 7, ty - 2), new Vector2(bx + 3.5f, ty + 2.5f), wc);
@@ -1663,9 +1794,9 @@ public partial class WhatsAnAiBridge
         ImGui.SetCursorScreenPos(min);
         ImGui.InvisibleButton("##queue_strip", new Vector2(w, h));
         if (ImGui.IsItemHovered())
-            ImGui.SetTooltip(q.NextAuto
-                ? $"Then: {next.Instruction}\nStarts by itself once the current step is captured - no Start needed. Wait for DO THIS NOW."
-                : $"Queued next: {next.Instruction}\nFinish or dismiss the current step first; this card then offers Start.");
+            GuideHover(q.NextAuto ? "Then" : "Queued next", next.Instruction,
+                q.NextAuto ? "Starts by itself once the current step is captured - no Start needed. Wait for DO THIS NOW."
+                           : "Finish or dismiss the current step first; this card then offers Start.", null, ToneNeutral);
 
         var hy = min.Y + h * 0.5f;
         var x = min.X + pad;
@@ -1691,7 +1822,7 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>A pill button drawn on the draw list over an InvisibleButton (takes the mouse only over itself). Returns its width.</summary>
-    private static float QueuePillButton(ImDrawListPtr dl, string id, Vector2 pos, float h, string text, bool primary, PanelTheme th,
+    private float QueuePillButton(ImDrawListPtr dl, string id, Vector2 pos, float h, string text, bool primary, PanelTheme th,
         out bool clicked, string tooltip)
     {
         var f = ImGui.GetFontSize();
@@ -1701,7 +1832,7 @@ public partial class WhatsAnAiBridge
         ImGui.InvisibleButton(id, new Vector2(w, h));
         var hov = ImGui.IsItemHovered();
         clicked = ImGui.IsItemClicked();
-        if (hov) ImGui.SetTooltip(tooltip);
+        if (hov) GuideTooltip(tooltip);
         var max = pos + new Vector2(w, h);
         var cy = pos.Y + h * 0.5f;
         if (primary)

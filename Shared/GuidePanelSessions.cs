@@ -154,7 +154,7 @@ public partial class WhatsAnAiBridge
         {
             u.SessionsAgents = ag;
             var sb = new System.Text.StringBuilder();
-            var tip = new System.Text.StringBuilder("Who is asking you for something");
+            var tip = new System.Text.StringBuilder();
             foreach (var x1 in ag.Active)
             {
                 if (x1.Asks.Length == 0) continue;
@@ -162,7 +162,8 @@ public partial class WhatsAnAiBridge
                 sb.Append(x1.Name);
                 for (var i = 0; i < x1.Asks.Length; i++)
                 {
-                    tip.Append('\n').Append(x1.Name).Append(": ").Append(AskWords(x1.Asks[i]));
+                    if (tip.Length > 0) tip.Append('\n');
+                    tip.Append(x1.Name).Append(": ").Append(AskWords(x1.Asks[i]));
                     if (i == 0 && x1.Doing.Length > 0) tip.Append(" - also ").Append(string.Join(", ", x1.Doing));
                 }
             }
@@ -172,7 +173,8 @@ public partial class WhatsAnAiBridge
 
         ImGui.SetCursorScreenPos(min);
         ImGui.InvisibleButton("##sessions_strip", new Vector2(w, h));
-        if (ImGui.IsItemHovered() && u.SessionsTip != null) GuideTooltip(u.SessionsTip);
+        // The hover, in the toast family under the card's stack: one line per ask, "Name: what it asks".
+        if (ImGui.IsItemHovered() && u.SessionsTip != null) GuideHover("Who is asking you for something", u.SessionsTip, null, null, ToneNeutral);
 
         var hy = min.Y + h * 0.5f;
         var x = min.X + pad;
