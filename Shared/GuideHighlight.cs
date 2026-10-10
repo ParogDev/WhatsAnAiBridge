@@ -21,6 +21,11 @@ namespace WhatsAnAiBridge;
 /// No / Not sure controls next to it. The click records a verdict {id, key, ask, label, answer, at, rect, locator,
 /// highlightTitle}, kept in memory, appended to <BridgeDirectory>\verdicts\verdicts.jsonl and, while observing, put
 /// on the observer's agent lane (method user.verdict). The target then stops asking.
+/// Layers: every session draws in its own layer (HighlightState per owner: the session id, or "flow" / "queue" for what
+/// the HUD drives itself, or "anon" for a connection that never said hello). A guide.highlight replaces only the
+/// caller's own targets and clear=true clears only them (clear + force clears every layer), so another session's call
+/// never removes a question it asked. The overlay draws every layer together; each keeps its own title, sequence and
+/// current step. Reads report the caller's layer at the top level plus `layers`, the combined view.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
@@ -69,10 +74,18 @@ public partial class WhatsAnAiBridge
         [JsonProperty("highlightTitle", NullValueHandling = NullValueHandling.Ignore)] public string? HighlightTitle;
         [JsonProperty("highlightRev")] public int HighlightRev;
         [JsonProperty("target")] public int Target;
+        [JsonProperty("layer", NullValueHandling = NullValueHandling.Ignore)] public string? Layer;     // the layer's owner key
+        [JsonProperty("session", NullValueHandling = NullValueHandling.Ignore)] public string? Session; // the asking session's id
+        [JsonProperty("who", NullValueHandling = NullValueHandling.Ignore)] public string? Who;         // its label
     }
+
+    /// <summary>One layer as the overlay draws it this frame (a consistent copy).</summary>
+    internal sealed record HighlightLayerView(string Owner, int Slot, string? Who, List<HighlightBox> Boxes, string? Title, int? Current, DateTime Since, int Rev);
 
     internal sealed class HighlightState
     {
+        public string Owner = "";           // layer key: session id | flow | queue | anon
+        public int Slot;                    // small stable number for the overlay's window ids
         public List<HighlightTarget> Targets = new();
         public string? Title;
         public int? Current;              // order of the current step (sequences)
@@ -83,18 +96,40 @@ public partial class WhatsAnAiBridge
         public List<int> Missing = new();  // target indexes that resolved to nothing
         public bool Auto = true;            // sequences follow the user: a later step appearing, a met condition or the current target leaving moves on
         public Dictionary<int, bool> WasFound = new();   // order -> found at the last resolution
-        public string? Session, Who;        // the session that set it (Sessions.cs): another session can't replace an unanswered question
+        public string? Session, Who;        // the session that set it (Sessions.cs), or the one a flow / queued step belongs to
+        public int Pending => Targets.Count(t => t.Ask != null && t.Answer == null);
     }
 
+    private const string HlAnon = "anon", HlFlow = "flow", HlQueue = "queue";
     private readonly object _hlLock = new();
-    private readonly HighlightState _hl = new();
+    private readonly List<HighlightState> _hlLayers = new();   // drawing order: oldest layer first
+    private int _hlRevSeq;                                        // revs are unique across layers (verdict ids hl<rev>.<index>)
     private DateTime _hlLastResolve = DateTime.MinValue;
+
+    private HighlightState? HlLayerLocked(string owner)
+    {
+        foreach (var l in _hlLayers) if (l.Owner == owner) return l;
+        return null;
+    }
+
+    private HighlightState HlLayerOrNewLocked(string owner)
+    {
+        if (HlLayerLocked(owner) is { } l) return l;
+        var slot = 0;
+        while (_hlLayers.Any(x => x.Slot == slot)) slot++;
+        l = new HighlightState { Owner = owner, Slot = slot };
+        _hlLayers.Add(l);
+        return l;
+    }
+
+    /// <summary>The layer key of the request being served: its session, else anon (a connection that never said hello).</summary>
+    private string HlOwnerOf(SessionInfo? me) => me?.Id ?? HlAnon;
 
     private string? ProcessHighlightMethod(string method, JToken? p) => method switch
     {
         "guide.highlight" => SafeMemory(() => HighlightSet(p)),
-        "guide.highlight_advance" => SafeMemory(HighlightAdvance),
-        "guide.highlight_state" => SafeMemory(HighlightStateJson),
+        "guide.highlight_advance" => SafeMemory(() => HighlightAdvance(HlOwnerOf(CurrentSession()))),
+        "guide.highlight_state" => SafeMemory(() => HighlightStateJson(HlOwnerOf(CurrentSession()))),
         "guide.verdicts" => SafeMemory(() => VerdictsJson(p)),
         _ => null,
     };
@@ -134,26 +169,27 @@ public partial class WhatsAnAiBridge
     /// Main thread (the overlay's Yes / No / Not sure click): record the user's answer to an asked target. Ignored when
     /// the target does not ask or was answered already. The highlight rev does not change (the overlay would re-enter).
     /// </summary>
-    internal void HighlightAnswer(int targetIndex, string answer)
+    internal void HighlightAnswer(string owner, int targetIndex, string answer)
     {
         if (answer is not ("yes" or "no" or "skip")) return;
         HighlightVerdict v;
         lock (_hlLock)
         {
-            if (targetIndex < 0 || targetIndex >= _hl.Targets.Count) return;
-            var t = _hl.Targets[targetIndex];
+            if (HlLayerLocked(owner) is not { } hl || targetIndex < 0 || targetIndex >= hl.Targets.Count) return;
+            var t = hl.Targets[targetIndex];
             if (t.Ask == null || t.Answer != null) return;
             t.Answer = answer;
             t.AnsweredAt = DateTime.UtcNow;
-            for (var i = 0; i < _hl.Boxes.Count; i++)
-                if (_hl.Boxes[i].TargetIndex == targetIndex) _hl.Boxes[i] = _hl.Boxes[i] with { Answer = answer };
-            var box = _hl.Boxes.FirstOrDefault(b => b.TargetIndex == targetIndex);
+            for (var i = 0; i < hl.Boxes.Count; i++)
+                if (hl.Boxes[i].TargetIndex == targetIndex) hl.Boxes[i] = hl.Boxes[i] with { Answer = answer };
+            var box = hl.Boxes.FirstOrDefault(b => b.TargetIndex == targetIndex);
             v = new HighlightVerdict
             {
-                Id = t.Key ?? $"hl{_hl.Rev}.{targetIndex}", Key = t.Key, Ask = t.Ask, Label = t.Label, Answer = answer, At = t.AnsweredAt.Value,
+                Id = t.Key ?? $"hl{hl.Rev}.{targetIndex}", Key = t.Key, Ask = t.Ask, Label = t.Label, Answer = answer, At = t.AnsweredAt.Value,
                 Rect = box.W > 0 ? [box.X, box.Y, box.W, box.H] : null,
                 Item = t.Item, Path = t.Path, Text = t.Text, Panel = t.Panel, Child = t.Child,
-                HighlightTitle = _hl.Title, HighlightRev = _hl.Rev, Target = targetIndex,
+                HighlightTitle = hl.Title, HighlightRev = hl.Rev, Target = targetIndex,
+                Layer = hl.Owner, Session = hl.Session, Who = hl.Who,
             };
         }
         string line;
@@ -175,9 +211,15 @@ public partial class WhatsAnAiBridge
         try { if (Obs().Enabled) ObsEmit(new JObject { ["kind"] = "agent", ["method"] = "user.verdict", ["params"] = JObject.FromObject(v) }); } catch { }
     }
 
-    /// <summary>guide.verdicts {since?, limit?}: the answers after since (oldest first), the newest seq, and what is still being asked.</summary>
+    /// <summary>
+    /// guide.verdicts {since?, limit?}: the answers after since (oldest first, every layer's, each with its layer and who),
+    /// the newest seq, what the caller's layers still ask (its own, plus a flow or queued step it started), and `layers`:
+    /// every layer with its pending count (the combined view).
+    /// </summary>
     private JObject VerdictsJson(JToken? p)
     {
+        var me = CurrentSession();
+        var owner = HlOwnerOf(me);
         var since = p?["since"]?.Value<long>() ?? 0;
         var limit = Math.Clamp(p?["limit"]?.Value<int>() ?? 100, 1, VerdictsKeep);
         JArray list; long seq;
@@ -187,154 +229,252 @@ public partial class WhatsAnAiBridge
             seq = _verdictSeq;
             list = new JArray(_verdicts.Where(v => v.Seq > since).Take(limit).Select(JObject.FromObject));
         }
-        JArray asked;
-        int pending, rev;
+        var asked = new JArray();
+        int pending = 0, pendingAll = 0, rev = 0;
+        JArray layers;
         lock (_hlLock)
         {
-            rev = _hl.Rev;
-            asked = new JArray(_hl.Targets.Select((t, i) => (t, i)).Where(x => x.t.Ask != null).Select(x => new JObject
+            foreach (var l in _hlLayers)
             {
-                ["index"] = x.i, ["id"] = x.t.Key ?? $"hl{_hl.Rev}.{x.i}", ["key"] = x.t.Key, ["ask"] = x.t.Ask, ["label"] = x.t.Label,
-                ["answer"] = x.t.Answer, ["onScreen"] = _hl.Boxes.Any(b => b.TargetIndex == x.i),
-            }));
-            pending = _hl.Targets.Count(t => t.Ask != null && t.Answer == null);
+                pendingAll += l.Pending;
+                if (!HlMine(l, owner, me?.Label)) continue;
+                if (l.Owner == owner) rev = l.Rev;
+                pending += l.Pending;
+                for (var i = 0; i < l.Targets.Count; i++)
+                {
+                    var t = l.Targets[i];
+                    if (t.Ask == null) continue;
+                    asked.Add(new JObject
+                    {
+                        ["index"] = i, ["id"] = t.Key ?? $"hl{l.Rev}.{i}", ["key"] = t.Key, ["ask"] = t.Ask, ["label"] = t.Label,
+                        ["answer"] = t.Answer, ["onScreen"] = l.Boxes.Any(b => b.TargetIndex == i), ["layer"] = l.Owner, ["highlightRev"] = l.Rev,
+                    });
+                }
+            }
+            layers = HlLayersJsonLocked(owner, me?.Label);
         }
-        return new JObject { ["ok"] = true, ["seq"] = seq, ["highlightRev"] = rev, ["verdicts"] = list, ["asked"] = asked, ["pending"] = pending, ["file"] = VerdictsFile };
+        return new JObject
+        {
+            ["ok"] = true, ["seq"] = seq, ["highlightRev"] = rev, ["verdicts"] = list, ["asked"] = asked, ["pending"] = pending,
+            ["pendingAll"] = pendingAll, ["layer"] = owner, ["layers"] = layers, ["file"] = VerdictsFile,
+        };
     }
 
+    /// <summary>A layer counts as the caller's: its own, or a flow / queued step the same session started (matched by label).</summary>
+    private static bool HlMine(HighlightState l, string owner, string? label) =>
+        l.Owner == owner || (label != null && l.Owner is HlFlow or HlQueue && l.Who == label);
+
+    /// <summary>The combined view: every layer, oldest first, with whose it is and what it still asks.</summary>
+    private JArray HlLayersJsonLocked(string owner, string? label) => new(_hlLayers.Select(l => new JObject
+    {
+        ["layer"] = l.Owner, ["session"] = l.Session, ["who"] = l.Who, ["mine"] = HlMine(l, owner, label),
+        ["rev"] = l.Rev, ["title"] = l.Title, ["current"] = l.Current, ["targets"] = l.Targets.Count,
+        ["found"] = l.Boxes.Count, ["asked"] = l.Targets.Count(t => t.Ask != null), ["pending"] = l.Pending,
+        ["until"] = l.Until?.ToString("O"),
+    }));
+
+    /// <summary>guide.highlight from a request: the caller's own layer (its session, else anon).</summary>
     internal JObject HighlightSet(JToken? p)
     {
-        // The highlight is one shared slot. A question another session asked the user (ask, unanswered) is not silently
-        // lost to a later call: that session is refused unless it passes force. The HUD itself (no session: the user
-        // pressing Start on a queued step, a flow ending) and the asking session may always replace it.
         var me = CurrentSession();   // before the lock (Sessions.cs lock order)
+        return HighlightSetLayer(HlOwnerOf(me), me?.Id, me?.Label, p);
+    }
+
+    /// <summary>
+    /// Replace or clear one layer. Other layers are never touched, so a question another session asked survives any call;
+    /// only clear + force clears every layer (the user asked for a clean screen). The HUD's own highlights use the
+    /// layers "flow" (a running guided flow) and "queue" (a queued step being recorded), owned by whoever started them.
+    /// </summary>
+    internal JObject HighlightSetLayer(string owner, string? session, string? who, JToken? p)
+    {
+        if (p?["clear"]?.Value<bool>() == true || p?["targets"] is not JArray arr)
+        {
+            lock (_hlLock)
+            {
+                if (p?["clear"]?.Value<bool>() == true && p["force"]?.Value<bool>() == true)
+                {
+                    var names = new JArray(_hlLayers.Select(l => l.Who ?? l.Owner));
+                    var lost = _hlLayers.Sum(l => l.Pending);
+                    _hlLayers.Clear();
+                    return new JObject
+                    {
+                        ["ok"] = true, ["cleared"] = true, ["all"] = true, ["layers"] = names,
+                        ["note"] = lost > 0 ? $"{lost} unanswered question(s) were removed with them." : null,
+                    };
+                }
+                if (HlLayerLocked(owner) is { } mine) _hlLayers.Remove(mine);
+                var others = _hlLayers.Where(l => l.Owner != owner).ToList();
+                return new JObject
+                {
+                    ["ok"] = true, ["cleared"] = true, ["layer"] = owner,
+                    ["note"] = others.Count > 0
+                        ? $"Cleared yours; {others.Count} other layer(s) stay on screen ({string.Join(", ", others.Select(l => (l.Who ?? l.Owner) + (l.Pending > 0 ? $": {l.Pending} question(s) unanswered" : "")))}). clear + force clears them too."
+                        : null,
+                };
+            }
+        }
+        var targets = new List<HighlightTarget>();
+        var n = 0;
+        foreach (var t in arr.OfType<JObject>())
+        {
+            if (++n > 40) break;
+            if (ParseTarget(t) is not { } ht)
+                return Err("bad_target", $"Target {n - 1}: needs item (name), text (element label), path (UI element), panel (+ child) or rect [x,y,w,h].");
+            targets.Add(ht);
+        }
         lock (_hlLock)
         {
-            var pending = _hl.Targets.Count(t => t.Ask != null && t.Answer == null);
-            if (pending > 0 && me != null && _hl.Session != null && _hl.Session != me.Id && p?["force"]?.Value<bool>() != true)
-                return Err("asked_by_other", $"{_hl.Who ?? "another agent"} is still waiting for the user's answer to {pending} question(s) on the current highlight " +
-                                             $"(e.g. '{_hl.Targets.First(t => t.Ask != null && t.Answer == null).Ask}'). Wait for it (await_verdicts), or pass force=true to replace it.");
-            if (p?["clear"]?.Value<bool>() == true || p?["targets"] is not JArray arr)
-            {
-                _hl.Targets.Clear(); _hl.Boxes.Clear(); _hl.Missing.Clear(); _hl.Title = null; _hl.Current = null; _hl.Until = null;
-                _hl.Session = null; _hl.Who = null;
-                _hl.Rev++;
-                return new JObject { ["ok"] = true, ["cleared"] = true };
-            }
-            _hl.Session = me?.Id; _hl.Who = me?.Label;
-            var targets = new List<HighlightTarget>();
-            foreach (var t in arr.OfType<JObject>().Take(40))
-            {
-                if (ParseTarget(t) is not { } ht)
-                    return Err("bad_target", "Each target needs item (name), text (element label), path (UI element), panel (+ child) or rect [x,y,w,h].");
-                targets.Add(ht);
-            }
-            _hl.Targets = targets;
-            _hl.Auto = p?["auto"]?.Value<bool>() != false;
-            _hl.WasFound.Clear();
-            _hl.Title = Clip(p?["title"]?.ToString(), 80);
+            var hl = HlLayerOrNewLocked(owner);
+            hl.Session = session; hl.Who = who;
+            hl.Targets = targets;
+            hl.Boxes = new(); hl.Missing = new();
+            hl.Auto = p?["auto"]?.Value<bool>() != false;
+            hl.WasFound.Clear();
+            hl.Title = Clip(p?["title"]?.ToString(), 80);
             var orders = targets.Where(t => t.Order != null).Select(t => t.Order!.Value).OrderBy(o => o).ToList();
-            _hl.Current = p?["current"]?.Type == JTokenType.Integer ? p["current"]!.Value<int>() : orders.Count > 0 ? orders[0] : null;
-            _hl.Since = DateTime.UtcNow;
+            hl.Current = p?["current"]?.Type == JTokenType.Integer ? p["current"]!.Value<int>() : orders.Count > 0 ? orders[0] : null;
+            hl.Since = DateTime.UtcNow;
             var dur = p?["durationSec"]?.Value<double>();
-            _hl.Until = dur is > 0 ? DateTime.UtcNow.AddSeconds(Math.Min(dur.Value, 3600)) : null;
-            _hl.Rev++;
+            hl.Until = dur is > 0 ? DateTime.UtcNow.AddSeconds(Math.Min(dur.Value, 3600)) : null;
+            hl.Rev = ++_hlRevSeq;
             _hlLastResolve = DateTime.MinValue;
         }
         ResolveHighlights(force: true);
-        return HighlightStateJson();
+        return HighlightStateJson(owner);
     }
 
-    private JObject HighlightAdvance()
+    private JObject HighlightAdvance(string owner)
     {
         lock (_hlLock)
         {
-            var orders = _hl.Targets.Where(t => t.Order != null).Select(t => t.Order!.Value).Distinct().OrderBy(o => o).ToList();
-            if (orders.Count == 0) return Err("no_sequence", "The highlight has no ordered targets.");
-            var next = orders.FirstOrDefault(o => o > (_hl.Current ?? int.MinValue), int.MaxValue);
-            _hl.Current = next == int.MaxValue ? null : next;   // past the last step: all done
-            _hl.Since = DateTime.UtcNow;
-            _hl.Rev++;
+            if (HlLayerLocked(owner) is not { } hl)
+                return Err("no_highlight", _hlLayers.Count > 0
+                    ? $"You have no highlight; the {_hlLayers.Count} on screen belong to {string.Join(", ", _hlLayers.Select(l => l.Who ?? l.Owner))} (advance moves only your own)."
+                    : "No highlight is set.");
+            var orders = hl.Targets.Where(t => t.Order != null).Select(t => t.Order!.Value).Distinct().OrderBy(o => o).ToList();
+            if (orders.Count == 0) return Err("no_sequence", "Your highlight has no ordered targets.");
+            var next = orders.FirstOrDefault(o => o > (hl.Current ?? int.MinValue), int.MaxValue);
+            hl.Current = next == int.MaxValue ? null : next;   // past the last step: all done
+            hl.Since = DateTime.UtcNow;
+            hl.Rev = ++_hlRevSeq;
         }
-        return HighlightStateJson();
+        return HighlightStateJson(owner);
     }
 
-    private JObject HighlightStateJson()
+    /// <summary>The caller's layer at the top level (as before layers existed), plus `layers`: every layer on screen.</summary>
+    private JObject HighlightStateJson(string owner)
     {
+        var label = CurrentWho();   // before the lock (Sessions.cs lock order)
         lock (_hlLock)
         {
             long verdictSeq;
             lock (_verdictLock) verdictSeq = _verdictSeq;
+            var hl = HlLayerLocked(owner);
+            var boxes = hl?.Boxes ?? HlNoBoxes;
+            var others = _hlLayers.Count(l => l.Owner != owner);
             return new JObject
             {
-                ["ok"] = true, ["rev"] = _hl.Rev, ["title"] = _hl.Title, ["current"] = _hl.Current, ["who"] = _hl.Who,
-                ["until"] = _hl.Until?.ToString("O"),
+                ["ok"] = true, ["layer"] = owner, ["rev"] = hl?.Rev ?? 0, ["title"] = hl?.Title, ["current"] = hl?.Current, ["who"] = hl?.Who,
+                ["until"] = hl?.Until?.ToString("O"),
                 ["verdictSeq"] = verdictSeq,   // await_verdicts since=: answers after this call
-                ["targets"] = new JArray(_hl.Targets.Select((t, i) => new JObject
+                ["targets"] = new JArray((hl?.Targets ?? []).Select((t, i) => new JObject
                 {
                     ["index"] = i, ["item"] = t.Item, ["path"] = t.Path, ["text"] = t.Text, ["within"] = t.Within, ["action"] = t.Action, ["panel"] = t.Panel, ["child"] = t.Child == null ? null : new JArray(t.Child), ["rect"] = t.Rect == null ? null : new JArray(t.Rect),
                     ["label"] = t.Label, ["tier"] = t.Tier, ["order"] = t.Order,
                     ["ask"] = t.Ask, ["key"] = t.Key, ["answer"] = t.Answer, ["answeredAt"] = t.AnsweredAt?.ToString("O"),
-                    ["found"] = _hl.Boxes.Count(b => b.TargetIndex == i),
+                    ["found"] = boxes.Count(b => b.TargetIndex == i),
                 })),
-                ["boxes"] = new JArray(_hl.Boxes.Select(b => new JObject { ["target"] = b.TargetIndex, ["rect"] = new JArray(b.X, b.Y, b.W, b.H) })),
-                ["worldMapPan"] = _hl.Boxes.Any(b => b.Panned) ? _wmPanSource : null,
-                ["note"] = _hl.Missing.Count > 0 ? $"{_hl.Missing.Count} target(s) not on screen right now (panel closed, item not visible); they appear when visible." : null,
+                ["boxes"] = new JArray(boxes.Select(b => new JObject { ["target"] = b.TargetIndex, ["rect"] = new JArray(b.X, b.Y, b.W, b.H) })),
+                ["worldMapPan"] = boxes.Any(b => b.Panned) ? _wmPanSource : null,
+                ["layers"] = HlLayersJsonLocked(owner, label),
+                ["note"] = hl == null
+                    ? others > 0 ? $"You have no highlight; {others} other layer(s) are on screen (layers)." : null
+                    : hl.Missing.Count > 0 ? $"{hl.Missing.Count} target(s) not on screen right now (panel closed, item not visible); they appear when visible." : null,
             };
         }
     }
 
-    /// <summary>A consistent copy for drawing (taken once per frame, main thread). Boxes on the world map move with its pan,
-    /// read raw this frame: targets re-resolve only every 100 ms and the HUD's rects trail a drag.</summary>
-    internal (List<HighlightBox> boxes, string? title, int? current, DateTime since, int rev) HighlightSnapshot()
+    private static readonly List<HighlightLayerView> HlNoLayers = new();
+    private static readonly List<HighlightBox> HlNoBoxes = new();
+
+    /// <summary>A consistent copy of every layer with boxes, for drawing (taken once per frame, main thread; never mutate
+    /// the result). Boxes on the world map move with its pan, read raw this frame: targets re-resolve only every 100 ms
+    /// and the HUD's rects trail a drag.</summary>
+    internal List<HighlightLayerView> HighlightSnapshot()
     {
-        List<HighlightBox> boxes;
-        (string? title, int? current, DateTime since, int rev) s;
-        lock (_hlLock) { boxes = _hl.Boxes.ToList(); s = (_hl.Title, _hl.Current, _hl.Since, _hl.Rev); }
-        if (boxes.Any(b => b.Panned) && FreshPan(_wmLastPan) is { Addr: not 0 } now)
-            for (var i = 0; i < boxes.Count; i++)
-                if (boxes[i].Panned)
-                    boxes[i] = boxes[i] with { X = boxes[i].X + (now.PanX - boxes[i].PanX) * now.Sx, Y = boxes[i].Y + (now.PanY - boxes[i].PanY) * now.Sy };
-        return (boxes, s.title, s.current, s.since, s.rev);
+        List<HighlightLayerView> views;
+        lock (_hlLock)
+        {
+            if (_hlLayers.Count == 0) return HlNoLayers;
+            views = new(_hlLayers.Count);
+            foreach (var l in _hlLayers)
+                if (l.Boxes.Count > 0) views.Add(new(l.Owner, l.Slot, l.Who, l.Boxes.ToList(), l.Title, l.Current, l.Since, l.Rev));
+        }
+        foreach (var v in views)
+        {
+            var boxes = v.Boxes;
+            if (boxes.Any(b => b.Panned) && FreshPan(_wmLastPan) is { Addr: not 0 } now)
+                for (var i = 0; i < boxes.Count; i++)
+                    if (boxes[i].Panned)
+                        boxes[i] = boxes[i] with { X = boxes[i].X + (now.PanX - boxes[i].PanX) * now.Sx, Y = boxes[i].Y + (now.PanY - boxes[i].PanY) * now.Sy };
+        }
+        return views;
     }
 
-    /// <summary>Main thread, from Render: re-resolve targets to screen rects every 100 ms (they follow the UI).</summary>
+    /// <summary>Every layer's boxes in one list (no copy for a single layer; never mutate the result).</summary>
+    internal static List<HighlightBox> HighlightBoxesOf(List<HighlightLayerView> views)
+    {
+        if (views.Count == 0) return HlNoBoxes;
+        if (views.Count == 1) return views[0].Boxes;
+        var all = new List<HighlightBox>();
+        foreach (var v in views) all.AddRange(v.Boxes);
+        return all;
+    }
+
+    /// <summary>Main thread, from Render: re-resolve every layer's targets to screen rects every 100 ms (they follow the UI).</summary>
     private void ResolveHighlights(bool force = false)
     {
-        List<HighlightTarget> targets;
+        List<(HighlightState layer, int rev, List<HighlightTarget> targets)> work;
         lock (_hlLock)
         {
-            if (_hl.Until is { } u && DateTime.UtcNow > u) { _hl.Targets.Clear(); _hl.Boxes.Clear(); _hl.Until = null; _hl.Rev++; }
-            if (_hl.Targets.Count == 0) return;
-            if (!force && (DateTime.UtcNow - _hlLastResolve).TotalMilliseconds < 100) return;
-            _hlLastResolve = DateTime.UtcNow;
-            targets = _hl.Targets.ToList();
+            var utc = DateTime.UtcNow;
+            _hlLayers.RemoveAll(l => l.Until is { } u && utc > u);   // durationSec ran out
+            if (_hlLayers.Count == 0) return;
+            if (!force && (utc - _hlLastResolve).TotalMilliseconds < 100) return;
+            _hlLastResolve = utc;
+            work = new(_hlLayers.Count);
+            foreach (var l in _hlLayers) if (l.Targets.Count > 0) work.Add((l, l.Rev, l.Targets.ToList()));
         }
-        var boxes = new List<HighlightBox>();
-        var missing = new List<int>();
-        var conditionMet = new Dictionary<int, bool>();   // target index -> its 'until' holds now
-        for (int i = 0; i < targets.Count; i++)
+        foreach (var (layer, rev, targets) in work)
         {
-            var t = targets[i];
-            int before = boxes.Count;
-            try
+            var boxes = new List<HighlightBox>();
+            var missing = new List<int>();
+            var conditionMet = new Dictionary<int, bool>();   // target index -> its 'until' holds now
+            for (int i = 0; i < targets.Count; i++)
             {
-                var found = ResolveTarget(t);
-                var pan = _wmLastPan;   // the pan these boxes were placed with (HighlightSnapshot moves them by the change since)
-                foreach (var (_, x, y, w, h, panned) in found)
-                    boxes.Add(new(x, y, w, h, t.Label, t.Tier, t.Order, i, t.Action, t.Ask, t.Answer, panned, pan.PanX, pan.PanY));
-                // Checkbox state (PoE2: byte at +0x60A of the checkbox element, see finding ui.poe2.checkbox-checked).
-                if (t.UntilCond is "checked" or "unchecked" && found.FirstOrDefault(f => f.e != null).e is { } cb)
-                    conditionMet[i] = IsChecked(cb) == (t.UntilCond == "checked");
+                var t = targets[i];
+                int before = boxes.Count;
+                try
+                {
+                    var found = ResolveTarget(t);
+                    var pan = _wmLastPan;   // the pan these boxes were placed with (HighlightSnapshot moves them by the change since)
+                    foreach (var (_, x, y, w, h, panned) in found)
+                        boxes.Add(new(x, y, w, h, t.Label, t.Tier, t.Order, i, t.Action, t.Ask, t.Answer, panned, pan.PanX, pan.PanY));
+                    // Checkbox state (PoE2: byte at +0x60A of the checkbox element, see finding ui.poe2.checkbox-checked).
+                    if (t.UntilCond is "checked" or "unchecked" && found.FirstOrDefault(f => f.e != null).e is { } cb)
+                        conditionMet[i] = IsChecked(cb) == (t.UntilCond == "checked");
+                }
+                catch { }
+                if (boxes.Count == before) missing.Add(i);
             }
-            catch { }
-            if (boxes.Count == before) missing.Add(i);
-        }
-        lock (_hlLock)
-        {
-            _hl.Boxes = boxes;
-            _hl.Missing = missing;
-            if (_hl.Auto) AutoAdvanceLocked(targets, boxes, conditionMet);
+            lock (_hlLock)
+            {
+                // Replaced, advanced or cleared meanwhile: these boxes belong to targets that are gone.
+                if (layer.Rev != rev || !_hlLayers.Contains(layer)) continue;
+                layer.Boxes = boxes;
+                layer.Missing = missing;
+                if (layer.Auto) AutoAdvanceLocked(layer, targets, boxes, conditionMet);
+            }
         }
     }
 
@@ -542,34 +682,34 @@ public partial class WhatsAnAiBridge
     /// current step is done when its 'until' holds (checked / unchecked) or, for 'gone' or no condition, when its target
     /// disappears (the dialog closed after Confirm). Past the last step: all done.
     /// </summary>
-    private void AutoAdvanceLocked(List<HighlightTarget> targets, List<HighlightBox> boxes, Dictionary<int, bool> conditionMet)
+    private void AutoAdvanceLocked(HighlightState hl, List<HighlightTarget> targets, List<HighlightBox> boxes, Dictionary<int, bool> conditionMet)
     {
         var orders = targets.Where(t => t.Order != null).Select(t => t.Order!.Value).Distinct().OrderBy(o => o).ToList();
         if (orders.Count == 0) return;
         var found = orders.ToDictionary(o => o, o => boxes.Any(b => b.Order == o));
-        var first = _hl.WasFound.Count == 0;
+        var first = hl.WasFound.Count == 0;
         int? next = null;
-        if (!first && _hl.Current is { } cur)
+        if (!first && hl.Current is { } cur)
         {
             // 1. A later step appeared.
             foreach (var o in orders.Where(o => o > cur))
-                if (found[o] && !_hl.WasFound.GetValueOrDefault(o)) { next = o; break; }
+                if (found[o] && !hl.WasFound.GetValueOrDefault(o)) { next = o; break; }
             // 2. The current step's condition holds, or its target left.
             if (next == null)
             {
                 var curTargets = targets.Select((t, i) => (t, i)).Where(x => x.t.Order == cur).ToList();
                 var met = curTargets.Any(x => conditionMet.GetValueOrDefault(x.i));
-                var gone = _hl.WasFound.GetValueOrDefault(cur) && !found[cur] && curTargets.All(x => x.t.UntilCond is null or "gone");
+                var gone = hl.WasFound.GetValueOrDefault(cur) && !found[cur] && curTargets.All(x => x.t.UntilCond is null or "gone");
                 if (met || gone) next = orders.FirstOrDefault(o => o > cur, int.MinValue) is var n && n != int.MinValue ? n : -1;
             }
             if (next != null)
             {
-                _hl.Current = next == -1 ? null : next;   // -1: past the last step, all done
-                _hl.Since = DateTime.UtcNow;
-                _hl.Rev++;
+                hl.Current = next == -1 ? null : next;   // -1: past the last step, all done
+                hl.Since = DateTime.UtcNow;
+                hl.Rev = ++_hlRevSeq;
             }
         }
-        _hl.WasFound = found;
+        hl.WasFound = found;
     }
 
     /// <summary>Visible elements whose text is exactly <paramref name="text"/> (case-insensitive), in the panel containing
@@ -680,14 +820,14 @@ public partial class WhatsAnAiBridge
         }
     }
 
-    /// <summary>Drawn by GuideHighlightDraw.cs (Fable). Placeholder until then: plain frames.</summary>
-    partial void DrawHighlightsImpl(List<HighlightBox> boxes, string? title, int? current, DateTime since, int rev);
+    /// <summary>Drawn by GuideHighlightDraw.cs: every layer together, each with its own title and sequence.</summary>
+    partial void DrawHighlightsImpl(List<HighlightLayerView> layers);
 
     private void DrawHighlights()
     {
         ResolveHighlights();
-        var (boxes, title, current, since, rev) = HighlightSnapshot();
-        if (boxes.Count == 0) return;
-        DrawHighlightsImpl(boxes, title, current, since, rev);
+        var layers = HighlightSnapshot();
+        if (layers.Count == 0) return;
+        DrawHighlightsImpl(layers);
     }
 }

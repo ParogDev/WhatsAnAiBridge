@@ -61,7 +61,7 @@ public partial class WhatsAnAiBridge
         {
             bool wasRunning;
             lock (_flowLock) { wasRunning = _flow.Status == "running"; if (wasRunning) _flow.Status = "stopped"; _flow.Rev++; }
-            HighlightSet(new JObject { ["clear"] = true });
+            HighlightSetLayer(HlFlow, null, null, new JObject { ["clear"] = true });
             if (wasRunning) GuideSet(new JObject { ["clear"] = true });   // the card showed the flow: don't leave its instruction behind
             return FlowStateJson();
         }
@@ -212,9 +212,9 @@ public partial class WhatsAnAiBridge
                     ["rect"] = t.Rect == null ? null : new JArray(t.Rect),
                 };
                 foreach (var prop in target.Properties().Where(x => x.Value.Type == JTokenType.Null).ToList()) prop.Remove();
-                HighlightSet(new JObject { ["targets"] = new JArray(target), ["auto"] = false });   // no title pill: the card shows the flow
+                HighlightSetLayer(HlFlow, null, f.Who, new JObject { ["targets"] = new JArray(target), ["auto"] = false });   // no title pill: the card shows the flow
             }
-            else HighlightSet(new JObject { ["clear"] = true });
+            else HighlightSetLayer(HlFlow, null, f.Who, new JObject { ["clear"] = true });
             GuideSet(new JObject
             {
                 ["title"] = f.Title, ["instruction"] = option >= 0 ? step.Options[option].Label ?? step.Label : step.Label,
@@ -228,7 +228,7 @@ public partial class WhatsAnAiBridge
     private void FinishFlow(FlowState f, string status, string detail)
     {
         lock (_flowLock) { f.Status = status; f.Current = -1; f.Option = -1; f.Rev++; }
-        HighlightSet(new JObject { ["clear"] = true });
+        HighlightSetLayer(HlFlow, null, f.Who, new JObject { ["clear"] = true });
         GuideSet(new JObject { ["status"] = status == "done" ? "done" : "failed", ["detail"] = detail, ["step"] = null, ["steps"] = null });
         GuideLog(new JObject { ["text"] = $"{f.Title ?? "Guide"}: {detail}", ["kind"] = status == "done" ? "result" : "warn" });
     }

@@ -191,7 +191,7 @@ public partial class WhatsAnAiBridge
         var defaultPos = new Vector2(MathF.Round((io.DisplaySize.X - GuideWidth) * 0.5f), GuideTopY);
         if (float.IsNaN(u.WinPos.X)) u.WinPos = defaultPos;
         if (float.IsNaN(u.Home.X)) u.Home = u.WinPos;
-        var boxes = HighlightSnapshot().boxes;
+        var boxes = HighlightBoxesOf(HighlightSnapshot());
         var cardH = hide ? 0f : u.WinH;
         var hovered = cardH > 0 && io.MousePos.X >= u.WinPos.X && io.MousePos.X < u.WinPos.X + GuideWidth
                       && io.MousePos.Y >= u.WinPos.Y && io.MousePos.Y < u.WinPos.Y + cardH;
