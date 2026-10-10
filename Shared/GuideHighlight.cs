@@ -346,7 +346,7 @@ public partial class WhatsAnAiBridge
         var step = session != null ? GuideStepNow() : default;
         var dur = p?["durationSec"]?.Value<double>();
         var now = DateTime.UtcNow;
-        if (dur is not > 0)
+        if (dur is not > 0 && owner is not (HlFlow or HlQueue))   // the HUD's own layers clear themselves with their step
             foreach (var t in targets)
                 if (t.Ask != null || t.Tier == "context") t.EndsAt = now.AddSeconds(HlDefaultLifeSec);
         lock (_hlLock)
@@ -410,7 +410,7 @@ public partial class WhatsAnAiBridge
                     ["index"] = i, ["item"] = t.Item, ["path"] = t.Path, ["text"] = t.Text, ["within"] = t.Within, ["action"] = t.Action, ["panel"] = t.Panel, ["child"] = t.Child == null ? null : new JArray(t.Child), ["rect"] = t.Rect == null ? null : new JArray(t.Rect),
                     ["label"] = t.Label, ["tier"] = t.Tier, ["order"] = t.Order,
                     ["ask"] = t.Ask, ["key"] = t.Key, ["answer"] = t.Answer, ["answeredAt"] = t.AnsweredAt?.ToString("O"),
-                    ["endsAt"] = t.EndsAt?.ToString("O"), ["expired"] = t.Expired,
+                    ["endsAt"] = t.Answer == null || t.Tier == "context" ? t.EndsAt?.ToString("O") : null, ["expired"] = t.Expired,
                     ["found"] = boxes.Count(b => b.TargetIndex == i),
                 })),
                 ["boxes"] = new JArray(boxes.Select(b =>
