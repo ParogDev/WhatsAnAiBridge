@@ -58,4 +58,11 @@ public class WhatsAnAiBridgeSettings : ISettings
     // Toggles the agent log sheet under the guide card (GuidePanel.cs). None by default: the log then only shows as
     // toasts. HotkeyNodeV2 exists on both HUDs (Shared\Nodes via the per-game global usings) and supports modifiers.
     public HotkeyNodeV2 AgentLogHotkey { get; set; } = new();
+    // Toast verbosity, per kind (GuidePanel.cs ToastShown). Lines of a kind that is off still go to the log sheet and
+    // guide.state; only the toast is suppressed. Agent lines (every agent tool call) are off by default: noise while playing.
+    public ToggleNode ToastAgent { get; set; } = new(false);
+    public ToggleNode ToastStep { get; set; } = new(true);
+    public ToggleNode ToastResult { get; set; } = new(true);
+    public ToggleNode ToastWarn { get; set; } = new(true);
+    public ToggleNode ToastError { get; set; } = new(true);
 }

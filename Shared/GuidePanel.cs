@@ -3,10 +3,11 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using ImGuiNET;
+using Newtonsoft.Json.Linq;
 
 namespace WhatsAnAiBridge;
 
-using GuideSnap = (string? title, string? instruction, int? step, int? steps, string status, string? detail,
+using GuideSnap =(string? title, string? instruction, int? step, int? steps, string status, string? detail,
     DateTime updatedAt, DateTime? instructionSince, int rev, WhatsAnAiBridge.GuideLogEntry[] log);
 using FlowSnap = (string? title, (string label, string state)[] steps, string? showing, string status, int rev);
 
@@ -84,6 +85,11 @@ public partial class WhatsAnAiBridge
         public double FlowDoneAt = -1e9;
         public bool FlowUndo;              // the last done-count change was a step coming back
         public double FlowEndedAt = -1e9;  // ImGui time the flow left "running"
+        // Per-frame allocation guards for the card: the loud instruction's two-line wrap and the title's caps form,
+        // rebuilt only when their source string, size or width changes.
+        public string? WrapSrc, Wrap1, Wrap2;
+        public float WrapSize, WrapW;
+        public string? TitleCapsSrc, TitleCaps;
         public string? LastError;
     }
 
@@ -157,7 +163,8 @@ public partial class WhatsAnAiBridge
         // everything is quiet (idle / captured / done / info) and nothing happened for two minutes; waiting, failed
         // and progress states stay until the agent or the user clears them. It comes back on the next rev change.
         // A queued step keeps the panel up too (calmly): the user may come back hours later and must find it.
-        var hasCard = g.instruction != null || g.status != "idle";
+        // "done" is not a card: it became a 3 s result toast when the status arrived (ObserveGuide), and the card hides.
+        var hasCard = (g.instruction != null || g.status != "idle") && g.status != "done";
         var needsUser = g.status is "waiting" or "failed" or "detected" or "settling";
         var quietFor = (utc - g.updatedAt).TotalSeconds;
         var hide = (!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null);
@@ -313,13 +320,13 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>Height of the toast stack under the card right now (0 when no line is young enough to show).</summary>
-    private static float GuideToastStackHeight(in GuideSnap g, DateTime utc)
+    private float GuideToastStackHeight(in GuideSnap g, DateTime utc)
     {
         var n = 0;
         for (var i = g.log.Length - 1; i >= 0 && n < GuideToastMax; i--)
         {
             if ((utc - g.log[i].At).TotalSeconds >= GuideToastSec) break;
-            n++;
+            if (ToastShown(g.log[i].Kind)) n++;
         }
         if (n == 0) return 0f;
         var rowH = GuideToastRowHeight(ImGui.GetFontSize());
@@ -358,6 +365,10 @@ public partial class WhatsAnAiBridge
             u.StatusAt = first ? -1e9 : now;
             // A status that asks for the user again should catch the eye like a new instruction does.
             if (!first && g.status is "waiting" or "failed") u.ArrivedAt = now;
+            // Done is a receipt, not a thing to do: it shows as a 3 s fading result toast instead of a sticky card
+            // (the user asked for exactly that). The state keeps status done for agents reading guide.state.
+            if (!first && g.status == "done")
+                GuideLog(new JObject { ["text"] = g.instruction ?? g.title ?? "Done", ["kind"] = "result", ["title"] = "Done" });
         }
     }
 
@@ -410,100 +421,115 @@ public partial class WhatsAnAiBridge
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
     }
-
     /// <summary>
-    /// The card as a slim strip: one header line (status glyph or the flow's "now" badge, the status label, the
-    /// instruction clipped to the space left, then step pill, elapsed and dismiss / Stop), plus at most one small
-    /// line under it: the status subline (progress / failed / captured), else the agent's detail, else the plan's
-    /// "next: X  +N more" (only when attention allows the plan) or "All N steps done". The full instruction and the
-    /// title are in a tooltip when the line was clipped. Loud states keep the pulsing frame (unless attention says
-    /// no) and a faux-bold instruction instead of big text: the strip never grows.
+    /// The live card: the persistent member of the toast family. The look follows syrairc's ExileImGui2 (ExileMaps:
+    /// its toast stack and MessageBar, "the persistent cousin of a toast"), ported by hand, not referenced: a slate
+    /// panel with square corners and a hairline border, the tone's stripe flush on the left edge, an outlined glyph,
+    /// a tracked faux-bold caps title, the body in the text colour and never in the tone, and the loud state
+    /// "tinted rather than filled". Two rows: the title row (glyph, the status in caps, then from the right dismiss
+    /// or Stop, elapsed, the step pill, and the guide's title dimmed in the space left) and the message row (the
+    /// instruction in sentence case: an instruction is read, not shouted). Loud (waiting / failed, the user must
+    /// act): the message at 1.3 f on up to two lines, a 5 px stripe, a bigger glyph, the title in the tone, and the
+    /// tone's wash, frame and halos throbbing when attention says Urgent. Calm: f, a 3 px stripe, the hairline. A
+    /// third small line carries the status subline, the detail or the plan.
     /// </summary>
     private void DrawGuideCard(in GuideSnap g, QueuedStep? running, in FlowView fv, in GuideAttention at, PanelTheme th, double now, DateTime utc)
     {
         var dl = ImGui.GetWindowDrawList();
         var font = ImGui.GetFont();
         var f = ImGui.GetFontSize();
+        var small = f * 0.85f;
         var look = GuideLookFor(g.status);
         var sinceStatus = now - _guideUi.StatusAt;
 
         // Captured shouts for a few seconds, then shrinks to a one-line receipt until the next step arrives.
         var compact = g.status == "captured" && sinceStatus > GuideCapturedLoudSec;
         var loud = look.Loud && g.instruction != null;
+        var urgent = at.Urgent && loud;
 
         var p = ImGui.GetCursorScreenPos();
         var x0 = p.X + GuideEdge;
         var w = GuideWidth - GuideEdge * 2;
-        const float pad = 10f;
-        var small = f * 0.85f;
-        var headH = f + 10;
+        var stripe = loud ? 5f : GuideToastStripe;
+        var padY = loud ? 10f : GuideToastPadY;
+        var icon = loud ? 22f : GuideToastIcon;
+        var textX = x0 + stripe + GuideToastPadX + icon + GuideToastIconGap;
+        var textMax = x0 + w - GuideToastPadX - textX;
+        var msgSize = compact ? small : loud ? f * 1.3f : f;
 
-        // The second line, if any.
-        string? line2 = null;
-        var line2Tone = th.TextDim;
-        var line2Done = false;
+        // The third line, if any.
+        string? line3 = null;
+        var line3Tone = GuideToastMuted;
+        var line3Done = false;
         var sub = GuideSubline(g, now);
         if (!compact)
         {
-            if (sub != null) { line2 = sub; line2Tone = look.Tone; }
-            else if (g.detail != null) line2 = g.detail;
-            else if (fv.Show && !fv.Running) { line2 = fv.StepCount == 1 ? "Done" : $"All {fv.StepCount} steps done"; line2Done = true; }
+            if (sub != null) { line3 = sub; line3Tone = look.Tone; }
+            else if (g.detail != null) line3 = g.detail;
+            else if (fv.Show && !fv.Running) { line3 = fv.StepCount == 1 ? "Done" : $"All {fv.StepCount} steps done"; line3Done = true; }
             else if (fv.Show && at.ShowPlan && fv.Plan.Length > 1)
-                line2 = "next: " + fv.Plan[1] + (fv.Plan.Length > 2 ? $"  +{fv.Plan.Length - 2} more" : "");
+                line3 = "next: " + fv.Plan[1] + (fv.Plan.Length > 2 ? $"  +{fv.Plan.Length - 2} more" : "");
         }
-        var h = headH + (line2 != null ? small + 6 : 0);
+
+        // The message: the instruction (the title when there is none; the receipt shows the title dimmed). Loud: up
+        // to two wrapped lines, so "do this now" is never clipped; the wrap is cached until the text changes.
+        var text = compact ? (g.title ?? g.instruction) : (g.instruction ?? g.title);
+        var lines = text == null ? 0 : loud ? GuideWrap2(text, msgSize, textMax) : 1;
+        var msgH = lines == 0 ? 0f : GuideToastLineGap + lines * msgSize + (lines > 1 ? 2f : 0f);
+        var h = padY + f + msgH + (line3 != null ? GuideToastLineGap + small : 0f) + padY;
         var min = new Vector2(x0, p.Y + GuideEdge);
         var max = new Vector2(x0 + w, p.Y + GuideEdge + h);
 
-        // Fill, arrival flash, frame. The frame pulses only while the user must act, and only when attention allows.
-        // Urgent (attention rule 8: waiting / failed): a 1.25 Hz throb with a fast attack - the frame flashes to full
-        // strength and thickens, two halos swell outside it and the card gets a wash of the tone. Confined to the
-        // card: nothing full-screen, nothing faster than ~1.5 Hz.
-        var urgent = at.Urgent && loud;
+        // Urgent (attention rule 8: waiting / failed): a 1.25 Hz throb with a fast attack - the tone's wash over the
+        // ink, the frame flashing to full strength and thickening, two halos swelling outside it. Confined to the
+        // card: nothing full-screen, nothing faster than ~1.5 Hz. Calm pulse: the frame only, low amplitude.
         var pulsing = (look.Pulse && at.CardPulse) || urgent;
         var pulse = !pulsing ? 0f
             : urgent ? MathF.Pow((float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 2 * 1.25)), 1.8f)
             : (float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 1.6));
-        dl.AddRectFilled(min, max, U(th.Card, 0.94f), 6f);
+        dl.AddRectFilled(min, max, U(GuideToastInk, 0.94f), 0f);
         var flashT = (now - _guideUi.ArrivedAt) / GuideFlashSec;
-        if (flashT < 1) dl.AddRectFilled(min, max, U(look.Tone, 0.35f * (float)(1 - flashT)), 6f);
+        if (flashT < 1) dl.AddRectFilled(min, max, U(look.Tone, 0.35f * (float)(1 - flashT)), 0f);
         if (urgent)
         {
-            dl.AddRectFilled(min, max, U(look.Tone, 0.04f + 0.16f * pulse), 6f);
-            dl.AddRect(min - new Vector2(7, 7), max + new Vector2(7, 7), U(look.Tone, 0.22f * pulse), 11f, ImDrawFlags.None, 6f);
-            dl.AddRect(min - new Vector2(3, 3), max + new Vector2(3, 3), U(look.Tone, 0.18f + 0.42f * pulse), 8f, ImDrawFlags.None, 3.5f);
-            dl.AddRect(min, max, U(look.Tone, 0.5f + 0.5f * pulse), 6f, ImDrawFlags.None, 2f + 1.5f * pulse);
+            dl.AddRectFilled(min, max, U(look.Tone, 0.05f + 0.15f * pulse), 0f);
+            dl.AddRect(min - new Vector2(7, 7), max + new Vector2(7, 7), U(look.Tone, 0.22f * pulse), 0f, ImDrawFlags.None, 6f);
+            dl.AddRect(min - new Vector2(3, 3), max + new Vector2(3, 3), U(look.Tone, 0.18f + 0.42f * pulse), 0f, ImDrawFlags.None, 3.5f);
+            dl.AddRect(min, max, U(look.Tone, 0.5f + 0.5f * pulse), 0f, ImDrawFlags.None, 1.5f + 1.5f * pulse);
         }
         else if (pulsing)
         {
-            dl.AddRect(min - new Vector2(3, 3), max + new Vector2(3, 3), U(look.Tone, 0.10f + 0.16f * pulse), 8f, ImDrawFlags.None, 3f);
-            dl.AddRect(min, max, U(look.Tone, 0.6f + 0.4f * pulse), 6f, ImDrawFlags.None, 2f);
+            dl.AddRect(min - new Vector2(2, 2), max + new Vector2(2, 2), U(look.Tone, 0.12f + 0.16f * pulse), 0f, ImDrawFlags.None, 2.5f);
+            dl.AddRect(min, max, U(look.Tone, 0.6f + 0.4f * pulse), 0f, ImDrawFlags.None, 1.2f);
         }
         else if (loud || (g.status == "captured" && !compact))
-            dl.AddRect(min, max, U(look.Tone, 0.9f), 6f, ImDrawFlags.None, 2f);
+            dl.AddRect(min, max, U(look.Tone, 0.8f), 0f, ImDrawFlags.None, 1.2f);
         else
-            dl.AddRect(min, max, U(look.Tone, g.status == "idle" ? 0.25f : 0.55f), 6f, ImDrawFlags.None, 1f);
+            dl.AddRect(min, max, U(GuideToastLine), 0f);
+        // The stripe, flush on the left edge over the border, in the tone.
+        dl.AddRectFilled(min, new Vector2(min.X + stripe, max.Y), U(look.Tone, urgent ? 0.6f + 0.4f * pulse : 1f), 0f);
 
-        // Header, left: the flow's "now" badge (the same badge as the in-game highlight) or the status glyph, then
-        // the status label.
-        var hy = min.Y + headH * 0.5f;
-        var x = min.X + pad;
+        // Title row, left: the flow's "now" badge (the same badge as the in-game highlight) or the status glyph,
+        // then the status in caps (tracked, faux bold; in the tone when loud, else near-white).
+        var hy = min.Y + padY + f * 0.5f;
+        var x = textX;
+        var iconC = new Vector2(x0 + stripe + GuideToastPadX + icon * 0.5f, hy);
         if (fv.Show && fv.Running && g.step is int now1 && !compact)
-            DrawFlowBadge(dl, new Vector2(x + 6, hy), 7f, 0, now1.ToString(), 1f, th);
+            DrawFlowBadge(dl, iconC, icon * 0.42f, 0, now1.ToString(), 1f, th);
         else
-            DrawGuideStatusGlyph(dl, g.status, new Vector2(x + 6, hy), look.Tone, now, pulse);
-        x += 18;
+            DrawGuideCardGlyph(dl, g.status, iconC, look.Tone, now, pulse, icon / GuideToastIcon);
         if (look.Label.Length > 0)
         {
-            dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(look.Tone), look.Label);
-            // Faux bold: the HUD font has no bold face.
-            if (loud) dl.AddText(font, small, new Vector2(x + 0.6f, hy - small * 0.5f), U(look.Tone), look.Label);
-            x += ImGui.CalcTextSize(look.Label).X * (small / f) + 10;
+            var tcol = U(loud ? look.Tone : GuideToastText);
+            var tp = new Vector2(x, hy - f * 0.5f);
+            GuideTrackedText(dl, font, f, tp, tcol, look.Label, GuideToastTitleTrack);
+            GuideTrackedText(dl, font, f, tp + new Vector2(0.6f, 0), tcol, look.Label, GuideToastTitleTrack);
+            x += GuideTrackedWidth(font, f, look.Label, GuideToastTitleTrack) + 14;
         }
 
         // Right side, laid out from the edge inwards. While a queued step records, the dismiss x gives way to Stop:
         // hiding the card would leave the recorder running with nothing to stop it from.
-        var rx = max.X - pad;
+        var rx = max.X - GuideToastPadX;
         var showDismiss = g.instruction != null || g.status != "idle";
         if (running != null)
         {
@@ -517,9 +543,9 @@ public partial class WhatsAnAiBridge
             var hov = ImGui.IsItemHovered();
             if (ImGui.IsItemClicked()) QueueCancel(running.Id);
             if (hov) ImGui.SetTooltip("Stop recording this step. It is marked cancelled; an agent can queue it again.");
-            var sc = hov ? ToneBad : th.TextDim;
-            dl.AddRectFilled(pmin, pmin + new Vector2(pillW, pillH), hov ? U(ToneBad, 0.22f) : U(th.Tile), pillH * 0.5f);
-            dl.AddRect(pmin, pmin + new Vector2(pillW, pillH), U(hov ? ToneBad : th.Border, 0.7f), pillH * 0.5f);
+            var sc = hov ? ToneBad : GuideToastMuted;
+            dl.AddRectFilled(pmin, pmin + new Vector2(pillW, pillH), hov ? U(ToneBad, 0.22f) : U(GuideToastLine, 0.7f), 0f);
+            dl.AddRect(pmin, pmin + new Vector2(pillW, pillH), U(hov ? ToneBad : GuideToastLine), 0f);
             dl.AddRectFilled(new Vector2(pmin.X + 8, hy - 3.5f), new Vector2(pmin.X + 15, hy + 3.5f), U(sc), 1f);
             dl.AddText(font, small, new Vector2(pmin.X + 19, hy - small * 0.5f), U(sc), label);
             rx -= pillW + 8;
@@ -532,15 +558,15 @@ public partial class WhatsAnAiBridge
             var hov = ImGui.IsItemHovered();
             if (ImGui.IsItemClicked()) GuideDismiss();
             if (hov) ImGui.SetTooltip("Dismiss this instruction");
-            if (hov) dl.AddRectFilled(bx, bx + new Vector2(16, 16), U(th.Tile), 3f);
-            DrawCloseGlyph(dl, new Vector2(rx - 8, hy), 3.5f, U(hov ? th.Text : th.TextDim, hov ? 1f : 0.8f));
+            if (hov) dl.AddRectFilled(bx, bx + new Vector2(16, 16), U(GuideToastLine), 0f);
+            DrawCloseGlyph(dl, new Vector2(rx - 8, hy), 3.5f, U(hov ? GuideToastText : GuideToastMuted, hov ? 1f : 0.8f));
             rx -= 16 + 8;
         }
         if (g.status is "waiting" or "failed" && g.instructionSince is DateTime since)
         {
             var t = GuideElapsed(utc - since);
             var tw = ImGui.CalcTextSize(t).X * (small / f);
-            dl.AddText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(th.TextDim), t);
+            dl.AddText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(GuideToastMuted), t);
             rx -= tw + 10;
         }
         if (g.step is int step)
@@ -550,51 +576,147 @@ public partial class WhatsAnAiBridge
             var pillW = tw + 12;
             var pillH = small + 6;
             var pmin = new Vector2(rx - pillW, hy - pillH * 0.5f);
-            dl.AddRectFilled(pmin, pmin + new Vector2(pillW, pillH), U(th.Tile), pillH * 0.5f);
-            dl.AddRect(pmin, pmin + new Vector2(pillW, pillH), U(th.Border, 0.6f), pillH * 0.5f);
-            dl.AddText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(th.TextDim), t);
+            dl.AddRectFilled(pmin, pmin + new Vector2(pillW, pillH), U(GuideToastLine, 0.7f), 0f);
+            dl.AddRect(pmin, pmin + new Vector2(pillW, pillH), U(GuideToastLine), 0f);
+            dl.AddText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(GuideToastMuted), t);
             rx -= pillW + 10;
         }
-
-        // The instruction (the title when there is none; the receipt shows the title dimmed), one line, clipped to
-        // the space left. Hovering a clipped line shows the whole of it, with the title.
-        var text = compact ? (g.title ?? g.instruction) : (g.instruction ?? g.title);
-        if (text != null && rx - x > 40)
+        // The guide's title (the experiment), dimmed caps in the space left on the title row (cached caps).
+        if (g.title != null && g.instruction != null && !compact && rx - x > 60)
         {
-            var clipped = GuideClipText(text, rx - x);
-            var col = compact || g.status is "captured" or "done" or "detected" or "settling" ? U(th.Text, 0.85f) : U(th.Text);
-            if (compact) col = U(th.TextDim);
-            dl.AddText(new Vector2(x, hy - f * 0.5f), col, clipped);
-            if (loud) dl.AddText(new Vector2(x + 0.6f, hy - f * 0.5f), col, clipped);   // faux bold
-            if (!ReferenceEquals(clipped, text) || (g.title != null && g.instruction != null && !compact))
+            if (!ReferenceEquals(_guideUi.TitleCapsSrc, g.title)) { _guideUi.TitleCapsSrc = g.title; _guideUi.TitleCaps = GuideCaps(g.title); }
+            var t = GuideClipTracked(_guideUi.TitleCaps!, font, small, GuideToastMsgTrack, rx - x);
+            GuideTrackedText(dl, font, small, new Vector2(x, hy - small * 0.5f), U(GuideToastMuted), t, GuideToastMsgTrack);
+        }
+
+        // Message row: the instruction. Loud: big, up to two lines, faux bold. Calm: one line, clipped, with the
+        // whole text (and the title) in a tooltip when clipped.
+        var my = min.Y + padY + f + GuideToastLineGap;
+        if (text != null)
+        {
+            if (loud)
             {
-                ImGui.SetCursorScreenPos(new Vector2(x, hy - f * 0.5f));
-                ImGui.InvisibleButton("##guide_text", new Vector2(rx - x, f));
-                if (ImGui.IsItemHovered())
+                var col = U(GuideToastText);
+                var u = _guideUi;
+                dl.AddText(font, msgSize, new Vector2(textX, my), col, u.Wrap1!);
+                dl.AddText(font, msgSize, new Vector2(textX + 0.6f, my), col, u.Wrap1!);
+                if (u.Wrap2 != null)
                 {
-                    ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 1f);
-                    ImGui.SetTooltip(g.title != null && g.instruction != null && !compact ? $"{g.title}\n{g.instruction}" : text);
-                    ImGui.PopStyleVar();
+                    dl.AddText(font, msgSize, new Vector2(textX, my + msgSize + 2f), col, u.Wrap2);
+                    dl.AddText(font, msgSize, new Vector2(textX + 0.6f, my + msgSize + 2f), col, u.Wrap2);
+                }
+            }
+            else
+            {
+                var clipped = GuideClipText(text, textMax * (f / msgSize));
+                var col = compact ? U(GuideToastMuted) : U(GuideToastText, g.status is "captured" or "detected" or "settling" ? 0.85f : 0.95f);
+                dl.AddText(font, msgSize, new Vector2(textX, my), col, clipped);
+                if (!ReferenceEquals(clipped, text) || (g.title != null && g.instruction != null && !compact))
+                {
+                    ImGui.SetCursorScreenPos(new Vector2(textX, my));
+                    ImGui.InvisibleButton("##guide_text", new Vector2(textMax, msgSize));
+                    if (ImGui.IsItemHovered())
+                    {
+                        ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 1f);
+                        ImGui.SetTooltip(g.title != null && g.instruction != null && !compact ? $"{g.title}\n{g.instruction}" : text);
+                        ImGui.PopStyleVar();
+                    }
                 }
             }
         }
 
-        // Second line: small, under the instruction column.
-        if (line2 != null)
+        // Third line: small, muted (the tone for a status subline), under the message.
+        if (line3 != null)
         {
-            var ly = min.Y + headH + 1;
-            var lx = min.X + pad + 18;
-            if (line2Done)
+            var ly = min.Y + padY + f + msgH + GuideToastLineGap;
+            var lx = textX;
+            if (line3Done)
             {
                 var pop = HlEase((now - _guideUi.FlowEndedAt) / GuideFlowPopSec);
-                DrawFlowCheck(dl, new Vector2(min.X + pad + 6, ly + small * 0.5f), 5.5f, ToneOk, pop, 1f);
-                line2Tone = th.Text;
+                DrawFlowCheck(dl, new Vector2(lx + 6, ly + small * 0.5f), 5.5f, ToneOk, pop, 1f);
+                lx += 18;
+                line3Tone = GuideToastText;
             }
-            dl.AddText(font, small, new Vector2(lx, ly), U(line2Tone, 0.9f), GuideClipText(line2, max.X - pad - lx));
+            dl.AddText(font, small, new Vector2(lx, ly), U(line3Tone, 0.9f), GuideClipText(line3, (max.X - GuideToastPadX - lx) * (f / small)));
         }
 
         ImGui.SetCursorScreenPos(p);
         ImGui.Dummy(new Vector2(GuideWidth, h + GuideEdge * 2));
+    }
+
+    /// <summary>
+    /// Wrap <paramref name="text"/> onto at most two lines of <paramref name="maxW"/> px at <paramref name="size"/>
+    /// (greedy, at spaces; the second line clipped with ".."), cached in the UI state until the text, size or width
+    /// changes, so the loud card allocates nothing per frame. Returns the line count (1 or 2).
+    /// </summary>
+    private int GuideWrap2(string text, float size, float maxW)
+    {
+        var u = _guideUi;
+        if (ReferenceEquals(u.WrapSrc, text) && u.WrapSize == size && u.WrapW == maxW) return u.Wrap2 == null ? 1 : 2;
+        u.WrapSrc = text; u.WrapSize = size; u.WrapW = maxW;
+        var k = size / ImGui.GetFontSize();
+        if (ImGui.CalcTextSize(text).X * k <= maxW) { u.Wrap1 = text; u.Wrap2 = null; return 1; }
+        // The longest prefix ending at a space that fits; without one, a hard cut.
+        var cut = -1;
+        for (var i = text.IndexOf(' '); i > 0; i = text.IndexOf(' ', i + 1))
+        {
+            if (ImGui.CalcTextSize(text[..i]).X * k > maxW) break;
+            cut = i;
+        }
+        if (cut <= 0)
+        {
+            int lo = 1, hi = text.Length - 1;
+            while (lo < hi) { var mid = (lo + hi + 1) / 2; if (ImGui.CalcTextSize(text[..mid]).X * k <= maxW) lo = mid; else hi = mid - 1; }
+            cut = lo;
+        }
+        u.Wrap1 = text[..cut].TrimEnd();
+        var rest = text[cut..].TrimStart();
+        u.Wrap2 = GuideClipText(rest, maxW / k);
+        return 2;
+    }
+
+    /// <summary>
+    /// The card's glyph, in the toast family (outlined, stroke 1.6, scaled by <paramref name="s"/>): waiting = a
+    /// ring with a live dot and a pulse ring leaving it, progress = a spinner arc, captured = circle-check, failed =
+    /// circle-x, info = circle-i.
+    /// </summary>
+    private static void DrawGuideCardGlyph(ImDrawListPtr dl, string status, Vector2 c, Vector4 tone, double now, float pulse, float s)
+    {
+        var col = U(tone);
+        var r = 8f * s;
+        var t = 1.6f * s;
+        switch (status)
+        {
+            case "waiting":
+                dl.AddCircle(c, r, col, 24, t);
+                dl.AddCircleFilled(c, 3.2f * s, col, 12);
+                dl.AddCircle(c, r + (2f + 5f * pulse) * s, U(tone, 0.6f * (1f - pulse)), 24, t);
+                break;
+            case "detected":
+            case "settling":
+            {
+                var a0 = (float)(now * 4.5 % (Math.PI * 2));
+                dl.PathArcTo(c, r, a0, a0 + 4.2f, 18);
+                dl.PathStroke(col, ImDrawFlags.None, t);
+                if (status == "settling") dl.AddCircleFilled(c, 2f * s, col, 10);
+                break;
+            }
+            case "captured":
+                dl.AddCircle(c, r, col, 24, t);
+                dl.AddLine(new Vector2(c.X - 3.6f * s, c.Y + 0.2f * s), new Vector2(c.X - 1f * s, c.Y + 2.8f * s), col, t);
+                dl.AddLine(new Vector2(c.X - 1f * s, c.Y + 2.8f * s), new Vector2(c.X + 3.8f * s, c.Y - 2.8f * s), col, t);
+                break;
+            case "failed":
+                dl.AddCircle(c, r, col, 24, t);
+                dl.AddLine(new Vector2(c.X - 3f * s, c.Y - 3f * s), new Vector2(c.X + 3f * s, c.Y + 3f * s), col, t);
+                dl.AddLine(new Vector2(c.X + 3f * s, c.Y - 3f * s), new Vector2(c.X - 3f * s, c.Y + 3f * s), col, t);
+                break;
+            default:
+                dl.AddCircle(c, r, col, 24, t);
+                dl.AddCircleFilled(new Vector2(c.X, c.Y - 3.5f * s), 1.1f * s, col, 8);
+                dl.AddLine(new Vector2(c.X, c.Y - 1f * s), new Vector2(c.X, c.Y + 4f * s), col, t);
+                break;
+        }
     }
 
     /// <summary>The one-line meaning of the status, under the instruction. Progress states animate their dots.</summary>
@@ -609,48 +731,6 @@ public partial class WhatsAnAiBridge
             "failed" => g.detail ?? "Nothing lasting changed. Do it once more.",
             _ => null,
         };
-    }
-
-    /// <summary>12 px status glyph: pulsing dot (waiting), spinner (progress), check (captured, done), bang (failed), i (info).</summary>
-    private static void DrawGuideStatusGlyph(ImDrawListPtr dl, string status, Vector2 c, Vector4 tone, double now, float pulse)
-    {
-        var col = U(tone);
-        switch (status)
-        {
-            case "waiting":
-                dl.AddCircle(c, 5 + pulse * 3, U(tone, 0.6f - pulse * 0.5f), 16, 1.5f);
-                dl.AddCircleFilled(c, 3.2f, col);
-                break;
-            case "detected":
-            case "settling":
-            {
-                var a0 = (float)(now * 4.5 % (Math.PI * 2));
-                dl.PathArcTo(c, 5f, a0, a0 + 4.2f, 14);
-                dl.PathStroke(col, ImDrawFlags.None, 2f);
-                if (status == "settling") dl.AddCircleFilled(c, 1.8f, col);
-                break;
-            }
-            case "captured":
-            case "done":
-                dl.AddCircleFilled(c, 6f, U(tone, status == "done" ? 0.35f : 1f));
-                var ck = status == "done" ? col : U(new Vector4(0.05f, 0.08f, 0.06f, 1f));
-                dl.AddLine(new Vector2(c.X - 3.2f, c.Y + 0.2f), new Vector2(c.X - 0.8f, c.Y + 2.6f), ck, 1.8f);
-                dl.AddLine(new Vector2(c.X - 0.8f, c.Y + 2.6f), new Vector2(c.X + 3.4f, c.Y - 2.6f), ck, 1.8f);
-                break;
-            case "failed":
-                dl.AddCircle(c, 6f, col, 16, 1.6f);
-                dl.AddLine(new Vector2(c.X, c.Y - 3.5f), new Vector2(c.X, c.Y + 0.8f), col, 1.8f);
-                dl.AddCircleFilled(new Vector2(c.X, c.Y + 3.2f), 1.1f, col);
-                break;
-            case "info":
-                dl.AddCircle(c, 6f, col, 16, 1.4f);
-                dl.AddCircleFilled(new Vector2(c.X, c.Y - 3f), 1.1f, col);
-                dl.AddLine(new Vector2(c.X, c.Y - 0.8f), new Vector2(c.X, c.Y + 3.5f), col, 1.6f);
-                break;
-            default:
-                dl.AddCircleFilled(c, 3f, U(tone, 0.6f));
-                break;
-        }
     }
 
     // ── Flow glyphs ──────────────────────────────────────────────────
@@ -729,8 +809,12 @@ public partial class WhatsAnAiBridge
         var textX = x0 + GuideToastStripe + GuideToastPadX + GuideToastIcon + GuideToastIconGap;
         var textMax = x0 + w - GuideToastPadX - textX;
         var iconX = x0 + GuideToastStripe + GuideToastPadX + GuideToastIcon * 0.5f;
-        // The newest toast's slide-in pushes the older ones down with it.
-        var newestAge = (utc - g.log[^1].At).TotalSeconds;
+        // The newest SHOWN toast's slide-in pushes the older ones down with it. Kinds the user switched off
+        // (Settings Toast*: agent lines are off by default) are skipped here only; they stay in the log sheet.
+        var newest = -1;
+        for (var i = g.log.Length - 1; i >= 0; i--) if (ToastShown(g.log[i].Kind)) { newest = i; break; }
+        if (newest < 0) return;
+        var newestAge = (utc - g.log[newest].At).TotalSeconds;
         var push = (float)(1 - HlEase(newestAge / GuideToastInSec));
         var y = anchor.Y + GuideEdge;
         var shown = 0;
@@ -739,6 +823,7 @@ public partial class WhatsAnAiBridge
             var e = g.log[i];
             var age = (utc - e.At).TotalSeconds;
             if (age >= GuideToastSec) break;
+            if (!ToastShown(e.Kind)) continue;
             var alpha = (float)Math.Clamp((GuideToastSec - age) / GuideToastFadeSec, 0, 1) * HlEase(age / GuideToastInSec);
             if (shown > 0) y -= push * (rowH + GuideToastGap);   // older rows catch up with the push from above
             var tone = GuideKindTone(e.Kind);
@@ -762,6 +847,16 @@ public partial class WhatsAnAiBridge
             shown++;
         }
     }
+
+    /// <summary>Toast verbosity: whether lines of this kind show as toasts (Settings Toast*; all still go to the log).</summary>
+    private bool ToastShown(string kind) => kind switch
+    {
+        "step" => Settings.ToastStep.Value,
+        "result" => Settings.ToastResult.Value,
+        "warn" => Settings.ToastWarn.Value,
+        "error" => Settings.ToastError.Value,
+        _ => Settings.ToastAgent.Value,
+    };
 
     // Fixed toast colours (the same on any HUD theme): a blue-tinted slate ink, its hairline one step lighter, the
     // near-white title (15.9:1 on the ink) and the muted message grey (6.4:1).

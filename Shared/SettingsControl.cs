@@ -53,6 +53,11 @@ public partial class WhatsAnAiBridge
         ["ShowAgentGuide"] = ("Agent guide card", "Agent guide", "The card that shows what the agent asks you to do in game.", false),
         ["GuideLogOpen"] = ("Guide log open", "Agent guide", "", false),
         ["AgentLogHotkey"] = ("Agent log hotkey", "Agent guide", "Toggles the agent log sheet. Set it in game.", false),
+        ["ToastAgent"] = ("Toasts: agent activity", "Agent guide", "Show a toast for every agent tool call (the grey ones). Off: they only go to the log.", false),
+        ["ToastStep"] = ("Toasts: steps", "Agent guide", "Show a toast when a guided step starts or is queued.", false),
+        ["ToastResult"] = ("Toasts: results", "Agent guide", "Show a toast for results and done receipts.", false),
+        ["ToastWarn"] = ("Toasts: warnings", "Agent guide", "", false),
+        ["ToastError"] = ("Toasts: errors", "Agent guide", "", false),
     };
 
     private readonly ConcurrentQueue<Action> _mainActions = new();
