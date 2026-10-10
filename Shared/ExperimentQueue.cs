@@ -251,7 +251,7 @@ public partial class WhatsAnAiBridge
         {
             if (run.BeforeKey == "")
             {
-                if (step.Highlight != null) HighlightSet(new JObject { ["targets"] = step.Highlight.DeepClone(), ["title"] = step.Title });
+                if (step.Highlight != null) HighlightSetLayer(HlQueue, null, step.By, new JObject { ["targets"] = step.Highlight.DeepClone(), ["title"] = step.Title });
                 if (step.Flow != null && run.Repeat == 1) FlowSet(step.Flow.DeepClone());
                 run.Before = CaptureWatch(step.Watch);
                 run.BeforeKey = run.LastKey = Fingerprint(run.Before);
@@ -323,7 +323,7 @@ public partial class WhatsAnAiBridge
             _queueRun = null;
             SaveQueue();
         }
-        if (step.Highlight != null) HighlightSet(new JObject { ["clear"] = true });
+        if (step.Highlight != null) HighlightSetLayer(HlQueue, null, step.By, new JObject { ["clear"] = true });
         if (step.Flow != null) FlowSet(new JObject { ["stop"] = true });
         GuideSet(new JObject { ["status"] = status == "captured" ? "captured" : "failed", ["detail"] = detail });
         if (status != "captured") GuideLog(new JObject { ["text"] = $"'{step.Label}': {detail}", ["kind"] = "warn" });

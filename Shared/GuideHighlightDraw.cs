@@ -31,11 +31,10 @@ public partial class WhatsAnAiBridge
     private const double HlPressSec = 1.4, HlPressDelay = 0.7;   // mouse cue: one press per cycle, the first after the entry ring
     private const float HlBadgeR = 9f, HlSnapPx = 10f, HlMouseW = 14f, HlMouseH = 20f, HlMousePad = 5f;
     private const double HlVerdictShowSec = 2.2, HlVerdictPopSec = 0.3, HlVerdictFadeSec = 0.4;
-    private const int HlAskWindows = 40;   // one window id per target index (guide.highlight takes at most 40 targets)
-    private static readonly string[] HlAskWin = Enumerable.Range(0, HlAskWindows).Select(i => "##hl_ask_" + i).ToArray();
+
     private static readonly string[] HlAskIds = ["##hl_yes", "##hl_no", "##hl_skip"];
 
-    /// <summary>Overlay-local state: when each target's boxes appeared, for the entry animations.</summary>
+    /// <summary>Overlay-local state of one layer: when each target's boxes appeared, for the entry animations.</summary>
     private sealed class HighlightUiState
     {
         public int SeenRev = -1;
@@ -46,24 +45,28 @@ public partial class WhatsAnAiBridge
         public readonly HashSet<int> Labelled = new();                       // targets that got their label this frame
         public readonly List<int> Gone = new();
         public readonly Dictionary<int, int> Counts = new();                 // boxes per target (an item can match several)
-        public readonly List<(Vector2 min, Vector2 max)> Placed = new();     // label rects placed this frame
         public readonly Dictionary<int, double> AnsweredAt = new();          // target index -> ImGui time its answer was first drawn
-        public string? LastError;
+        public bool Drawn;                                                   // its layer was drawn this frame
     }
 
-    private readonly HighlightUiState _hlUi = new();
+    private readonly Dictionary<string, HighlightUiState> _hlUis = new();   // layer owner -> its overlay state
+    private readonly List<(Vector2 min, Vector2 max)> _hlPlaced = new();    // label rects placed this frame, every layer's
+    private readonly List<HighlightBox> _hlAll = new();                     // every layer's boxes this frame (placement avoids them all)
+    private readonly List<string> _hlUiGone = new();
+    private readonly Dictionary<int, string> _hlAskWin = new();             // slot * 40 + target index -> window id
+    private string? _hlLastError;
 
-    partial void DrawHighlightsImpl(List<HighlightBox> boxes, string? title, int? current, DateTime since, int rev)
+    partial void DrawHighlightsImpl(List<HighlightLayerView> layers)
     {
         try
         {
-            DrawHighlightsBody(boxes, title, current, since, rev);
+            DrawHighlightsBody(layers);
         }
         catch (Exception ex)
         {
-            if (_hlUi.LastError != ex.Message)
+            if (_hlLastError != ex.Message)
             {
-                _hlUi.LastError = ex.Message;
+                _hlLastError = ex.Message;
                 LogError($"[GuideHighlight] {ex}");
             }
         }
@@ -71,18 +74,61 @@ public partial class WhatsAnAiBridge
 
     // ── Frame ────────────────────────────────────────────────────────
 
-    private void DrawHighlightsBody(List<HighlightBox> boxes, string? title, int? current, DateTime since, int rev)
+    /// <summary>
+    /// Every session's layer together: frames and badges of all layers first, then the badges and verdict marks of all
+    /// layers are reserved, then each layer's title, cues and labels, placed so they cover no box of any layer. Each
+    /// layer keeps its own sequence (current step), entry animations and title; with two or more layers the title pill
+    /// says whose it is.
+    /// </summary>
+    private void DrawHighlightsBody(List<HighlightLayerView> layers)
     {
         var now = ImGui.GetTime();
-        var u = _hlUi;
-        ObserveHighlights(boxes, title, current, since, rev, now);
-
         var dl = ImGui.GetForegroundDrawList();
         var disp = ImGui.GetIO().DisplaySize;
         var th = PanelTheme.Current();
         var pulse = (float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 2 / HlPulseSec));
+        _hlAll.Clear();
+        foreach (var l in layers) _hlAll.AddRange(l.Boxes);
+        foreach (var u in _hlUis.Values) u.Drawn = false;
 
-        // The sequence as drawn: the first box of the current step, of the next step, and how far along it is.
+        // Pass 1: frames, badges and the hint to the next step, per layer.
+        foreach (var l in layers)
+        {
+            var u = HlUiFor(l.Owner);
+            u.Drawn = true;
+            ObserveHighlights(u, l.Boxes, l.Title, l.Current, l.Since, l.Rev, now);
+            HlDrawFrames(dl, u, l.Boxes, l.Current, now, pulse, disp, th);
+        }
+
+        // Pass 2: reserve every layer's badges and verdict marks, so no label of any layer covers them.
+        _hlPlaced.Clear();
+        var r = new Vector2(HlBadgeR + 1.5f, HlBadgeR + 1.5f);
+        foreach (var b in _hlAll)
+        {
+            var (min, max) = HlRect(b);
+            if (b.Order != null) _hlPlaced.Add((min - r, min + r));
+            if (b.Answer != null) { var c = new Vector2(max.X, min.Y); _hlPlaced.Add((c - r, c + r)); }   // the verdict mark on the top-right corner
+        }
+
+        // Pass 3: per layer, its title once, then per target the action cue and the label (or question) outside its first box.
+        foreach (var l in layers)
+            HlDrawLabels(dl, HlUiFor(l.Owner), l, layers.Count > 1, now, disp, th);
+
+        // A layer that left (cleared, expired) forgets its animations; it enters fresh if it comes back.
+        _hlUiGone.Clear();
+        foreach (var (k, u) in _hlUis) if (!u.Drawn) _hlUiGone.Add(k);
+        foreach (var k in _hlUiGone) _hlUis.Remove(k);
+    }
+
+    private HighlightUiState HlUiFor(string owner)
+    {
+        if (!_hlUis.TryGetValue(owner, out var u)) _hlUis[owner] = u = new HighlightUiState();
+        return u;
+    }
+
+    /// <summary>The sequence as drawn: the first box of the current step, of the next step, and whether there is one.</summary>
+    private static (bool hasSeq, int curIdx, int nextIdx) HlSequence(List<HighlightBox> boxes, int? current)
+    {
         var hasSeq = false;
         int curIdx = -1, nextIdx = -1, nextOrder = int.MaxValue;
         for (var i = 0; i < boxes.Count; i++)
@@ -95,10 +141,15 @@ public partial class WhatsAnAiBridge
                 if (o > c && o < nextOrder) { nextOrder = o; nextIdx = i; }
             }
         }
+        return (hasSeq, curIdx, nextIdx);
+    }
+
+    private void HlDrawFrames(ImDrawListPtr dl, HighlightUiState u, List<HighlightBox> boxes, int? current, double now, float pulse, Vector2 disp, PanelTheme th)
+    {
+        var (_, curIdx, nextIdx) = HlSequence(boxes, current);
         u.Counts.Clear();
         foreach (var b in boxes) u.Counts[b.TargetIndex] = u.Counts.GetValueOrDefault(b.TargetIndex) + 1;
 
-        // Pass 1: frames and badges.
         for (var i = 0; i < boxes.Count; i++)
         {
             var b = boxes[i];
@@ -123,7 +174,7 @@ public partial class WhatsAnAiBridge
                 HlBadge(dl, new Vector2(min.X, min.Y), order, state, state == 2 ? HlEase((now - arrived) / HlCheckSec) : 1f, snap, th);
         }
 
-        // Pass 2: the hint from the current step to the next, dotted and quiet; it fades in with the current step.
+        // The hint from the current step to the next, dotted and quiet; it fades in with the current step.
         if (curIdx >= 0 && nextIdx >= 0)
         {
             var (aMin, aMax) = HlRect(boxes[curIdx]);
@@ -131,26 +182,15 @@ public partial class WhatsAnAiBridge
             var snap = HlEase((now - u.ArrivedAt.GetValueOrDefault(boxes[curIdx].TargetIndex, -1e9)) / HlSnapSec);
             HlDots(dl, aMin, aMax, bMin, bMax, U(ToneNeutral, 0.6f * snap));
         }
+    }
 
-        // Pass 3: the title once, above the box the user should look at; then, per target, the action cue and the
-        // label outside its first box, where they cover no other highlight, badge or pill. Badges are reserved first.
-        u.Placed.Clear();
-        foreach (var b in boxes)
-        {
-            var r = new Vector2(HlBadgeR + 1.5f, HlBadgeR + 1.5f);
-            if (b.Order != null)
-            {
-                var (min, _) = HlRect(b);
-                u.Placed.Add((min - r, min + r));
-            }
-            if (b.Answer != null)   // the verdict mark on the top-right corner
-            {
-                var (min, max) = HlRect(b);
-                var c = new Vector2(max.X, min.Y);
-                u.Placed.Add((c - r, c + r));
-            }
-        }
-        if (title != null)
+    private void HlDrawLabels(ImDrawListPtr dl, HighlightUiState u, HighlightLayerView l, bool multi, double now, Vector2 disp, PanelTheme th)
+    {
+        var boxes = l.Boxes;
+        var current = l.Current;
+        var all = _hlAll;
+        var (hasSeq, curIdx, _) = HlSequence(boxes, current);
+        if (l.Title != null)
         {
             var anchor = curIdx >= 0 ? curIdx : HlAnchor(boxes, current);
             var (min, max) = HlRect(boxes[anchor]);
@@ -162,7 +202,9 @@ public partial class WhatsAnAiBridge
                 if (current is int c) { var pos = 0; foreach (var o in orders) { pos++; if (o == c) break; } sub = $"step {pos} of {orders.Count}"; }
                 else sub = "done";
             }
-            HlTitle(dl, title, sub, min, max, boxes, disp, th, HlEase((now - u.ArrivedAt.GetValueOrDefault(boxes[anchor].TargetIndex, -1e9)) / HlSnapSec));
+            // Several agents point at once: the title says whose targets these are.
+            if (multi && l.Who != null) sub = sub != null ? $"{sub} - {l.Who}" : l.Who;
+            HlTitle(dl, l.Title, sub, min, max, all, disp, th, HlEase((now - u.ArrivedAt.GetValueOrDefault(boxes[anchor].TargetIndex, -1e9)) / HlSnapSec));
         }
         u.Labelled.Clear();
         for (var i = 0; i < boxes.Count; i++)
@@ -178,30 +220,29 @@ public partial class WhatsAnAiBridge
             if (b.Action is "click" or "rightclick" && state != 2)
             {
                 var size = new Vector2(HlMouseW + HlMousePad * 2, HlMouseH + HlMousePad * 2);
-                var (pmin, pmax) = HlPlace(size, min, max, boxes, disp, prefer: 2);
+                var (pmin, pmax) = HlPlace(size, min, max, all, disp, prefer: 2);
                 HlMouse(dl, pmin + new Vector2(HlMousePad, HlMousePad), b.Action == "rightclick", state == 0 ? snap : 0.4f * snap,
                     state == 0 ? now - arrived : -1, th);
-                u.Placed.Add((pmin, pmax));
+                _hlPlaced.Add((pmin, pmax));
             }
             if (b.Ask != null)
             {
-                if (b.Answer == null) { HlAskStrip(dl, b, min, max, boxes, disp, th, snap); continue; }   // the question carries the words
+                if (b.Answer == null) { HlAskStrip(dl, b, l.Owner, l.Slot, min, max, all, disp, th, snap); continue; }   // the question carries the words
                 if (!u.AnsweredAt.TryGetValue(b.TargetIndex, out var answeredAt)) u.AnsweredAt[b.TargetIndex] = answeredAt = now;
                 var age = now - answeredAt;
                 HlVerdictMark(dl, new Vector2(max.X, min.Y), b.Answer, HlEase(age / HlVerdictPopSec) * snap, th);
-                if (age < HlVerdictShowSec) { HlVerdictPill(dl, b.Answer, age, min, max, boxes, disp, th, snap); continue; }
+                if (age < HlVerdictShowSec) { HlVerdictPill(dl, b.Answer, age, min, max, all, disp, th, snap); continue; }
             }
             if (b.Label == null) continue;
             var count = u.Counts.GetValueOrDefault(b.TargetIndex);
             var text = count > 1 ? $"{b.Label} x{count}" : b.Label;
-            HlLabel(dl, text, b.Tier, state, min, max, boxes, disp, th, snap);
+            HlLabel(dl, text, b.Tier, state, min, max, all, disp, th, snap);
         }
     }
 
     /// <summary>Notice a new highlight or an advance, so the right boxes snap in; forget targets that left the screen.</summary>
-    private void ObserveHighlights(List<HighlightBox> boxes, string? title, int? current, DateTime since, int rev, double now)
+    private static void ObserveHighlights(HighlightUiState u, List<HighlightBox> boxes, string? title, int? current, DateTime since, int rev, double now)
     {
-        var u = _hlUi;
         var fresh = true;
         if (rev != u.SeenRev)
         {
@@ -427,7 +468,7 @@ public partial class WhatsAnAiBridge
         dl.AddRectFilled(pmin, pmax, U(th.Card, 0.94f * snap), size.Y * 0.5f);
         dl.AddRect(pmin, pmax, U(border, 0.55f * snap), size.Y * 0.5f);
         dl.AddText(font, small, new Vector2(pmin.X + 6, pmin.Y + 3), U(tone, (state == 0 ? 1f : 0.85f) * snap), text);
-        _hlUi.Placed.Add((pmin, pmax));
+        _hlPlaced.Add((pmin, pmax));
     }
 
     // ── Verdicts ─────────────────────────────────────────────────────
@@ -437,7 +478,7 @@ public partial class WhatsAnAiBridge
     /// Yes / No / Not sure pills. The pills alone are an ImGui window (no background, no decoration, no saved
     /// settings), so the overlay takes exactly those clicks and nothing else; the visuals stay on the foreground list.
     /// </summary>
-    private void HlAskStrip(ImDrawListPtr dl, in HighlightBox b, Vector2 min, Vector2 max, List<HighlightBox> boxes, Vector2 disp, PanelTheme th, float snap)
+    private void HlAskStrip(ImDrawListPtr dl, in HighlightBox b, string owner, int slot, Vector2 min, Vector2 max, List<HighlightBox> boxes, Vector2 disp, PanelTheme th, float snap)
     {
         var f = ImGui.GetFontSize();
         var small = f * 0.85f;
@@ -476,7 +517,7 @@ public partial class WhatsAnAiBridge
         const ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
             | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoNav
             | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoBringToFrontOnFocus | ImGuiWindowFlags.NoBackground | ImGuiWindowFlags.NoSavedSettings;
-        if (ImGui.Begin(HlAskWin[Math.Clamp(b.TargetIndex, 0, HlAskWindows - 1)], flags))
+        if (ImGui.Begin(HlAskWindow(slot, b.TargetIndex), flags))
         {
             var py = cy - pillH * 0.5f;
             ImGui.SetCursorScreenPos(new Vector2(x, py));
@@ -500,8 +541,16 @@ public partial class WhatsAnAiBridge
         HlAnswerPill(dl, font, small, new Vector2(x, cy), noW, pillH, "No", ToneBad, 1, hovNo, snap, th, 1f);
         x += noW + gap;
         HlAnswerPill(dl, font, small, new Vector2(x, cy), skipW, pillH, "Not sure", th.TextDim, 2, hovSkip, snap, th, 1f);
-        _hlUi.Placed.Add((pmin, pmax));
-        if (answer != null) HighlightAnswer(b.TargetIndex, answer);
+        _hlPlaced.Add((pmin, pmax));
+        if (answer != null) HighlightAnswer(owner, b.TargetIndex, answer);
+    }
+
+    /// <summary>One window id per layer slot and target index (guide.highlight takes at most 40 targets), built once.</summary>
+    private string HlAskWindow(int slot, int target)
+    {
+        var k = slot * 40 + target;
+        if (!_hlAskWin.TryGetValue(k, out var id)) _hlAskWin[k] = id = $"##hl_ask_{slot}_{target}";
+        return id;
     }
 
     /// <summary>The "?" badge: the step badge's filled accent disc with a question mark, so "asking" reads like "now".</summary>
@@ -553,7 +602,7 @@ public partial class WhatsAnAiBridge
         dl.AddRectFilled(pmin, pmax, U(th.Card, 0.95f * alpha), 6f);
         dl.AddRect(pmin, pmax, U(tone, 0.55f * alpha), 6f);
         HlAnswerPill(dl, font, small, new Vector2(pmin.X + 4f, (pmin.Y + pmax.Y) * 0.5f), w, h, text, tone, glyph, false, alpha, th, 0.4f + 0.6f * HlEase(age / HlVerdictPopSec));
-        _hlUi.Placed.Add((pmin, pmax));
+        _hlPlaced.Add((pmin, pmax));
     }
 
     /// <summary>The lasting mark on the box's top-right corner: a badge-sized disc in the answer's tone with its glyph.</summary>
@@ -600,7 +649,7 @@ public partial class WhatsAnAiBridge
         var x = pmin.X + 10 + 6 + 6;
         dl.AddText(new Vector2(x, cy - f * 0.5f), U(th.Text, snap), title);
         if (sub != null) dl.AddText(font, small, new Vector2(x + tw + 8, cy - small * 0.5f), U(th.TextDim, snap), sub);
-        _hlUi.Placed.Add((pmin, pmax));
+        _hlPlaced.Add((pmin, pmax));
     }
 
     /// <summary>
@@ -641,7 +690,7 @@ public partial class WhatsAnAiBridge
     {
         foreach (var b in boxes)
             if (pmax.X > b.X - 2 && pmin.X < b.X + b.W + 2 && pmax.Y > b.Y - 2 && pmin.Y < b.Y + b.H + 2) return true;
-        foreach (var (lmin, lmax) in _hlUi.Placed)
+        foreach (var (lmin, lmax) in _hlPlaced)
             if (pmax.X > lmin.X - 2 && pmin.X < lmax.X + 2 && pmax.Y > lmin.Y - 2 && pmin.Y < lmax.Y + 2) return true;
         return false;
     }
