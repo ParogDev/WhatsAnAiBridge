@@ -48,7 +48,7 @@ public partial class WhatsAnAiBridge
 
     /// <summary>One drawable box (an item target can resolve to several).</summary>
     internal readonly record struct HighlightBox(float X, float Y, float W, float H, string? Label, string Tier, int? Order, int TargetIndex,
-        string? Action = null, string? Ask = null, string? Answer = null);
+        string? Action = null, string? Ask = null, string? Answer = null, bool Panned = false, float PanX = 0, float PanY = 0);
 
     /// <summary>The user's answer to an asked target, as stored (verdicts.jsonl, guide.verdicts, the observer's agent lane).</summary>
     internal sealed class HighlightVerdict
@@ -267,15 +267,24 @@ public partial class WhatsAnAiBridge
                     ["found"] = _hl.Boxes.Count(b => b.TargetIndex == i),
                 })),
                 ["boxes"] = new JArray(_hl.Boxes.Select(b => new JObject { ["target"] = b.TargetIndex, ["rect"] = new JArray(b.X, b.Y, b.W, b.H) })),
+                ["worldMapPan"] = _hl.Boxes.Any(b => b.Panned) ? _wmPanSource : null,
                 ["note"] = _hl.Missing.Count > 0 ? $"{_hl.Missing.Count} target(s) not on screen right now (panel closed, item not visible); they appear when visible." : null,
             };
         }
     }
 
-    /// <summary>A consistent copy for drawing (taken once per frame).</summary>
+    /// <summary>A consistent copy for drawing (taken once per frame, main thread). Boxes on the world map move with its pan,
+    /// read raw this frame: targets re-resolve only every 100 ms and the HUD's rects trail a drag.</summary>
     internal (List<HighlightBox> boxes, string? title, int? current, DateTime since, int rev) HighlightSnapshot()
     {
-        lock (_hlLock) return (_hl.Boxes.ToList(), _hl.Title, _hl.Current, _hl.Since, _hl.Rev);
+        List<HighlightBox> boxes;
+        (string? title, int? current, DateTime since, int rev) s;
+        lock (_hlLock) { boxes = _hl.Boxes.ToList(); s = (_hl.Title, _hl.Current, _hl.Since, _hl.Rev); }
+        if (boxes.Any(b => b.Panned) && FreshPan(_wmLastPan) is { Addr: not 0 } now)
+            for (var i = 0; i < boxes.Count; i++)
+                if (boxes[i].Panned)
+                    boxes[i] = boxes[i] with { X = boxes[i].X + (now.PanX - boxes[i].PanX) * now.Sx, Y = boxes[i].Y + (now.PanY - boxes[i].PanY) * now.Sy };
+        return (boxes, s.title, s.current, s.since, s.rev);
     }
 
     /// <summary>Main thread, from Render: re-resolve targets to screen rects every 100 ms (they follow the UI).</summary>
@@ -300,7 +309,9 @@ public partial class WhatsAnAiBridge
             try
             {
                 var found = ResolveTarget(t);
-                foreach (var (_, x, y, w, h) in found) boxes.Add(new(x, y, w, h, t.Label, t.Tier, t.Order, i, t.Action, t.Ask, t.Answer));
+                var pan = _wmLastPan;   // the pan these boxes were placed with (HighlightSnapshot moves them by the change since)
+                foreach (var (_, x, y, w, h, panned) in found)
+                    boxes.Add(new(x, y, w, h, t.Label, t.Tier, t.Order, i, t.Action, t.Ask, t.Answer, panned, pan.PanX, pan.PanY));
                 // Checkbox state (PoE2: byte at +0x60A of the checkbox element, see finding ui.poe2.checkbox-checked).
                 if (t.UntilCond is "checked" or "unchecked" && found.FirstOrDefault(f => f.e != null).e is { } cb)
                     conditionMet[i] = IsChecked(cb) == (t.UntilCond == "checked");
@@ -359,12 +370,14 @@ public partial class WhatsAnAiBridge
     /// Offsets and UI trees change with patches: a failure must name its broken link, not surface ten calls later.</summary>
     internal string? Why;
 
-    internal List<(UiElement? e, float x, float y, float w, float h)> ResolveTarget(HighlightTarget t)
+    /// <remarks><c>panned</c>: the box sits on the world map's pan container, placed with the pan read at resolve time;
+    /// <see cref="HighlightSnapshot"/> moves it with the pan every frame.</remarks>
+    internal List<(UiElement? e, float x, float y, float w, float h, bool panned)> ResolveTarget(HighlightTarget t)
     {
-        var list = new List<(UiElement?, float, float, float, float)>();
+        var list = new List<(UiElement?, float, float, float, float, bool)>();
         Why = null;
-        if (t.Rect != null) list.Add((null, t.Rect[0], t.Rect[1], t.Rect[2], t.Rect[3]));
-        else if (t.Item != null) foreach (var r in FindItemRects(t.Item)) list.Add((null, r.x, r.y, r.w, r.h));
+        if (t.Rect != null) list.Add((null, t.Rect[0], t.Rect[1], t.Rect[2], t.Rect[3], false));
+        else if (t.Item != null) foreach (var r in FindItemRects(t.Item)) list.Add((null, r.x, r.y, r.w, r.h, false));
         else
         {
             List<UiElement> elements;
@@ -391,7 +404,9 @@ public partial class WhatsAnAiBridge
             {
                 if (!e.IsVisible) continue;
                 var r = e.GetClientRect();
-                if (r.Width > 0 && r.Height > 0) list.Add((e, r.X + PanCorrectionX(e, r.X, pan), r.Y, r.Width, r.Height));
+                if (r.Width <= 0 || r.Height <= 0) continue;
+                var panned = OnWorldMap(e, pan, out var x, out var y);
+                list.Add((e, panned ? x : r.X, panned ? y : r.Y, r.Width, r.Height, panned));
             }
         }
         if (t.ClipTo != null)
@@ -400,7 +415,7 @@ public partial class WhatsAnAiBridge
             if (new ExpressionWalker(GameController).Resolve(t.ClipTo, out _) is UiElement c && c.IsVisible)
             {
                 var cr = c.GetClientRect();
-                cr.X += PanCorrectionX(c, cr.X, WorldMapPan());
+                if (OnWorldMap(c, WorldMapPan(), out var cx, out var cy)) { cr.X = cx; cr.Y = cy; }
                 list.RemoveAll(b => b.Item2 + b.Item4 / 2 < cr.X || b.Item2 + b.Item4 / 2 > cr.X + cr.Width
                                     || b.Item3 + b.Item5 / 2 < cr.Y || b.Item3 + b.Item5 / 2 > cr.Y + cr.Height);
             }
@@ -411,45 +426,103 @@ public partial class WhatsAnAiBridge
         return list;
     }
 
+
+    /// <summary>The world map's pan as one resolve (or one frame) sees it: default when the map is closed or off.</summary>
+    internal readonly record struct WorldMapPanState(long Addr, float ParentX, float ParentY, float Sx, float Sy, float PanX, float PanY);
+
+    // Pan calibration, per opening of the map (the container's address): the offset of the two pan floats inside
+    // WorldMap[0], found by matching its Position at rest. Main thread only.
+    private long _wmCalAddr;
+    private int? _wmCalOffset;
+    private string? _wmCalBroken;
+    private Vector2N _wmCalLastPos;
+    private DateTime _wmCalSince;
+    /// <summary>Where the pan comes from now, for guide.highlight_state (null: no box on the world map).</summary>
+    private string? _wmPanSource;
+
     /// <summary>
-    /// The world map (Travel and waypoint Teleport views) pans its container WorldMap[0] horizontally by screen width / 2560
-    /// (the game's 2560x1600 layout stretched to the screen), but the HUD scales every rect by screen height / 1600 on both
-    /// axes. Offsets inside the container come out right; the pan does not, so boxes under it drift sideways by
-    /// pan * (W/2560 - H/1600) as the map is dragged (finding ui.worldmap.pan-x-underscaled; 27 px at pan -340 on
-    /// 1920x1080). Vertically both factors are equal. Returns what <see cref="PanCorrectionX"/> needs, or default when the
-    /// map is closed or the game needs no correction (<see cref="WorldMapPanCorrected"/>, per game).
+    /// The world map (Travel and waypoint Teleport views) pans its container WorldMap[0] by screen width / 2560 horizontally
+    /// (the game's 2560x1600 layout stretched to the screen) and screen height / 1600 vertically, but the HUD scales every
+    /// rect by H/1600 on both axes, so boxes under it drift sideways by pan.X * (W/2560 - H/1600) (finding
+    /// ui.worldmap.pan-x-underscaled; 31.7 px at the Act 2 map's pan limit on 1920x1080). And GetClientRect() sums cached
+    /// element memory, which trails a drag on both axes (Whats A Route: 9.4 px avg, 52 px max while dragging). So the pan
+    /// is read raw (leaf backend, no cache) from WorldMap[0] + the calibrated offset; until calibrated, or when that is
+    /// broken (reason in <see cref="_wmPanSource"/>), the cached Position stands in. Per game: <see cref="WorldMapPanOffset"/>.
     /// </summary>
-    private (long Addr, float ParentX, float Sy, float K) WorldMapPan()
+    private WorldMapPanState WorldMapPan()
     {
-        if (!WorldMapPanCorrected) return default;
+        if (WorldMapPanOffset is not { } hint) return default;
         var wm = GameController.IngameState?.IngameUi?.WorldMap;
         if (wm == null || wm.Address == 0 || !wm.IsVisible || wm.ChildCount == 0) return default;
         var pan = wm.GetChildAtIndex(0);
         if (pan == null || pan.Address == 0) return default;
         var cam = GameController.IngameState!.Camera;
         var sy = cam.Height / 1600f;
-        return sy <= 0 ? default : (pan.Address, wm.GetClientRect().X, sy, cam.Width / 2560f - sy);
+        if (sy <= 0) return default;
+        var pos = pan.Position;
+        if (_wmCalAddr != pan.Address) { _wmCalAddr = pan.Address; _wmCalOffset = null; _wmCalBroken = null; _wmCalSince = DateTime.UtcNow; _wmCalLastPos = new(float.NaN); }
+        if (_wmCalOffset == null && _wmCalBroken == null) CalibratePan(pan.Address, new Vector2N(pos.X, pos.Y), hint);
+        _wmCalLastPos = new(pos.X, pos.Y);
+        var r = wm.GetClientRect();
+        var fresh = FreshPan(new(pan.Address, r.X, r.Y, cam.Width / 2560f, sy, pos.X, pos.Y));
+        _wmPanSource = _wmCalOffset is { } off ? $"raw WorldMap[0] +0x{off:X}"
+            : $"cached WorldMap[0].Position (trails drags): {_wmCalBroken ?? "calibrating, waiting for the map to rest"}";
+        return _wmLastPan = fresh;
     }
 
-    /// <summary>
-    /// The x correction for <paramref name="e"/>, whose HUD rect starts at <paramref name="rectX"/>; 0 outside the pan
-    /// container. The pan comes from the element's own rect, not from WorldMap[0].Position: that read is the container's
-    /// cached memory and trails a drag (15 px average, 31 px max error while dragging, measured by Whats A Route).
-    /// rectX = parentX + (pan + the positions below the container) * sy, so the pan follows from the rect.
-    /// </summary>
-    private static float PanCorrectionX(UiElement e, float rectX, (long Addr, float ParentX, float Sy, float K) pan)
+    /// <summary>The pan the last resolve placed world-map boxes with.</summary>
+    private WorldMapPanState _wmLastPan;
+
+    /// <summary>At rest (Position unchanged since the last resolve), find the two pan floats in WorldMap[0]: the per-game
+    /// hint first, else a scan of its first 0x400 bytes. Gives up after 3 s with the reason (the offset moved).</summary>
+    private void CalibratePan(long addr, Vector2N pos, int hint)
     {
-        if (pan.Addr == 0 || pan.K == 0) return 0;
-        float below = 0;
+        static bool Same(float a, float b) => MathF.Abs(a - b) < 0.01f;
+        if (!Same(pos.X, _wmCalLastPos.X) || !Same(pos.Y, _wmCalLastPos.Y))
+        {
+            if ((DateTime.UtcNow - _wmCalSince).TotalSeconds > 30) _wmCalBroken = "the map never came to rest for 30 s";
+            return;
+        }
+        if (Same(RawRead<float>(addr + hint), pos.X) && Same(RawRead<float>(addr + hint + 4), pos.Y)) { _wmCalOffset = hint; return; }
+        if (pos.X != 0 || pos.Y != 0)   // (0, 0) matches any zeroed pair: only the hint can be trusted then
+            for (var off = 0; off + 8 <= 0x400; off += 4)
+                if (Same(RawRead<float>(addr + off), pos.X) && Same(RawRead<float>(addr + off + 4), pos.Y)) { _wmCalOffset = off; return; }
+        if ((DateTime.UtcNow - _wmCalSince).TotalSeconds > 3)
+            _wmCalBroken = $"no float pair equal to WorldMap[0].Position ({pos.X:F1}, {pos.Y:F1}) in its first 0x400 bytes " +
+                           $"(hint +0x{hint:X} reads {RawRead<float>(addr + hint):F1}, {RawRead<float>(addr + hint + 4):F1}): the pan moved";
+    }
+
+    /// <summary><paramref name="p"/> with the pan read raw now when calibrated (else as given).</summary>
+    private WorldMapPanState FreshPan(WorldMapPanState p) =>
+        p.Addr != 0 && p.Addr == _wmCalAddr && _wmCalOffset is { } off
+            ? p with { PanX = RawRead<float>(p.Addr + off), PanY = RawRead<float>(p.Addr + off + 4) }
+            : p;
+
+    /// <summary>
+    /// Whether <paramref name="e"/> is inside the pan container, and if so its true top-left: parentX + pan.X * W/2560 +
+    /// local.X * H/1600, parentY + (pan.Y + local.Y) * H/1600, where local = the Positions from e up to (not including)
+    /// WorldMap[0] (fixed per node, so the cache doesn't matter there).
+    /// </summary>
+    private static bool OnWorldMap(UiElement e, WorldMapPanState pan, out float x, out float y)
+    {
+        x = y = 0;
+        if (pan.Addr == 0) return false;
+        float lx = 0, ly = 0;
         UiElement? p = e;
         for (var depth = 0; p != null && p.Address != 0 && depth < 48; depth++, p = p.Parent)
         {
-            if (p.Address == pan.Addr) return ((rectX - pan.ParentX) / pan.Sy - below) * pan.K;
-            below += p.Position.X;
+            if (p.Address == pan.Addr)
+            {
+                x = pan.ParentX + pan.PanX * pan.Sx + lx * pan.Sy;
+                y = pan.ParentY + (pan.PanY + ly) * pan.Sy;
+                return true;
+            }
+            var lp = p.Position;
+            lx += lp.X;
+            ly += lp.Y;
         }
-        return 0;
+        return false;
     }
-
     /// <summary>PoE2 checkbox state: byte at +0x60A of the checkbox element (finding ui.poe2.checkbox-checked).</summary>
     internal bool IsChecked(UiElement checkbox) => GameController.Memory.Read<byte>(checkbox.Address + 0x60A) == 1;
 
