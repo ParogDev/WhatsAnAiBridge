@@ -298,7 +298,7 @@ public partial class WhatsAnAiBridge
                     _hlLayers.Clear();
                     return new JObject
                     {
-                        ["ok"] = true, ["cleared"] = true, ["all"] = true, ["layers"] = names,
+                        ["ok"] = true, ["cleared"] = true, ["all"] = true, ["clearedLayers"] = names,   // names; "layers" is the combined view's objects
                         ["note"] = lost > 0 ? $"{lost} unanswered question(s) were removed with them." : null,
                     };
                 }
