@@ -58,6 +58,10 @@ public partial class WhatsAnAiBridge
 
     private static int? ActiveWeaponSet(Entity player) => null;
 
+    /// <summary>See the PoE2 partial. Unverified on PoE1 (finding ui.worldmap.pan-x-underscaled): off until measured. The
+    /// HUD's x scale is the same (Camera.Height / 1600), so if boxes on the world map drift as it pans, turn it on.</summary>
+    private static readonly bool WorldMapPanCorrected = false;
+
     // ── Game-specific UI panels ──────────────────────────────────────
 
     private static void PopulateGamePanels(UiDto dto, IngameUIElements ui)

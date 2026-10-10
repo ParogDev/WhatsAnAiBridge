@@ -386,11 +386,12 @@ public partial class WhatsAnAiBridge
             }
             if (elements.Count > 0 && elements.All(e => !e.IsVisible)) Why ??= $"{elements.Count} match(es), none visible";
             if (t.Rel != null) elements = elements.Select(e => Navigate(e, t.Rel)).Where(e => e != null).Select(e => e!).ToList();
+            var pan = elements.Count > 0 ? WorldMapPan() : default;
             foreach (var e in elements)
             {
                 if (!e.IsVisible) continue;
                 var r = e.GetClientRect();
-                if (r.Width > 0 && r.Height > 0) list.Add((e, r.X, r.Y, r.Width, r.Height));
+                if (r.Width > 0 && r.Height > 0) list.Add((e, r.X + PanCorrectionX(e, r.X, pan), r.Y, r.Width, r.Height));
             }
         }
         if (t.ClipTo != null)
@@ -399,6 +400,7 @@ public partial class WhatsAnAiBridge
             if (new ExpressionWalker(GameController).Resolve(t.ClipTo, out _) is UiElement c && c.IsVisible)
             {
                 var cr = c.GetClientRect();
+                cr.X += PanCorrectionX(c, cr.X, WorldMapPan());
                 list.RemoveAll(b => b.Item2 + b.Item4 / 2 < cr.X || b.Item2 + b.Item4 / 2 > cr.X + cr.Width
                                     || b.Item3 + b.Item5 / 2 < cr.Y || b.Item3 + b.Item5 / 2 > cr.Y + cr.Height);
             }
@@ -407,6 +409,45 @@ public partial class WhatsAnAiBridge
         }
         if (list.Count == 0) Why ??= t.Item != null ? $"no visible item matches '{t.Item}' (inventory / visible stash tab)" : "not found";
         return list;
+    }
+
+    /// <summary>
+    /// The world map (Travel and waypoint Teleport views) pans its container WorldMap[0] horizontally by screen width / 2560
+    /// (the game's 2560x1600 layout stretched to the screen), but the HUD scales every rect by screen height / 1600 on both
+    /// axes. Offsets inside the container come out right; the pan does not, so boxes under it drift sideways by
+    /// pan * (W/2560 - H/1600) as the map is dragged (finding ui.worldmap.pan-x-underscaled; 27 px at pan -340 on
+    /// 1920x1080). Vertically both factors are equal. Returns what <see cref="PanCorrectionX"/> needs, or default when the
+    /// map is closed or the game needs no correction (<see cref="WorldMapPanCorrected"/>, per game).
+    /// </summary>
+    private (long Addr, float ParentX, float Sy, float K) WorldMapPan()
+    {
+        if (!WorldMapPanCorrected) return default;
+        var wm = GameController.IngameState?.IngameUi?.WorldMap;
+        if (wm == null || wm.Address == 0 || !wm.IsVisible || wm.ChildCount == 0) return default;
+        var pan = wm.GetChildAtIndex(0);
+        if (pan == null || pan.Address == 0) return default;
+        var cam = GameController.IngameState!.Camera;
+        var sy = cam.Height / 1600f;
+        return sy <= 0 ? default : (pan.Address, wm.GetClientRect().X, sy, cam.Width / 2560f - sy);
+    }
+
+    /// <summary>
+    /// The x correction for <paramref name="e"/>, whose HUD rect starts at <paramref name="rectX"/>; 0 outside the pan
+    /// container. The pan comes from the element's own rect, not from WorldMap[0].Position: that read is the container's
+    /// cached memory and trails a drag (15 px average, 31 px max error while dragging, measured by Whats A Route).
+    /// rectX = parentX + (pan + the positions below the container) * sy, so the pan follows from the rect.
+    /// </summary>
+    private static float PanCorrectionX(UiElement e, float rectX, (long Addr, float ParentX, float Sy, float K) pan)
+    {
+        if (pan.Addr == 0 || pan.K == 0) return 0;
+        float below = 0;
+        UiElement? p = e;
+        for (var depth = 0; p != null && p.Address != 0 && depth < 48; depth++, p = p.Parent)
+        {
+            if (p.Address == pan.Addr) return ((rectX - pan.ParentX) / pan.Sy - below) * pan.K;
+            below += p.Position.X;
+        }
+        return 0;
     }
 
     /// <summary>PoE2 checkbox state: byte at +0x60A of the checkbox element (finding ui.poe2.checkbox-checked).</summary>
