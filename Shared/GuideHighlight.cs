@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace WhatsAnAiBridge;
@@ -10,10 +12,15 @@ namespace WhatsAnAiBridge;
 /// stash tab (by name), any UI element (walker path) or a screen area - with an emphasis tier and an optional order
 /// (a sequence: "1 then 2 then 3"). Targets are re-resolved every 100 ms so they follow the UI; GuideHighlightDraw.cs
 /// draws them. Read-only: nothing is clicked.
-///   guide.highlight {targets: [{item | path | panel+child | rect:[x,y,w,h], label?, tier?: primary|secondary|context, order?}],
-///                    title?, current?, durationSec?, clear?}
+///   guide.highlight {targets: [{item | path | panel+child | rect:[x,y,w,h], label?, tier?: primary|secondary|context, order?,
+///                               ask?, key?}], title?, current?, durationSec?, clear?}
 ///   guide.highlight_advance {}      the next step of a sequence becomes current
-///   guide.highlight_state {}        targets with their resolved rects (what the user sees)
+///   guide.highlight_state {}        targets with their resolved rects (what the user sees), and each target's answer
+///   guide.verdicts {since?, limit?} the user's answers to asked targets (Yes / No / Not sure, clicked in game), with a seq
+/// Verdicts: a target with `ask` (a yes/no question about the agent's guess, e.g. "Is this the Keth stop?") shows Yes /
+/// No / Not sure controls next to it. The click records a verdict {id, key, ask, label, answer, at, rect, locator,
+/// highlightTitle}, kept in memory, appended to <BridgeDirectory>\verdicts\verdicts.jsonl and, while observing, put
+/// on the observer's agent lane (method user.verdict). The target then stops asking.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
@@ -33,10 +40,36 @@ public partial class WhatsAnAiBridge
         public string? Label;
         public string Tier = "primary";
         public int? Order;
+        public string? Ask;           // a yes/no question about this target ("Is this the Keth stop?"): Yes / No / Not sure controls appear next to it
+        public string? Key;           // caller's correlation key for the verdict (e.g. "worldmap.stop.10=G2_4_1"); default id: hl<rev>.<index>
+        public string? Answer;        // yes | no | skip once the user clicked
+        public DateTime? AnsweredAt;
     }
 
     /// <summary>One drawable box (an item target can resolve to several).</summary>
-    internal readonly record struct HighlightBox(float X, float Y, float W, float H, string? Label, string Tier, int? Order, int TargetIndex, string? Action = null);
+    internal readonly record struct HighlightBox(float X, float Y, float W, float H, string? Label, string Tier, int? Order, int TargetIndex,
+        string? Action = null, string? Ask = null, string? Answer = null);
+
+    /// <summary>The user's answer to an asked target, as stored (verdicts.jsonl, guide.verdicts, the observer's agent lane).</summary>
+    internal sealed class HighlightVerdict
+    {
+        [JsonProperty("seq")] public long Seq;
+        [JsonProperty("id")] public string Id = "";
+        [JsonProperty("key", NullValueHandling = NullValueHandling.Ignore)] public string? Key;
+        [JsonProperty("ask")] public string Ask = "";
+        [JsonProperty("label", NullValueHandling = NullValueHandling.Ignore)] public string? Label;
+        [JsonProperty("answer")] public string Answer = "";        // yes | no | skip
+        [JsonProperty("at")] public DateTime At;
+        [JsonProperty("rect", NullValueHandling = NullValueHandling.Ignore)] public float[]? Rect;   // the target's first box when answered
+        [JsonProperty("item", NullValueHandling = NullValueHandling.Ignore)] public string? Item;
+        [JsonProperty("path", NullValueHandling = NullValueHandling.Ignore)] public string? Path;
+        [JsonProperty("text", NullValueHandling = NullValueHandling.Ignore)] public string? Text;
+        [JsonProperty("panel", NullValueHandling = NullValueHandling.Ignore)] public string? Panel;
+        [JsonProperty("child", NullValueHandling = NullValueHandling.Ignore)] public int[]? Child;
+        [JsonProperty("highlightTitle", NullValueHandling = NullValueHandling.Ignore)] public string? HighlightTitle;
+        [JsonProperty("highlightRev")] public int HighlightRev;
+        [JsonProperty("target")] public int Target;
+    }
 
     internal sealed class HighlightState
     {
@@ -61,8 +94,112 @@ public partial class WhatsAnAiBridge
         "guide.highlight" => SafeMemory(() => HighlightSet(p)),
         "guide.highlight_advance" => SafeMemory(HighlightAdvance),
         "guide.highlight_state" => SafeMemory(HighlightStateJson),
+        "guide.verdicts" => SafeMemory(() => VerdictsJson(p)),
         _ => null,
     };
+
+    // ── Verdicts ─────────────────────────────────────────────────────
+
+    private const int VerdictsKeep = 300;
+    private readonly object _verdictLock = new();
+    private readonly List<HighlightVerdict> _verdicts = new();
+    private long _verdictSeq;
+    private bool _verdictsLoaded;
+    private string VerdictsFile => Path.Combine(_bridgeDir, "verdicts", "verdicts.jsonl");
+
+    /// <summary>Continue from the file once: the sequence must not restart after a HUD restart (an agent may wait with since=).</summary>
+    private void VerdictsLoadLocked()
+    {
+        if (_verdictsLoaded) return;
+        _verdictsLoaded = true;
+        try
+        {
+            if (!File.Exists(VerdictsFile)) return;
+            foreach (var line in File.ReadLines(VerdictsFile))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                HighlightVerdict? v = null;
+                try { v = JsonConvert.DeserializeObject<HighlightVerdict>(line); } catch { }
+                if (v == null) continue;
+                _verdicts.Add(v);
+                if (v.Seq > _verdictSeq) _verdictSeq = v.Seq;
+            }
+            if (_verdicts.Count > VerdictsKeep) _verdicts.RemoveRange(0, _verdicts.Count - VerdictsKeep);
+        }
+        catch (Exception ex) { LogError($"[GuideHighlight] reading {VerdictsFile}: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Main thread (the overlay's Yes / No / Not sure click): record the user's answer to an asked target. Ignored when
+    /// the target does not ask or was answered already. The highlight rev does not change (the overlay would re-enter).
+    /// </summary>
+    internal void HighlightAnswer(int targetIndex, string answer)
+    {
+        if (answer is not ("yes" or "no" or "skip")) return;
+        HighlightVerdict v;
+        lock (_hlLock)
+        {
+            if (targetIndex < 0 || targetIndex >= _hl.Targets.Count) return;
+            var t = _hl.Targets[targetIndex];
+            if (t.Ask == null || t.Answer != null) return;
+            t.Answer = answer;
+            t.AnsweredAt = DateTime.UtcNow;
+            for (var i = 0; i < _hl.Boxes.Count; i++)
+                if (_hl.Boxes[i].TargetIndex == targetIndex) _hl.Boxes[i] = _hl.Boxes[i] with { Answer = answer };
+            var box = _hl.Boxes.FirstOrDefault(b => b.TargetIndex == targetIndex);
+            v = new HighlightVerdict
+            {
+                Id = t.Key ?? $"hl{_hl.Rev}.{targetIndex}", Key = t.Key, Ask = t.Ask, Label = t.Label, Answer = answer, At = t.AnsweredAt.Value,
+                Rect = box.W > 0 ? [box.X, box.Y, box.W, box.H] : null,
+                Item = t.Item, Path = t.Path, Text = t.Text, Panel = t.Panel, Child = t.Child,
+                HighlightTitle = _hl.Title, HighlightRev = _hl.Rev, Target = targetIndex,
+            };
+        }
+        string line;
+        lock (_verdictLock)
+        {
+            VerdictsLoadLocked();
+            v.Seq = ++_verdictSeq;
+            _verdicts.Add(v);
+            if (_verdicts.Count > VerdictsKeep) _verdicts.RemoveRange(0, _verdicts.Count - VerdictsKeep);
+            line = JsonConvert.SerializeObject(v);
+        }
+        var file = VerdictsFile;
+        System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { Directory.CreateDirectory(Path.GetDirectoryName(file)!); File.AppendAllText(file, line + Environment.NewLine); }
+            catch (Exception ex) { LogError($"[GuideHighlight] writing {file}: {ex.Message}"); }
+        });
+        // While observing, the answer is an event on the agent lane (method user.verdict), so observe_wait can wake on it.
+        try { if (Obs().Enabled) ObsEmit(new JObject { ["kind"] = "agent", ["method"] = "user.verdict", ["params"] = JObject.FromObject(v) }); } catch { }
+    }
+
+    /// <summary>guide.verdicts {since?, limit?}: the answers after since (oldest first), the newest seq, and what is still being asked.</summary>
+    private JObject VerdictsJson(JToken? p)
+    {
+        var since = p?["since"]?.Value<long>() ?? 0;
+        var limit = Math.Clamp(p?["limit"]?.Value<int>() ?? 100, 1, VerdictsKeep);
+        JArray list; long seq;
+        lock (_verdictLock)
+        {
+            VerdictsLoadLocked();
+            seq = _verdictSeq;
+            list = new JArray(_verdicts.Where(v => v.Seq > since).Take(limit).Select(JObject.FromObject));
+        }
+        JArray asked;
+        int pending, rev;
+        lock (_hlLock)
+        {
+            rev = _hl.Rev;
+            asked = new JArray(_hl.Targets.Select((t, i) => (t, i)).Where(x => x.t.Ask != null).Select(x => new JObject
+            {
+                ["index"] = x.i, ["id"] = x.t.Key ?? $"hl{_hl.Rev}.{x.i}", ["key"] = x.t.Key, ["ask"] = x.t.Ask, ["label"] = x.t.Label,
+                ["answer"] = x.t.Answer, ["onScreen"] = _hl.Boxes.Any(b => b.TargetIndex == x.i),
+            }));
+            pending = _hl.Targets.Count(t => t.Ask != null && t.Answer == null);
+        }
+        return new JObject { ["ok"] = true, ["seq"] = seq, ["highlightRev"] = rev, ["verdicts"] = list, ["asked"] = asked, ["pending"] = pending, ["file"] = VerdictsFile };
+    }
 
     internal JObject HighlightSet(JToken? p)
     {
@@ -115,14 +252,18 @@ public partial class WhatsAnAiBridge
     {
         lock (_hlLock)
         {
+            long verdictSeq;
+            lock (_verdictLock) verdictSeq = _verdictSeq;
             return new JObject
             {
                 ["ok"] = true, ["rev"] = _hl.Rev, ["title"] = _hl.Title, ["current"] = _hl.Current,
                 ["until"] = _hl.Until?.ToString("O"),
+                ["verdictSeq"] = verdictSeq,   // await_verdicts since=: answers after this call
                 ["targets"] = new JArray(_hl.Targets.Select((t, i) => new JObject
                 {
                     ["index"] = i, ["item"] = t.Item, ["path"] = t.Path, ["text"] = t.Text, ["within"] = t.Within, ["action"] = t.Action, ["panel"] = t.Panel, ["child"] = t.Child == null ? null : new JArray(t.Child), ["rect"] = t.Rect == null ? null : new JArray(t.Rect),
                     ["label"] = t.Label, ["tier"] = t.Tier, ["order"] = t.Order,
+                    ["ask"] = t.Ask, ["key"] = t.Key, ["answer"] = t.Answer, ["answeredAt"] = t.AnsweredAt?.ToString("O"),
                     ["found"] = _hl.Boxes.Count(b => b.TargetIndex == i),
                 })),
                 ["boxes"] = new JArray(_hl.Boxes.Select(b => new JObject { ["target"] = b.TargetIndex, ["rect"] = new JArray(b.X, b.Y, b.W, b.H) })),
@@ -159,7 +300,7 @@ public partial class WhatsAnAiBridge
             try
             {
                 var found = ResolveTarget(t);
-                foreach (var (_, x, y, w, h) in found) boxes.Add(new(x, y, w, h, t.Label, t.Tier, t.Order, i, t.Action));
+                foreach (var (_, x, y, w, h) in found) boxes.Add(new(x, y, w, h, t.Label, t.Tier, t.Order, i, t.Action, t.Ask, t.Answer));
                 // Checkbox state (PoE2: byte at +0x60A of the checkbox element, see finding ui.poe2.checkbox-checked).
                 if (t.UntilCond is "checked" or "unchecked" && found.FirstOrDefault(f => f.e != null).e is { } cb)
                     conditionMet[i] = IsChecked(cb) == (t.UntilCond == "checked");
@@ -192,6 +333,8 @@ public partial class WhatsAnAiBridge
             Label = Clip(t["label"]?.ToString(), 40),
             Tier = t["tier"]?.ToString() is "secondary" or "context" ? t["tier"]!.ToString() : "primary",
             Order = t["order"]?.Type == JTokenType.Integer ? t["order"]!.Value<int>() : null,
+            Ask = Clip(S(t["ask"]), 80),
+            Key = Clip(S(t["key"]), 80),
         };
         if (t["rect"] is JArray r && r.Count == 4) ht.Rect = r.Select(v => v.Value<float>()).ToArray();
         return ht.Item == null && ht.Path == null && ht.Rect == null && ht.Panel == null && ht.Text == null ? null : ht;

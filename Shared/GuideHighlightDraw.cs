@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using ImGuiNET;
 
@@ -16,6 +17,11 @@ namespace WhatsAnAiBridge;
 /// step to the next. Entry: corners snap in from outside over 0.3 s and the active primary step gets one expanding
 /// ring; a step becoming done pops its check. Labels sit outside the box in a small pill, placed where they cover
 /// no other highlight; the title sits above the active box once.
+/// Asked targets (ask): instead of the label pill, a question strip sits outside the box - an accent "?" badge, the
+/// question, and Yes / No / Not sure pills. Only the pills are an ImGui window (no background, no decoration), so
+/// those clicks stop at the overlay and everything else stays click-through. A click records the verdict
+/// (HighlightAnswer); the strip becomes a result pill for 2.2 s (popping check / cross / dash), then the label pill
+/// returns and a small check / cross / dash mark stays on the box's top-right corner.
 /// Game-agnostic: ImGui only; nothing here touches ExileCore* directly. Box coordinates come from
 /// Element.GetClientRect(), which the HUD draws 1:1 on the ImGui display (Graphics.DrawFrame does the same).
 /// </summary>
@@ -24,6 +30,10 @@ public partial class WhatsAnAiBridge
     private const double HlSnapSec = 0.32, HlRingSec = 0.6, HlCheckSec = 0.3, HlPulseSec = 2.6;
     private const double HlPressSec = 1.4, HlPressDelay = 0.7;   // mouse cue: one press per cycle, the first after the entry ring
     private const float HlBadgeR = 9f, HlSnapPx = 10f, HlMouseW = 14f, HlMouseH = 20f, HlMousePad = 5f;
+    private const double HlVerdictShowSec = 2.2, HlVerdictPopSec = 0.3, HlVerdictFadeSec = 0.4;
+    private const int HlAskWindows = 40;   // one window id per target index (guide.highlight takes at most 40 targets)
+    private static readonly string[] HlAskWin = Enumerable.Range(0, HlAskWindows).Select(i => "##hl_ask_" + i).ToArray();
+    private static readonly string[] HlAskIds = ["##hl_yes", "##hl_no", "##hl_skip"];
 
     /// <summary>Overlay-local state: when each target's boxes appeared, for the entry animations.</summary>
     private sealed class HighlightUiState
@@ -37,6 +47,7 @@ public partial class WhatsAnAiBridge
         public readonly List<int> Gone = new();
         public readonly Dictionary<int, int> Counts = new();                 // boxes per target (an item can match several)
         public readonly List<(Vector2 min, Vector2 max)> Placed = new();     // label rects placed this frame
+        public readonly Dictionary<int, double> AnsweredAt = new();          // target index -> ImGui time its answer was first drawn
         public string? LastError;
     }
 
@@ -125,12 +136,20 @@ public partial class WhatsAnAiBridge
         // label outside its first box, where they cover no other highlight, badge or pill. Badges are reserved first.
         u.Placed.Clear();
         foreach (var b in boxes)
+        {
+            var r = new Vector2(HlBadgeR + 1.5f, HlBadgeR + 1.5f);
             if (b.Order != null)
             {
                 var (min, _) = HlRect(b);
-                var r = new Vector2(HlBadgeR + 1.5f, HlBadgeR + 1.5f);
                 u.Placed.Add((min - r, min + r));
             }
+            if (b.Answer != null)   // the verdict mark on the top-right corner
+            {
+                var (min, max) = HlRect(b);
+                var c = new Vector2(max.X, min.Y);
+                u.Placed.Add((c - r, c + r));
+            }
+        }
         if (title != null)
         {
             var anchor = curIdx >= 0 ? curIdx : HlAnchor(boxes, current);
@@ -164,6 +183,14 @@ public partial class WhatsAnAiBridge
                     state == 0 ? now - arrived : -1, th);
                 u.Placed.Add((pmin, pmax));
             }
+            if (b.Ask != null)
+            {
+                if (b.Answer == null) { HlAskStrip(dl, b, min, max, boxes, disp, th, snap); continue; }   // the question carries the words
+                if (!u.AnsweredAt.TryGetValue(b.TargetIndex, out var answeredAt)) u.AnsweredAt[b.TargetIndex] = answeredAt = now;
+                var age = now - answeredAt;
+                HlVerdictMark(dl, new Vector2(max.X, min.Y), b.Answer, HlEase(age / HlVerdictPopSec) * snap, th);
+                if (age < HlVerdictShowSec) { HlVerdictPill(dl, b.Answer, age, min, max, boxes, disp, th, snap); continue; }
+            }
             if (b.Label == null) continue;
             var count = u.Counts.GetValueOrDefault(b.TargetIndex);
             var text = count > 1 ? $"{b.Label} x{count}" : b.Label;
@@ -187,7 +214,7 @@ public partial class WhatsAnAiBridge
                 foreach (var b in boxes)
                     if (b.Order != null && (b.Order == current || b.Order == u.SeenCurrent)) u.ArrivedAt.Remove(b.TargetIndex);
             }
-            else u.ArrivedAt.Clear();
+            else { u.ArrivedAt.Clear(); u.AnsweredAt.Clear(); }
             // A highlight set long before this frame (the overlay was not drawing) appears without the entry animation.
             fresh = !first || (DateTime.UtcNow - since).TotalSeconds < 2;
             u.SeenRev = rev;
@@ -401,6 +428,158 @@ public partial class WhatsAnAiBridge
         dl.AddRect(pmin, pmax, U(border, 0.55f * snap), size.Y * 0.5f);
         dl.AddText(font, small, new Vector2(pmin.X + 6, pmin.Y + 3), U(tone, (state == 0 ? 1f : 0.85f) * snap), text);
         _hlUi.Placed.Add((pmin, pmax));
+    }
+
+    // ── Verdicts ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The question strip of an asked target, outside its box (below first): an accent "?" badge, the question, and
+    /// Yes / No / Not sure pills. The pills alone are an ImGui window (no background, no decoration, no saved
+    /// settings), so the overlay takes exactly those clicks and nothing else; the visuals stay on the foreground list.
+    /// </summary>
+    private void HlAskStrip(ImDrawListPtr dl, in HighlightBox b, Vector2 min, Vector2 max, List<HighlightBox> boxes, Vector2 disp, PanelTheme th, float snap)
+    {
+        var f = ImGui.GetFontSize();
+        var small = f * 0.85f;
+        var font = ImGui.GetFont();
+        var k = small / f;
+        const float pad = 8f, gap = 6f, pillPad = 8f, glyphW = 10f;
+        var pillH = small + 6f;
+        var askW = ImGui.CalcTextSize(b.Ask).X * k;
+        var yesW = glyphW + 4f + ImGui.CalcTextSize("Yes").X * k + pillPad * 2;
+        var noW = glyphW + 4f + ImGui.CalcTextSize("No").X * k + pillPad * 2;
+        var skipW = ImGui.CalcTextSize("Not sure").X * k + pillPad * 2 - 2f;
+        var ctrlW = yesW + gap + noW + gap + skipW;
+        var size = new Vector2(pad + HlBadgeR * 2 + gap + askW + 12f + ctrlW + pad, pillH + 8f);
+        var (pmin, pmax) = HlPlace(size, min, max, boxes, disp);
+        var cy = (pmin.Y + pmax.Y) * 0.5f;
+
+        // The strip: card fill, accent hairline (the question is the current thing to look at).
+        dl.AddRectFilled(pmin, pmax, U(th.Card, 0.95f * snap), 6f);
+        dl.AddRect(pmin, pmax, U(ToneAccent, 0.55f * snap), 6f);
+        var x = pmin.X + pad;
+        HlQuestionBadge(dl, font, small, new Vector2(x + HlBadgeR, cy), snap);
+        x += HlBadgeR * 2 + gap;
+        dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(th.Text, snap), b.Ask);
+        x += askW + 12f;
+
+        // The controls: one window over the pills only. Hit-testing is the window's; the drawing is ours.
+        var wmin = new Vector2(x - 3f, cy - pillH * 0.5f - 3f);
+        var wsize = new Vector2(ctrlW + 6f, pillH + 6f);
+        string? answer = null;
+        var hovYes = false; var hovNo = false; var hovSkip = false;
+        ImGui.SetNextWindowPos(wmin, ImGuiCond.Always);
+        ImGui.SetNextWindowSize(wsize, ImGuiCond.Always);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowMinSize, Vector2.One);
+        const ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
+            | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoNav
+            | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoBringToFrontOnFocus | ImGuiWindowFlags.NoBackground | ImGuiWindowFlags.NoSavedSettings;
+        if (ImGui.Begin(HlAskWin[Math.Clamp(b.TargetIndex, 0, HlAskWindows - 1)], flags))
+        {
+            var py = cy - pillH * 0.5f;
+            ImGui.SetCursorScreenPos(new Vector2(x, py));
+            ImGui.InvisibleButton(HlAskIds[0], new Vector2(yesW, pillH));
+            hovYes = ImGui.IsItemHovered();
+            if (ImGui.IsItemClicked()) answer = "yes";
+            ImGui.SetCursorScreenPos(new Vector2(x + yesW + gap, py));
+            ImGui.InvisibleButton(HlAskIds[1], new Vector2(noW, pillH));
+            hovNo = ImGui.IsItemHovered();
+            if (ImGui.IsItemClicked()) answer = "no";
+            ImGui.SetCursorScreenPos(new Vector2(x + yesW + gap + noW + gap, py));
+            ImGui.InvisibleButton(HlAskIds[2], new Vector2(skipW, pillH));
+            hovSkip = ImGui.IsItemHovered();
+            if (ImGui.IsItemClicked()) answer = "skip";
+        }
+        ImGui.End();
+        ImGui.PopStyleVar(3);
+
+        HlAnswerPill(dl, font, small, new Vector2(x, cy), yesW, pillH, "Yes", ToneOk, 0, hovYes, snap, th, 1f);
+        x += yesW + gap;
+        HlAnswerPill(dl, font, small, new Vector2(x, cy), noW, pillH, "No", ToneBad, 1, hovNo, snap, th, 1f);
+        x += noW + gap;
+        HlAnswerPill(dl, font, small, new Vector2(x, cy), skipW, pillH, "Not sure", th.TextDim, 2, hovSkip, snap, th, 1f);
+        _hlUi.Placed.Add((pmin, pmax));
+        if (answer != null) HighlightAnswer(b.TargetIndex, answer);
+    }
+
+    /// <summary>The "?" badge: the step badge's filled accent disc with a question mark, so "asking" reads like "now".</summary>
+    private static void HlQuestionBadge(ImDrawListPtr dl, ImFontPtr font, float small, Vector2 c, float alpha)
+    {
+        var ink = new Vector4(0.05f, 0.08f, 0.06f, 1f);
+        dl.AddCircleFilled(c, HlBadgeR + 1.5f, U(ink, 0.55f * alpha), 24);
+        dl.AddCircleFilled(c, HlBadgeR, U(ToneAccent, alpha), 24);
+        var f = ImGui.GetFontSize();
+        var tw = ImGui.CalcTextSize("?").X * (small / f);
+        var tp = new Vector2(c.X - tw * 0.5f, c.Y - small * 0.5f);
+        dl.AddText(font, small, tp, U(ink, alpha), "?");
+        dl.AddText(font, small, tp + new Vector2(0.6f, 0), U(ink, alpha), "?");
+    }
+
+    /// <summary>
+    /// One answer pill at <paramref name="pos"/> (left edge, vertical centre): glyph (0 check, 1 cross, 2 none) and
+    /// text in the tone; a tinted fill when hovered so the control answers the mouse before the click.
+    /// </summary>
+    private static void HlAnswerPill(ImDrawListPtr dl, ImFontPtr font, float small, Vector2 pos, float w, float h, string text, Vector4 tone,
+        int glyph, bool hovered, float alpha, PanelTheme th, float strength)
+    {
+        var pmin = new Vector2(pos.X, pos.Y - h * 0.5f);
+        var pmax = pmin + new Vector2(w, h);
+        var dim = glyph == 2;
+        dl.AddRectFilled(pmin, pmax, dim ? U(th.Tile, (hovered ? 1f : 0.7f) * alpha) : U(tone, (hovered ? 0.34f : 0.16f) * alpha), h * 0.5f);
+        dl.AddRect(pmin, pmax, dim ? U(th.Border, (hovered ? 0.9f : 0.6f) * alpha) : U(tone, (hovered ? 1f : 0.75f) * alpha), h * 0.5f, ImDrawFlags.None, hovered ? 1.4f : 1f);
+        var x = pmin.X + 8f;
+        var textTone = hovered && !dim ? Vector4.Lerp(tone, Vector4.One, 0.35f) : tone;
+        if (glyph == 0) { HlCheckGlyph(dl, new Vector2(x + 5f, pos.Y), strength, U(textTone, alpha)); x += 14f; }
+        else if (glyph == 1) { HlCrossGlyph(dl, new Vector2(x + 5f, pos.Y), strength, U(textTone, alpha)); x += 14f; }
+        dl.AddText(font, small, new Vector2(x - (dim ? 1f : 0f), pos.Y - small * 0.5f), U(textTone, alpha), text);
+    }
+
+    /// <summary>The result pill after a click, where the strip was: glyph pops in, the pill fades out at the end.</summary>
+    private void HlVerdictPill(ImDrawListPtr dl, string answer, double age, Vector2 min, Vector2 max, List<HighlightBox> boxes, Vector2 disp, PanelTheme th, float snap)
+    {
+        var f = ImGui.GetFontSize();
+        var small = f * 0.85f;
+        var font = ImGui.GetFont();
+        var k = small / f;
+        var (text, tone, glyph) = answer switch { "yes" => ("Yes", ToneOk, 0), "no" => ("No", ToneBad, 1), _ => ("Not sure", th.TextDim, 2) };
+        var w = (glyph == 2 ? 0f : 14f) + ImGui.CalcTextSize(text).X * k + 16f;
+        var h = small + 6f;
+        var size = new Vector2(w + 8f, h + 8f);
+        var (pmin, pmax) = HlPlace(size, min, max, boxes, disp);
+        var fade = age > HlVerdictShowSec - HlVerdictFadeSec ? (float)((HlVerdictShowSec - age) / HlVerdictFadeSec) : 1f;
+        var alpha = Math.Clamp(fade, 0f, 1f) * snap;
+        dl.AddRectFilled(pmin, pmax, U(th.Card, 0.95f * alpha), 6f);
+        dl.AddRect(pmin, pmax, U(tone, 0.55f * alpha), 6f);
+        HlAnswerPill(dl, font, small, new Vector2(pmin.X + 4f, (pmin.Y + pmax.Y) * 0.5f), w, h, text, tone, glyph, false, alpha, th, 0.4f + 0.6f * HlEase(age / HlVerdictPopSec));
+        _hlUi.Placed.Add((pmin, pmax));
+    }
+
+    /// <summary>The lasting mark on the box's top-right corner: a badge-sized disc in the answer's tone with its glyph.</summary>
+    private static void HlVerdictMark(ImDrawListPtr dl, Vector2 c, string answer, float pop, PanelTheme th)
+    {
+        var ink = new Vector4(0.05f, 0.08f, 0.06f, 1f);
+        var (tone, glyph) = answer switch { "yes" => (ToneOk, 0), "no" => (ToneBad, 1), _ => (ToneNeutral, 2) };
+        var s = 0.4f + 0.6f * pop;
+        dl.AddCircleFilled(c, (HlBadgeR + 1.5f) * s, U(ink, 0.55f * pop), 24);
+        dl.AddCircleFilled(c, HlBadgeR * s, U(tone, 0.85f * pop), 24);
+        var g = U(ink, pop);
+        if (glyph == 0) HlCheckGlyph(dl, c, s, g);
+        else if (glyph == 1) HlCrossGlyph(dl, c, s, g);
+        else dl.AddLine(new Vector2(c.X - 3.5f * s, c.Y), new Vector2(c.X + 3.5f * s, c.Y), g, 1.8f);
+    }
+
+    private static void HlCheckGlyph(ImDrawListPtr dl, Vector2 c, float s, uint col)
+    {
+        dl.AddLine(new Vector2(c.X - 3.6f * s, c.Y + 0.2f * s), new Vector2(c.X - 1f * s, c.Y + 2.8f * s), col, 1.8f);
+        dl.AddLine(new Vector2(c.X - 1f * s, c.Y + 2.8f * s), new Vector2(c.X + 3.8f * s, c.Y - 2.8f * s), col, 1.8f);
+    }
+
+    private static void HlCrossGlyph(ImDrawListPtr dl, Vector2 c, float s, uint col)
+    {
+        dl.AddLine(new Vector2(c.X - 3.2f * s, c.Y - 3.2f * s), new Vector2(c.X + 3.2f * s, c.Y + 3.2f * s), col, 1.8f);
+        dl.AddLine(new Vector2(c.X - 3.2f * s, c.Y + 3.2f * s), new Vector2(c.X + 3.2f * s, c.Y - 3.2f * s), col, 1.8f);
     }
 
     /// <summary>The title once, above the active box: accent dot, title, and the step position of a sequence.</summary>
