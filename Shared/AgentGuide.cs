@@ -103,7 +103,8 @@ public partial class WhatsAnAiBridge
         {
             _guide.Log.Add(new GuideLogEntry { At = DateTime.UtcNow, Kind = kind, Text = text!, Title = string.IsNullOrWhiteSpace(title) ? null : title });
             if (_guide.Log.Count > GuideLogMax) _guide.Log.RemoveRange(0, _guide.Log.Count - GuideLogMax);
-            _guide.UpdatedAt = DateTime.UtcNow;
+            // No UpdatedAt here: the quiet clock counts what the user saw (a toast that showed, GuideToastFeed.cs), not every
+            // line; agent lines for each tool call are off by default and would keep the quiet card awake forever.
             _guide.Rev++;
             return new JObject { ["ok"] = true, ["rev"] = _guide.Rev };
         }
@@ -116,6 +117,8 @@ public partial class WhatsAnAiBridge
         ["ok"] = true, ["rev"] = _guide.Rev, ["title"] = _guide.Title, ["instruction"] = _guide.Instruction,
         ["step"] = _guide.Step, ["steps"] = _guide.Steps, ["status"] = _guide.Status, ["detail"] = _guide.Detail, ["who"] = _guide.Who,
         ["log"] = new JArray(_guide.Log.TakeLast(10).Select(e => new JObject { ["at"] = e.At.ToString("HH:mm:ss"), ["kind"] = e.Kind, ["text"] = e.Text, ["title"] = e.Title })),
+        // What the panel's attention decided last frame (GuideToastFeed.cs): combat hold, held toasts, quiet dot.
+        ["attention"] = AttentionJson(),
     };
 
     /// <summary>A consistent copy for drawing (taken once per frame).</summary>
