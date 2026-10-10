@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Numerics;
 using ImGuiNET;
 
@@ -22,6 +21,20 @@ namespace WhatsAnAiBridge;
 /// those clicks stop at the overlay and everything else stays click-through. A click records the verdict
 /// (HighlightAnswer); the strip becomes a result pill for 2.2 s (popping check / cross / dash), then the label pill
 /// returns and a small check / cross / dash mark stays on the box's top-right corner.
+/// Nothing lingers (the box carries the rule, this file only draws it):
+///   - EndTicks: a box with a lifetime fades out - frame, badge, ring, cue, label or question, verdict mark, the
+///     title anchored on it, the hint to or from it - over its last HlFadeSec, the corners drifting outward as they go;
+///     a box past its end is not drawn or placed at all. UTC is read once per frame.
+///   - Covered (over an open NPC dialogue / large / fullscreen panel it is not part of): nothing of it is drawn, it
+///     reserves no placement space, the title anchors on another box or is skipped, no hint runs to or from it. Its
+///     frame alone fades out over 0.22 s instead of popping, and it snaps in again when uncovered.
+///   - Docked (an unanswered ask about something outside such a panel): the box keeps its frame (if not covered) but
+///     the question strip is replaced by a small pill docked at a screen edge, flush with it: the "?" badge and the
+///     question clipped to 150 px in dim text, no pulse. Every layer's docked asks stack in one column (equal widths,
+///     4 px apart) at the first of right-middle / left-middle / right-upper / left-upper / right-lower / left-lower
+///     that covers no open big panel and no box, else the least covered. Hovering a pill slides it out over 0.18 s
+///     into the full question and the Yes / No / Not sure pills (interactive once mostly open, the same ask window as
+///     the strip), and it slides back 0.35 s after the mouse leaves. When the panel closes the strip returns.
 /// Game-agnostic: ImGui only; nothing here touches ExileCore* directly. Box coordinates come from
 /// Element.GetClientRect(), which the HUD draws 1:1 on the ImGui display (Graphics.DrawFrame does the same).
 /// </summary>
@@ -31,6 +44,10 @@ public partial class WhatsAnAiBridge
     private const double HlPressSec = 1.4, HlPressDelay = 0.7;   // mouse cue: one press per cycle, the first after the entry ring
     private const float HlBadgeR = 9f, HlSnapPx = 10f, HlMouseW = 14f, HlMouseH = 20f, HlMousePad = 5f;
     private const double HlVerdictShowSec = 2.2, HlVerdictPopSec = 0.3, HlVerdictFadeSec = 0.4;
+    private const double HlHideSec = 0.22;                                  // a covered box's frame fades out this long
+    private const double HlDockOpenSec = 0.18, HlDockGraceSec = 0.35;       // docked pill: slide-out time, hold after the mouse leaves
+    private const float HlDockTextW = 150f, HlDockGap = 4f, HlDockPad = 8f, HlAskGap = 6f;
+    private const long HlFadeTicks = (long)(HlFadeSec * TimeSpan.TicksPerSecond);
 
     private static readonly string[] HlAskIds = ["##hl_yes", "##hl_no", "##hl_skip"];
 
@@ -44,16 +61,21 @@ public partial class WhatsAnAiBridge
         public readonly HashSet<int> Present = new();
         public readonly HashSet<int> Labelled = new();                       // targets that got their label this frame
         public readonly List<int> Gone = new();
-        public readonly Dictionary<int, int> Counts = new();                 // boxes per target (an item can match several)
+        public readonly Dictionary<int, int> Counts = new();                 // drawn boxes per target (an item can match several)
         public readonly Dictionary<int, double> AnsweredAt = new();          // target index -> ImGui time its answer was first drawn
+        public readonly Dictionary<int, double> CoveredAt = new();           // target index -> ImGui time it became covered (its frame fades)
+        public readonly Dictionary<int, double> DockHoverAt = new();         // target index -> ImGui time its docked pill was last hovered
+        public readonly Dictionary<int, float> DockOpen = new();             // target index -> 0 (at rest) .. 1 (slid out)
         public bool Drawn;                                                   // its layer was drawn this frame
     }
 
     private readonly Dictionary<string, HighlightUiState> _hlUis = new();   // layer owner -> its overlay state
     private readonly List<(Vector2 min, Vector2 max)> _hlPlaced = new();    // label rects placed this frame, every layer's
-    private readonly List<HighlightBox> _hlAll = new();                     // every layer's boxes this frame (placement avoids them all)
+    private readonly List<HighlightBox> _hlAll = new();                     // every layer's drawn boxes this frame (placement avoids them all)
+    private readonly List<(HighlightLayerView layer, int box)> _hlDocked = new();   // this frame's docked asks, every layer's, in drawing order
     private readonly List<string> _hlUiGone = new();
     private readonly Dictionary<int, string> _hlAskWin = new();             // slot * 40 + target index -> window id
+    private readonly Dictionary<string, (string text, float small, float width)> _hlDockClip = new();   // ask -> its clipped form at a font size
     private string? _hlLastError;
 
     partial void DrawHighlightsImpl(List<HighlightLayerView> layers)
@@ -76,19 +98,21 @@ public partial class WhatsAnAiBridge
 
     /// <summary>
     /// Every session's layer together: frames and badges of all layers first, then the badges and verdict marks of all
-    /// layers are reserved, then each layer's title, cues and labels, placed so they cover no box of any layer. Each
-    /// layer keeps its own sequence (current step), entry animations and title; with two or more layers the title pill
-    /// says whose it is.
+    /// layers are reserved, then the docked asks of all layers in one column, then each layer's title, cues and labels,
+    /// placed so they cover no box of any layer. Each layer keeps its own sequence (current step), entry animations and
+    /// title; with two or more layers the title pill says whose it is. Covered boxes and boxes past their end take no
+    /// part in any of it.
     /// </summary>
     private void DrawHighlightsBody(List<HighlightLayerView> layers)
     {
         var now = ImGui.GetTime();
+        var utc = DateTime.UtcNow.Ticks;
         var dl = ImGui.GetForegroundDrawList();
         var disp = ImGui.GetIO().DisplaySize;
         var th = PanelTheme.Current();
         var pulse = (float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 2 / HlPulseSec));
         _hlAll.Clear();
-        foreach (var l in layers) _hlAll.AddRange(l.Boxes);
+        foreach (var l in layers) foreach (var b in l.Boxes) if (HlShown(b, utc)) _hlAll.Add(b);
         foreach (var u in _hlUis.Values) u.Drawn = false;
 
         // Pass 1: frames, badges and the hint to the next step, per layer.
@@ -96,8 +120,8 @@ public partial class WhatsAnAiBridge
         {
             var u = HlUiFor(l.Owner);
             u.Drawn = true;
-            ObserveHighlights(u, l.Boxes, l.Title, l.Current, l.Since, l.Rev, now);
-            HlDrawFrames(dl, u, l.Boxes, l.Current, now, pulse, disp, th);
+            ObserveHighlights(u, l.Boxes, l.Title, l.Current, l.Since, l.Rev, now, utc);
+            HlDrawFrames(dl, u, l.Boxes, l.Current, now, utc, pulse, disp, th);
         }
 
         // Pass 2: reserve every layer's badges and verdict marks, so no label of any layer covers them.
@@ -110,9 +134,24 @@ public partial class WhatsAnAiBridge
             if (b.Answer != null) { var c = new Vector2(max.X, min.Y); _hlPlaced.Add((c - r, c + r)); }   // the verdict mark on the top-right corner
         }
 
-        // Pass 3: per layer, its title once, then per target the action cue and the label (or question) outside its first box.
+        // Pass 3: the docked asks of every layer, one column at a screen edge (placed before the labels so they avoid it).
+        _hlDocked.Clear();
         foreach (var l in layers)
-            HlDrawLabels(dl, HlUiFor(l.Owner), l, layers.Count > 1, now, disp, th);
+        {
+            var last = -1;
+            for (var i = 0; i < l.Boxes.Count; i++)
+            {
+                var b = l.Boxes[i];
+                if (b.TargetIndex == last) continue;
+                last = b.TargetIndex;
+                if (b.Docked && b.Ask != null && b.Answer == null && HlLife(b.EndTicks, utc) > 0f) _hlDocked.Add((l, i));
+            }
+        }
+        if (_hlDocked.Count > 0) HlDrawDock(dl, now, utc, disp, th);
+
+        // Pass 4: per layer, its title once, then per target the action cue and the label (or question) outside its first box.
+        foreach (var l in layers)
+            HlDrawLabels(dl, HlUiFor(l.Owner), l, layers.Count > 1, now, utc, disp, th);
 
         // A layer that left (cleared, expired) forgets its animations; it enters fresh if it comes back.
         _hlUiGone.Clear();
@@ -126,8 +165,19 @@ public partial class WhatsAnAiBridge
         return u;
     }
 
-    /// <summary>The sequence as drawn: the first box of the current step, of the next step, and whether there is one.</summary>
-    private static (bool hasSeq, int curIdx, int nextIdx) HlSequence(List<HighlightBox> boxes, int? current)
+    /// <summary>How much of a box is left: 1 until its last HlFadeSec, then down to 0 at EndTicks (0 = no end).</summary>
+    private static float HlLife(long endTicks, long utc)
+    {
+        if (endTicks == 0) return 1f;
+        var left = endTicks - utc;
+        return left <= 0 ? 0f : left >= HlFadeTicks ? 1f : (float)left / HlFadeTicks;
+    }
+
+    /// <summary>A box that takes part in this frame: not covered by a big panel and not past its end.</summary>
+    private static bool HlShown(in HighlightBox b, long utc) => !b.Covered && HlLife(b.EndTicks, utc) > 0f;
+
+    /// <summary>The sequence as drawn: the first shown box of the current step, of the next step, and whether there is one.</summary>
+    private static (bool hasSeq, int curIdx, int nextIdx) HlSequence(List<HighlightBox> boxes, int? current, long utc)
     {
         var hasSeq = false;
         int curIdx = -1, nextIdx = -1, nextOrder = int.MaxValue;
@@ -135,6 +185,7 @@ public partial class WhatsAnAiBridge
         {
             if (boxes[i].Order is not int o) continue;
             hasSeq = true;
+            if (!HlShown(boxes[i], utc)) continue;
             if (current is int c)
             {
                 if (o == c && curIdx < 0) curIdx = i;
@@ -144,11 +195,11 @@ public partial class WhatsAnAiBridge
         return (hasSeq, curIdx, nextIdx);
     }
 
-    private void HlDrawFrames(ImDrawListPtr dl, HighlightUiState u, List<HighlightBox> boxes, int? current, double now, float pulse, Vector2 disp, PanelTheme th)
+    private void HlDrawFrames(ImDrawListPtr dl, HighlightUiState u, List<HighlightBox> boxes, int? current, double now, long utc, float pulse, Vector2 disp, PanelTheme th)
     {
-        var (_, curIdx, nextIdx) = HlSequence(boxes, current);
+        var (_, curIdx, nextIdx) = HlSequence(boxes, current, utc);
         u.Counts.Clear();
-        foreach (var b in boxes) u.Counts[b.TargetIndex] = u.Counts.GetValueOrDefault(b.TargetIndex) + 1;
+        foreach (var b in boxes) if (HlShown(b, utc)) u.Counts[b.TargetIndex] = u.Counts.GetValueOrDefault(b.TargetIndex) + 1;
 
         for (var i = 0; i < boxes.Count; i++)
         {
@@ -156,8 +207,19 @@ public partial class WhatsAnAiBridge
             var (min, max) = HlRect(b);
             if (max.X < 0 || max.Y < 0 || min.X > disp.X || min.Y > disp.Y) continue;
             var state = HlStateOf(b, current);
+            var life = HlLife(b.EndTicks, utc);
+            if (life <= 0f) continue;
+            if (b.Covered)
+            {
+                // A box the open panel is not about: its frame alone fades out instead of popping; nothing else of it.
+                if (!u.CoveredAt.TryGetValue(b.TargetIndex, out var coveredAt)) u.CoveredAt[b.TargetIndex] = coveredAt = now;
+                var k = (now - coveredAt) / HlHideSec;
+                if (k < 1) HlFrame(dl, min, max, b.Tier, state, (float)(1 - k) * life, 0f);
+                continue;
+            }
+            u.CoveredAt.Remove(b.TargetIndex);
             var arrived = u.ArrivedAt.GetValueOrDefault(b.TargetIndex, -1e9);
-            var snap = HlEase((now - arrived) / HlSnapSec);
+            var snap = HlEase((now - arrived) / HlSnapSec) * life;   // the fade drifts the corners outward with the alpha
             var active = state == 0;
             HlFrame(dl, min, max, b.Tier, state, snap, active ? pulse : 0f);
             if (active && b.Tier == "primary")
@@ -167,55 +229,62 @@ public partial class WhatsAnAiBridge
                 if (k < 1)
                 {
                     var grow = 3f + 14f * HlEase(k);
-                    dl.AddRect(min - new Vector2(grow, grow), max + new Vector2(grow, grow), U(ToneAccent, 0.55f * (float)(1 - k)), 5f, ImDrawFlags.None, 1.5f);
+                    dl.AddRect(min - new Vector2(grow, grow), max + new Vector2(grow, grow), U(ToneAccent, 0.55f * (float)(1 - k) * life), 5f, ImDrawFlags.None, 1.5f);
                 }
             }
             if (b.Order is int order)
                 HlBadge(dl, new Vector2(min.X, min.Y), order, state, state == 2 ? HlEase((now - arrived) / HlCheckSec) : 1f, snap, th);
         }
 
-        // The hint from the current step to the next, dotted and quiet; it fades in with the current step.
+        // The hint from the current step to the next, dotted and quiet; it fades in with the current step and out with either box.
         if (curIdx >= 0 && nextIdx >= 0)
         {
             var (aMin, aMax) = HlRect(boxes[curIdx]);
             var (bMin, bMax) = HlRect(boxes[nextIdx]);
             var snap = HlEase((now - u.ArrivedAt.GetValueOrDefault(boxes[curIdx].TargetIndex, -1e9)) / HlSnapSec);
-            HlDots(dl, aMin, aMax, bMin, bMax, U(ToneNeutral, 0.6f * snap));
+            var life = MathF.Min(HlLife(boxes[curIdx].EndTicks, utc), HlLife(boxes[nextIdx].EndTicks, utc));
+            HlDots(dl, aMin, aMax, bMin, bMax, U(ToneNeutral, 0.6f * snap * life));
         }
     }
 
-    private void HlDrawLabels(ImDrawListPtr dl, HighlightUiState u, HighlightLayerView l, bool multi, double now, Vector2 disp, PanelTheme th)
+    private void HlDrawLabels(ImDrawListPtr dl, HighlightUiState u, HighlightLayerView l, bool multi, double now, long utc, Vector2 disp, PanelTheme th)
     {
         var boxes = l.Boxes;
         var current = l.Current;
         var all = _hlAll;
-        var (hasSeq, curIdx, _) = HlSequence(boxes, current);
+        var (hasSeq, curIdx, _) = HlSequence(boxes, current, utc);
         if (l.Title != null)
         {
-            var anchor = curIdx >= 0 ? curIdx : HlAnchor(boxes, current);
-            var (min, max) = HlRect(boxes[anchor]);
-            string? sub = null;
-            if (hasSeq)
+            // The title needs a shown box to sit on: the current step's, else the first active primary, else none at all.
+            var anchor = curIdx >= 0 ? curIdx : HlAnchor(boxes, current, utc);
+            if (anchor >= 0)
             {
-                var orders = new SortedSet<int>();
-                foreach (var b in boxes) if (b.Order is int o) orders.Add(o);
-                if (current is int c) { var pos = 0; foreach (var o in orders) { pos++; if (o == c) break; } sub = $"step {pos} of {orders.Count}"; }
-                else sub = "done";
+                var (min, max) = HlRect(boxes[anchor]);
+                string? sub = null;
+                if (hasSeq)
+                {
+                    var orders = new SortedSet<int>();
+                    foreach (var b in boxes) if (b.Order is int o) orders.Add(o);
+                    if (current is int c) { var pos = 0; foreach (var o in orders) { pos++; if (o == c) break; } sub = $"step {pos} of {orders.Count}"; }
+                    else sub = "done";
+                }
+                // Several agents point at once: the title says whose targets these are.
+                if (multi && l.Who != null) sub = sub != null ? $"{sub} - {l.Who}" : l.Who;
+                var vis = HlEase((now - u.ArrivedAt.GetValueOrDefault(boxes[anchor].TargetIndex, -1e9)) / HlSnapSec) * HlLife(boxes[anchor].EndTicks, utc);
+                HlTitle(dl, l.Title, sub, min, max, all, disp, th, vis);
             }
-            // Several agents point at once: the title says whose targets these are.
-            if (multi && l.Who != null) sub = sub != null ? $"{sub} - {l.Who}" : l.Who;
-            HlTitle(dl, l.Title, sub, min, max, all, disp, th, HlEase((now - u.ArrivedAt.GetValueOrDefault(boxes[anchor].TargetIndex, -1e9)) / HlSnapSec));
         }
         u.Labelled.Clear();
         for (var i = 0; i < boxes.Count; i++)
         {
             var b = boxes[i];
+            if (!HlShown(b, utc)) continue;
             if (!u.Labelled.Add(b.TargetIndex)) continue;
             var (min, max) = HlRect(b);
             if (max.X < 0 || max.Y < 0 || min.X > disp.X || min.Y > disp.Y) continue;
             var state = HlStateOf(b, current);
             var arrived = u.ArrivedAt.GetValueOrDefault(b.TargetIndex, -1e9);
-            var snap = HlEase((now - arrived) / HlSnapSec);
+            var snap = HlEase((now - arrived) / HlSnapSec) * HlLife(b.EndTicks, utc);
             // Which mouse button to press: animated on the current step, a quiet static glyph on an upcoming one.
             if (b.Action is "click" or "rightclick" && state != 2)
             {
@@ -227,7 +296,8 @@ public partial class WhatsAnAiBridge
             }
             if (b.Ask != null)
             {
-                if (b.Answer == null) { HlAskStrip(dl, b, l.Owner, l.Slot, min, max, all, disp, th, snap); continue; }   // the question carries the words
+                // The question carries the words; a docked one was drawn at the screen edge already.
+                if (b.Answer == null) { if (!b.Docked) HlAskStrip(dl, b, l.Owner, l.Slot, min, max, all, disp, th, snap); continue; }
                 if (!u.AnsweredAt.TryGetValue(b.TargetIndex, out var answeredAt)) u.AnsweredAt[b.TargetIndex] = answeredAt = now;
                 var age = now - answeredAt;
                 HlVerdictMark(dl, new Vector2(max.X, min.Y), b.Answer, HlEase(age / HlVerdictPopSec) * snap, th);
@@ -240,8 +310,9 @@ public partial class WhatsAnAiBridge
         }
     }
 
-    /// <summary>Notice a new highlight or an advance, so the right boxes snap in; forget targets that left the screen.</summary>
-    private static void ObserveHighlights(HighlightUiState u, List<HighlightBox> boxes, string? title, int? current, DateTime since, int rev, double now)
+    /// <summary>Notice a new highlight or an advance, so the right boxes snap in; forget targets that left the screen
+    /// (or went under a big panel: they snap in again when they come back).</summary>
+    private static void ObserveHighlights(HighlightUiState u, List<HighlightBox> boxes, string? title, int? current, DateTime since, int rev, double now, long utc)
     {
         var fresh = true;
         if (rev != u.SeenRev)
@@ -255,7 +326,7 @@ public partial class WhatsAnAiBridge
                 foreach (var b in boxes)
                     if (b.Order != null && (b.Order == current || b.Order == u.SeenCurrent)) u.ArrivedAt.Remove(b.TargetIndex);
             }
-            else { u.ArrivedAt.Clear(); u.AnsweredAt.Clear(); }
+            else { u.ArrivedAt.Clear(); u.AnsweredAt.Clear(); u.CoveredAt.Clear(); u.DockHoverAt.Clear(); u.DockOpen.Clear(); }
             // A highlight set long before this frame (the overlay was not drawing) appears without the entry animation.
             fresh = !first || (DateTime.UtcNow - since).TotalSeconds < 2;
             u.SeenRev = rev;
@@ -265,6 +336,7 @@ public partial class WhatsAnAiBridge
         u.Present.Clear();
         foreach (var b in boxes)
         {
+            if (!HlShown(b, utc)) continue;
             u.Present.Add(b.TargetIndex);
             if (!u.ArrivedAt.ContainsKey(b.TargetIndex)) u.ArrivedAt[b.TargetIndex] = fresh ? now : -1e9;
         }
@@ -287,12 +359,18 @@ public partial class WhatsAnAiBridge
         return o == c ? 0 : o < c ? 2 : 1;
     }
 
-    /// <summary>The box the title belongs to when no step is current: the first active primary, else the first box.</summary>
-    private static int HlAnchor(List<HighlightBox> boxes, int? current)
+    /// <summary>The box the title belongs to when no step is current: the first shown active primary, else the first
+    /// shown box; -1 when every box is covered or gone (then there is no title).</summary>
+    private static int HlAnchor(List<HighlightBox> boxes, int? current, long utc)
     {
+        var first = -1;
         for (var i = 0; i < boxes.Count; i++)
+        {
+            if (!HlShown(boxes[i], utc)) continue;
+            if (first < 0) first = i;
             if (boxes[i].Tier == "primary" && HlStateOf(boxes[i], current) == 0) return i;
-        return 0;
+        }
+        return first;
     }
 
     private static float HlEase(double t) => t <= 0 ? 0f : t >= 1 ? 1f : 1f - (float)Math.Pow(1 - t, 3);
@@ -484,14 +562,11 @@ public partial class WhatsAnAiBridge
         var small = f * 0.85f;
         var font = ImGui.GetFont();
         var k = small / f;
-        const float pad = 8f, gap = 6f, pillPad = 8f, glyphW = 10f;
+        const float pad = 8f;
         var pillH = small + 6f;
         var askW = ImGui.CalcTextSize(b.Ask).X * k;
-        var yesW = glyphW + 4f + ImGui.CalcTextSize("Yes").X * k + pillPad * 2;
-        var noW = glyphW + 4f + ImGui.CalcTextSize("No").X * k + pillPad * 2;
-        var skipW = ImGui.CalcTextSize("Not sure").X * k + pillPad * 2 - 2f;
-        var ctrlW = yesW + gap + noW + gap + skipW;
-        var size = new Vector2(pad + HlBadgeR * 2 + gap + askW + 12f + ctrlW + pad, pillH + 8f);
+        var ctrlW = HlAskControlsWidth(k);
+        var size = new Vector2(pad + HlBadgeR * 2 + HlAskGap + askW + 12f + ctrlW + pad, pillH + 8f);
         var (pmin, pmax) = HlPlace(size, min, max, boxes, disp);
         var cy = (pmin.Y + pmax.Y) * 0.5f;
 
@@ -500,49 +575,78 @@ public partial class WhatsAnAiBridge
         dl.AddRect(pmin, pmax, U(ToneAccent, 0.55f * snap), 6f);
         var x = pmin.X + pad;
         HlQuestionBadge(dl, font, small, new Vector2(x + HlBadgeR, cy), snap);
-        x += HlBadgeR * 2 + gap;
+        x += HlBadgeR * 2 + HlAskGap;
         dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(th.Text, snap), b.Ask);
         x += askW + 12f;
-
-        // The controls: one window over the pills only. Hit-testing is the window's; the drawing is ours.
-        var wmin = new Vector2(x - 3f, cy - pillH * 0.5f - 3f);
-        var wsize = new Vector2(ctrlW + 6f, pillH + 6f);
-        string? answer = null;
-        var hovYes = false; var hovNo = false; var hovSkip = false;
-        ImGui.SetNextWindowPos(wmin, ImGuiCond.Always);
-        ImGui.SetNextWindowSize(wsize, ImGuiCond.Always);
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
-        ImGui.PushStyleVar(ImGuiStyleVar.WindowMinSize, Vector2.One);
-        const ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
-            | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoNav
-            | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoBringToFrontOnFocus | ImGuiWindowFlags.NoBackground | ImGuiWindowFlags.NoSavedSettings;
-        if (ImGui.Begin(HlAskWindow(slot, b.TargetIndex), flags))
-        {
-            var py = cy - pillH * 0.5f;
-            ImGui.SetCursorScreenPos(new Vector2(x, py));
-            ImGui.InvisibleButton(HlAskIds[0], new Vector2(yesW, pillH));
-            hovYes = ImGui.IsItemHovered();
-            if (ImGui.IsItemClicked()) answer = "yes";
-            ImGui.SetCursorScreenPos(new Vector2(x + yesW + gap, py));
-            ImGui.InvisibleButton(HlAskIds[1], new Vector2(noW, pillH));
-            hovNo = ImGui.IsItemHovered();
-            if (ImGui.IsItemClicked()) answer = "no";
-            ImGui.SetCursorScreenPos(new Vector2(x + yesW + gap + noW + gap, py));
-            ImGui.InvisibleButton(HlAskIds[2], new Vector2(skipW, pillH));
-            hovSkip = ImGui.IsItemHovered();
-            if (ImGui.IsItemClicked()) answer = "skip";
-        }
-        ImGui.End();
-        ImGui.PopStyleVar(3);
-
-        HlAnswerPill(dl, font, small, new Vector2(x, cy), yesW, pillH, "Yes", ToneOk, 0, hovYes, snap, th, 1f);
-        x += yesW + gap;
-        HlAnswerPill(dl, font, small, new Vector2(x, cy), noW, pillH, "No", ToneBad, 1, hovNo, snap, th, 1f);
-        x += noW + gap;
-        HlAnswerPill(dl, font, small, new Vector2(x, cy), skipW, pillH, "Not sure", th.TextDim, 2, hovSkip, snap, th, 1f);
+        var answer = HlAskControls(dl, font, small, x, cy, pillH, slot, b.TargetIndex, true, snap, th);
         _hlPlaced.Add((pmin, pmax));
         if (answer != null) HighlightAnswer(owner, b.TargetIndex, answer);
+    }
+
+    /// <summary>The width of the Yes / No / Not sure pills with their gaps, at text scale <paramref name="k"/>.</summary>
+    private static float HlAskControlsWidth(float k)
+    {
+        HlAskPillWidths(k, out var yesW, out var noW, out var skipW);
+        return yesW + HlAskGap + noW + HlAskGap + skipW;
+    }
+
+    private static void HlAskPillWidths(float k, out float yesW, out float noW, out float skipW)
+    {
+        const float pillPad = 8f, glyphW = 10f;
+        yesW = glyphW + 4f + ImGui.CalcTextSize("Yes").X * k + pillPad * 2;
+        noW = glyphW + 4f + ImGui.CalcTextSize("No").X * k + pillPad * 2;
+        skipW = ImGui.CalcTextSize("Not sure").X * k + pillPad * 2 - 2f;
+    }
+
+    /// <summary>
+    /// The Yes / No / Not sure pills from <paramref name="x"/> (left edge) at <paramref name="cy"/>. While
+    /// <paramref name="interactive"/>, one window over the pills only: hit-testing is the window's, the drawing is ours.
+    /// Returns the answer clicked this frame, or null.
+    /// </summary>
+    private string? HlAskControls(ImDrawListPtr dl, ImFontPtr font, float small, float x, float cy, float pillH, int slot, int target, bool interactive, float alpha, PanelTheme th)
+    {
+        var k = small / ImGui.GetFontSize();
+        HlAskPillWidths(k, out var yesW, out var noW, out var skipW);
+        var ctrlW = yesW + HlAskGap + noW + HlAskGap + skipW;
+        string? answer = null;
+        var hovYes = false; var hovNo = false; var hovSkip = false;
+        if (interactive)
+        {
+            var wmin = new Vector2(x - 3f, cy - pillH * 0.5f - 3f);
+            var wsize = new Vector2(ctrlW + 6f, pillH + 6f);
+            ImGui.SetNextWindowPos(wmin, ImGuiCond.Always);
+            ImGui.SetNextWindowSize(wsize, ImGuiCond.Always);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowMinSize, Vector2.One);
+            const ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
+                | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoNav
+                | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoBringToFrontOnFocus | ImGuiWindowFlags.NoBackground | ImGuiWindowFlags.NoSavedSettings;
+            if (ImGui.Begin(HlAskWindow(slot, target), flags))
+            {
+                var py = cy - pillH * 0.5f;
+                ImGui.SetCursorScreenPos(new Vector2(x, py));
+                ImGui.InvisibleButton(HlAskIds[0], new Vector2(yesW, pillH));
+                hovYes = ImGui.IsItemHovered();
+                if (ImGui.IsItemClicked()) answer = "yes";
+                ImGui.SetCursorScreenPos(new Vector2(x + yesW + HlAskGap, py));
+                ImGui.InvisibleButton(HlAskIds[1], new Vector2(noW, pillH));
+                hovNo = ImGui.IsItemHovered();
+                if (ImGui.IsItemClicked()) answer = "no";
+                ImGui.SetCursorScreenPos(new Vector2(x + yesW + HlAskGap + noW + HlAskGap, py));
+                ImGui.InvisibleButton(HlAskIds[2], new Vector2(skipW, pillH));
+                hovSkip = ImGui.IsItemHovered();
+                if (ImGui.IsItemClicked()) answer = "skip";
+            }
+            ImGui.End();
+            ImGui.PopStyleVar(3);
+        }
+        HlAnswerPill(dl, font, small, new Vector2(x, cy), yesW, pillH, "Yes", ToneOk, 0, hovYes, alpha, th, 1f);
+        x += yesW + HlAskGap;
+        HlAnswerPill(dl, font, small, new Vector2(x, cy), noW, pillH, "No", ToneBad, 1, hovNo, alpha, th, 1f);
+        x += noW + HlAskGap;
+        HlAnswerPill(dl, font, small, new Vector2(x, cy), skipW, pillH, "Not sure", th.TextDim, 2, hovSkip, alpha, th, 1f);
+        return answer;
     }
 
     /// <summary>One window id per layer slot and target index (guide.highlight takes at most 40 targets), built once.</summary>
@@ -630,6 +734,155 @@ public partial class WhatsAnAiBridge
         dl.AddLine(new Vector2(c.X - 3.2f * s, c.Y - 3.2f * s), new Vector2(c.X + 3.2f * s, c.Y + 3.2f * s), col, 1.8f);
         dl.AddLine(new Vector2(c.X - 3.2f * s, c.Y + 3.2f * s), new Vector2(c.X + 3.2f * s, c.Y - 3.2f * s), col, 1.8f);
     }
+
+    // ── Docked asks ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// Every layer's docked asks as one column of small pills flush with a screen edge: at rest the "?" badge and the
+    /// question clipped to HlDockTextW in dim text (one width for the column, so it reads as a tidy stack); hovered,
+    /// the pill slides out into the full question and the Yes / No / Not sure pills, interactive once mostly open,
+    /// and slides back HlDockGraceSec after the mouse leaves. The column goes where it covers no open big panel and no
+    /// box (HlDockSpot). Each pill fades with its box's life. Hovering is a hit-test on io.MousePos: no window, so the
+    /// resting pill stays click-through.
+    /// </summary>
+    private void HlDrawDock(ImDrawListPtr dl, double now, long utc, Vector2 disp, PanelTheme th)
+    {
+        var f = ImGui.GetFontSize();
+        var small = f * 0.85f;
+        var font = ImGui.GetFont();
+        var k = small / f;
+        var pillH = MathF.Max(small + 10f, HlBadgeR * 2f + 6f);
+        var n = _hlDocked.Count;
+
+        // One rest width for the column: the widest clipped question (capped), plus badge and padding.
+        var textW = 0f;
+        for (var i = 0; i < n; i++)
+        {
+            var (l, bi) = _hlDocked[i];
+            var w = HlDockClipped(l.Boxes[bi].Ask!, small).width;
+            if (w > textW) textW = w;
+        }
+        var restW = HlDockPad + HlBadgeR * 2f + HlAskGap + textW + HlDockPad;
+        var total = n * pillH + (n - 1) * HlDockGap;
+        var (right, y0) = HlDockSpot(restW, total, disp);
+        var io = ImGui.GetIO();
+        var mp = io.MousePos;
+        var step = io.DeltaTime > 0 ? io.DeltaTime / (float)HlDockOpenSec : 1f;
+        var ctrlW = HlAskControlsWidth(k);
+        var strip = small + 6f;   // the answer pills' height, as in the strip
+
+        for (var i = 0; i < n; i++)
+        {
+            var (l, bi) = _hlDocked[i];
+            var b = l.Boxes[bi];
+            var u = HlUiFor(l.Owner);
+            var life = HlLife(b.EndTicks, utc);
+            var y = y0 + i * (pillH + HlDockGap);
+
+            // Slide state: towards 1 while hovered within the grace, else back to 0.
+            var open = u.DockOpen.GetValueOrDefault(b.TargetIndex);
+            var want = u.DockHoverAt.TryGetValue(b.TargetIndex, out var hAt) && now - hAt < HlDockGraceSec ? 1f : 0f;
+            open = want > open ? MathF.Min(want, open + step) : MathF.Max(want, open - step);
+            u.DockOpen[b.TargetIndex] = open;
+            var ease = HlEase(open);
+
+            var askW = ImGui.CalcTextSize(b.Ask).X * k;
+            var fullW = HlDockPad + HlBadgeR * 2f + HlAskGap + askW + 12f + ctrlW + HlDockPad;
+            var w = restW + (MathF.Max(fullW, restW) - restW) * ease;
+            var pmin = right ? new Vector2(disp.X - w, y) : new Vector2(0f, y);
+            var pmax = pmin + new Vector2(w, pillH);
+            if (mp.X >= pmin.X && mp.X < pmax.X && mp.Y >= pmin.Y && mp.Y < pmax.Y) u.DockHoverAt[b.TargetIndex] = now;
+
+            // The pill: card fill, accent hairline, rounded away from the edge only (the edge side runs 2 px off screen).
+            var edgeMin = right ? pmin : pmin - new Vector2(2f, 0f);
+            var edgeMax = right ? pmax + new Vector2(2f, 0f) : pmax;
+            var corners = right ? ImDrawFlags.RoundCornersLeft : ImDrawFlags.RoundCornersRight;
+            dl.AddRectFilled(edgeMin, edgeMax, U(th.Card, (0.9f + 0.06f * ease) * life), 6f, corners);
+            dl.AddRect(edgeMin, edgeMax, U(ToneAccent, (0.35f + 0.25f * ease) * life), 6f, corners, 1f);
+            dl.PushClipRect(pmin, pmax, true);
+            var cy = (pmin.Y + pmax.Y) * 0.5f;
+            var x = pmin.X + HlDockPad;
+            HlQuestionBadge(dl, font, small, new Vector2(x + HlBadgeR, cy), (0.8f + 0.2f * ease) * life);
+            x += HlBadgeR * 2f + HlAskGap;
+            string? answer = null;
+            if (open <= 0.001f)
+            {
+                dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(th.TextDim, 0.95f * life), HlDockClipped(b.Ask!, small).text);
+            }
+            else
+            {
+                dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(th.Text, life), b.Ask);
+                x += askW + 12f;
+                answer = HlAskControls(dl, font, small, x, cy, strip, l.Slot, b.TargetIndex, open > 0.6f, life, th);
+            }
+            dl.PopClipRect();
+            _hlPlaced.Add((pmin, pmax));
+            if (answer != null) HighlightAnswer(l.Owner, b.TargetIndex, answer);
+        }
+    }
+
+    /// <summary>
+    /// Where the dock column of <paramref name="w"/> x <paramref name="h"/> goes: the first of right-middle, left-middle,
+    /// right-upper, left-upper, right-lower, left-lower that covers no open big panel (_hlPanels) and no drawn box
+    /// (_hlAll); else the least panel overlap, then the least box overlap. Returns the edge and the column's top.
+    /// </summary>
+    private (bool right, float y) HlDockSpot(float w, float h, Vector2 disp)
+    {
+        Span<float> centres = stackalloc float[3];
+        centres[0] = 0.5f; centres[1] = 0.3f; centres[2] = 0.72f;
+        var bestRight = true;
+        var bestY = 0f;
+        var bestPanel = float.MaxValue;
+        var bestBox = float.MaxValue;
+        for (var ci = 0; ci < centres.Length; ci++)
+        {
+            for (var side = 0; side < 2; side++)
+            {
+                var right = side == 0;
+                var y = Math.Clamp(disp.Y * centres[ci] - h * 0.5f, 8f, MathF.Max(8f, disp.Y - h - 8f));
+                var x = right ? disp.X - w : 0f;
+                var panel = 0f;
+                foreach (var p in _hlPanels) panel += HlOverlap(x, y, w, h, p.x, p.y, p.w, p.h);
+                var box = 0f;
+                foreach (var b in _hlAll) box += HlOverlap(x, y, w, h, b.X, b.Y, b.W, b.H);
+                if (panel < bestPanel || (panel == bestPanel && box < bestBox))
+                {
+                    bestPanel = panel; bestBox = box; bestRight = right; bestY = y;
+                    if (panel == 0f && box == 0f) return (right, y);
+                }
+            }
+        }
+        return (bestRight, bestY);
+    }
+
+    private static float HlOverlap(float ax, float ay, float aw, float ah, float bx, float by, float bw, float bh)
+    {
+        var w = MathF.Min(ax + aw, bx + bw) - MathF.Max(ax, bx);
+        var h = MathF.Min(ay + ah, by + bh) - MathF.Max(ay, by);
+        return w > 0 && h > 0 ? w * h : 0f;
+    }
+
+    /// <summary>The question clipped to HlDockTextW with "..", and its width, built once per ask string and font size.</summary>
+    private (string text, float width) HlDockClipped(string ask, float small)
+    {
+        if (_hlDockClip.TryGetValue(ask, out var c) && c.small == small) return (c.text, c.width);
+        if (_hlDockClip.Count > 64) _hlDockClip.Clear();
+        var k = small / ImGui.GetFontSize();
+        var text = ask;
+        var width = ImGui.CalcTextSize(ask).X * k;
+        if (width > HlDockTextW)
+        {
+            var dots = ImGui.CalcTextSize("..").X * k;
+            var n = ask.Length;
+            while (n > 1 && ImGui.CalcTextSize(ask.Substring(0, n)).X * k + dots > HlDockTextW) n--;
+            text = ask.Substring(0, n).TrimEnd() + "..";
+            width = ImGui.CalcTextSize(text).X * k;
+        }
+        _hlDockClip[ask] = (text, small, width);
+        return (text, width);
+    }
+
+    // ── Title and placement ──────────────────────────────────────────
 
     /// <summary>The title once, above the active box: accent dot, title, and the step position of a sequence.</summary>
     private void HlTitle(ImDrawListPtr dl, string title, string? sub, Vector2 min, Vector2 max,

@@ -491,7 +491,7 @@ public partial class WhatsAnAiBridge
                 list.Add(new Blocker("pilot", $"waiting for the user: {_guide.Instruction}", _guide.Who, null, Yours(_guide.Who)));
         lock (_hlLock)
             foreach (var l in _hlLayers)
-                if (l.Targets.FirstOrDefault(t => t.Ask != null && t.Answer == null) is { } asked)
+                if (l.Targets.FirstOrDefault(t => t.Ask != null && t.Answer == null && !t.Expired) is { } asked)
                     list.Add(new Blocker("pilot", $"question for the user: {asked.Ask}" + (l.Pending > 1 ? $" (+{l.Pending - 1})" : ""), l.Who, l.Until, Yours(l.Who)));
         foreach (var l in _leases) list.Add(new Blocker(l.Kind, l.Label, l.Who, l.Until, l.Session == requester, l.Id));
         return list;

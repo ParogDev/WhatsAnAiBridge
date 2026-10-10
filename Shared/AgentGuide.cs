@@ -54,6 +54,7 @@ public partial class WhatsAnAiBridge
         public DateTime? WaitingSince;  // the status last became waiting (or Not done yet restarted the clock)
         public double UnseenAfterSec = GuideUnseenDefaultSec;
         public DateTime? ExpiresAt;     // a waiting step whose agent went quiet is cleared then (GuideExpireTick)
+        public int StepGen;             // bumped whenever the card's step changes (new step id or instruction, clear, dismiss): highlights set during a step go with it
         public int Rev;
         public readonly List<GuideLogEntry> Log = new();
     }
@@ -103,6 +104,7 @@ public partial class WhatsAnAiBridge
                     ["note"] = _guide.StepId == null ? "The card shows no step now; nothing changed." : $"The card shows another step now (by {_guide.Who ?? "unknown"}); nothing changed.",
                 };
             var prevStatus = _guide.Status;
+            var prevStep = (_guide.StepId, _guide.Instruction);
             if (p?["clear"]?.Value<bool>() == true)
             {
                 _guide.Title = _guide.Instruction = _guide.Detail = null;
@@ -146,6 +148,7 @@ public partial class WhatsAnAiBridge
             }
             if (_guide.Status != "waiting") _guide.WaitingSince = null;
             else if (prevStatus != "waiting" || _guide.WaitingSince == null || p?["instruction"] != null) _guide.WaitingSince = now;
+            if ((_guide.StepId, _guide.Instruction) != prevStep) _guide.StepGen++;
             _guide.UpdatedAt = now;
             _guide.Rev++;
             return GuideStateJsonLocked();
@@ -191,6 +194,13 @@ public partial class WhatsAnAiBridge
         var markAgo = _guide.MarkAt is DateTime ma ? (now - ma).TotalSeconds : 0;
         var unseen = _guide.OfferDone && _guide.Status == "waiting" && _guide.Mark == null && _guide.WaitingSince != null && waiting >= _guide.UnseenAfterSec;
         return new GuideAskView(_guide.StepId, _guide.OfferDone, _guide.Mark, markAgo, unseen, waiting);
+    }
+
+    /// <summary>The card's step now, for highlights that go with it (GuideHighlight.cs): its generation, whether the user is
+    /// still acting on it (waiting / detected / settling) and the session that set it.</summary>
+    internal (int Gen, bool Active, string? Session) GuideStepNow()
+    {
+        lock (_guideLock) return (_guide.StepGen, GuideActive(_guide.Status), _guide.Session);
     }
 
     /// <summary>The Done side of the card as the panel draws it (taken once per frame).</summary>
@@ -265,6 +275,7 @@ public partial class WhatsAnAiBridge
         // The step id and its mark stay: an agent that comes back and asks guide.user learns its card is gone.
         _guide.OfferDone = false;
         _guide.ExpiresAt = null;
+        _guide.StepGen++;
         _guide.UpdatedAt = DateTime.UtcNow;
         _guide.Rev++;
     }
@@ -323,6 +334,7 @@ public partial class WhatsAnAiBridge
             _guide.WaitingSince = null;
             _guide.OfferDone = false;
             _guide.ExpiresAt = null;
+            _guide.StepGen++;
             _guide.Rev++;
         }
     }
