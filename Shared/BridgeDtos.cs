@@ -850,6 +850,22 @@ public class RecordingStatusResponse
 
     [JsonProperty("intervalMs", NullValueHandling = NullValueHandling.Ignore)]
     public int? IntervalMs { get; set; }
+
+    /// <summary>Not recording: the last recording the HUD closed on (a restart cut it), until the next record:start.</summary>
+    [JsonProperty("interrupted", NullValueHandling = NullValueHandling.Ignore)]
+    public RecordingInterrupted? Interrupted { get; set; }
+}
+
+/// <summary>A recording still running when the HUD closed: written to recordings\interrupted.json by OnClose.</summary>
+public class RecordingInterrupted
+{
+    [JsonProperty("file")] public string File { get; set; } = "";
+    [JsonProperty("who", NullValueHandling = NullValueHandling.Ignore)] public string? Who { get; set; }
+    [JsonProperty("startedAt")] public System.DateTime StartedAt { get; set; }
+    [JsonProperty("endedAt")] public System.DateTime EndedAt { get; set; }
+    [JsonProperty("frames")] public int Frames { get; set; }
+    /// <summary>hud_closing (a restart or quit) | bridge_reload.</summary>
+    [JsonProperty("why")] public string Why { get; set; } = "";
 }
 
 public class RecordingListResponse
