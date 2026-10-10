@@ -180,7 +180,8 @@ public partial class WhatsAnAiBridge
         var homeMin = u.Home;
         var homeMax = u.Home + new Vector2(GuideWidth, cardH + (cardH > 0 && toastsH > 0 ? 2 : 0) + toastsH);
         var avoid = GuideAvoid(homeMin, homeMax, boxes, io.DisplaySize);
-        var at = GuideAttentionFor(boxes.Count > 0, hovered, now - u.HoverAt, needsUser, avoid);
+        var mustAct = g.status is "waiting" or "failed" && g.instruction != null;
+        var at = GuideAttentionFor(boxes.Count > 0, hovered, now - u.HoverAt, needsUser, mustAct, avoid);
 
         // Ease what the attention asked for: the opacity over FadeSec, the slide clear of a highlight over ShiftSec.
         u.AlphaNow += (at.CardAlpha - u.AlphaNow) * (1f - MathF.Exp(-io.DeltaTime / (float)(GuideFadeSec / 3)));
@@ -246,26 +247,30 @@ public partial class WhatsAnAiBridge
     /// <param name="Highlights">Input: highlight boxes are on screen (HighlightSnapshot).</param>
     /// <param name="Hovered">Input: the mouse is over the card's rect (hit-test on io.MousePos, no focus taken).</param>
     /// <param name="HoverAgo">Input: seconds since the mouse was last over the card.</param>
-    /// <param name="NeedsUser">Input: the user must act (waiting / failed / progress). Unused by v1's rules.</param>
+    /// <param name="NeedsUser">Input: the user has something to do or watch (waiting / failed / progress).</param>
+    /// <param name="MustAct">Input: the user must act NOW (waiting / failed). Progress states are the agent working, not this.</param>
     /// <param name="Overlapped">Input: at its home position the card (with its toasts) would cover a highlight box.</param>
     /// <param name="CardAlpha">Output: the card's target opacity (the drawer eases towards it).</param>
     /// <param name="CardPulse">Output: the waiting frame may pulse.</param>
+    /// <param name="Urgent">Output: the strong "act now" throb (full-strength frame flash, halo and fill wash) instead of the calm pulse.</param>
     /// <param name="CardInput">Output: the card takes the mouse (false: clicks go to the game underneath).</param>
     /// <param name="ShowPlan">Output: the "next:" plan line is drawn under the instruction.</param>
     /// <param name="ToastsAllowed">Output: log toasts may show.</param>
     /// <param name="CardShift">Output: offset from the card's home position (zero: at home).</param>
     private readonly record struct GuideAttention(
-        bool Highlights, bool Hovered, double HoverAgo, bool NeedsUser, bool Overlapped,
-        float CardAlpha, bool CardPulse, bool CardInput, bool ShowPlan, bool ToastsAllowed, Vector2 CardShift);
+        bool Highlights, bool Hovered, double HoverAgo, bool NeedsUser, bool MustAct, bool Overlapped,
+        float CardAlpha, bool CardPulse, bool Urgent, bool CardInput, bool ShowPlan, bool ToastsAllowed, Vector2 CardShift);
 
-    private static GuideAttention GuideAttentionFor(bool highlights, bool hovered, double hoverAgo, bool needsUser, Vector2 avoid)
+    private static GuideAttention GuideAttentionFor(bool highlights, bool hovered, double hoverAgo, bool needsUser, bool mustAct, Vector2 avoid)
     {
         var explicitly = hovered || hoverAgo < GuideHoverKeepSec;   // rule 7: a hovered surface shows until 5 s after
-        var ghost = highlights && !explicitly;                       // rule 2: the highlight carries the words
-        var alpha = ghost ? GuideGhostAlpha : highlights ? GuideHoverAlpha : 1f;
+        // rule 8: a card that asks the user to act is never ghosted - it is the thing to look at, highlight or not.
+        // rule 2: otherwise, while highlights are on screen, the highlight carries the words and the card ghosts.
+        var ghost = highlights && !explicitly && !mustAct;
+        var alpha = mustAct ? 1f : ghost ? GuideGhostAlpha : highlights ? GuideHoverAlpha : 1f;
         // rule 3: never cover a highlight; the offset was found by GuideAvoid (zero when nothing overlaps).
-        return new GuideAttention(highlights, hovered, hoverAgo, needsUser, avoid != Vector2.Zero,
-            alpha, !ghost, !ghost, !ghost, true, avoid);
+        return new GuideAttention(highlights, hovered, hoverAgo, needsUser, mustAct, avoid != Vector2.Zero,
+            alpha, !ghost, mustAct, !ghost, !ghost, true, avoid);
     }
 
     /// <summary>
@@ -451,12 +456,25 @@ public partial class WhatsAnAiBridge
         var max = new Vector2(x0 + w, p.Y + GuideEdge + h);
 
         // Fill, arrival flash, frame. The frame pulses only while the user must act, and only when attention allows.
-        var pulsing = look.Pulse && at.CardPulse;
-        var pulse = pulsing ? (float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 1.6)) : 0f;
+        // Urgent (attention rule 8: waiting / failed): a 1.25 Hz throb with a fast attack - the frame flashes to full
+        // strength and thickens, two halos swell outside it and the card gets a wash of the tone. Confined to the
+        // card: nothing full-screen, nothing faster than ~1.5 Hz.
+        var urgent = at.Urgent && loud;
+        var pulsing = (look.Pulse && at.CardPulse) || urgent;
+        var pulse = !pulsing ? 0f
+            : urgent ? MathF.Pow((float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 2 * 1.25)), 1.8f)
+            : (float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 1.6));
         dl.AddRectFilled(min, max, U(th.Card, 0.94f), 6f);
         var flashT = (now - _guideUi.ArrivedAt) / GuideFlashSec;
         if (flashT < 1) dl.AddRectFilled(min, max, U(look.Tone, 0.35f * (float)(1 - flashT)), 6f);
-        if (pulsing)
+        if (urgent)
+        {
+            dl.AddRectFilled(min, max, U(look.Tone, 0.04f + 0.16f * pulse), 6f);
+            dl.AddRect(min - new Vector2(7, 7), max + new Vector2(7, 7), U(look.Tone, 0.22f * pulse), 11f, ImDrawFlags.None, 6f);
+            dl.AddRect(min - new Vector2(3, 3), max + new Vector2(3, 3), U(look.Tone, 0.18f + 0.42f * pulse), 8f, ImDrawFlags.None, 3.5f);
+            dl.AddRect(min, max, U(look.Tone, 0.5f + 0.5f * pulse), 6f, ImDrawFlags.None, 2f + 1.5f * pulse);
+        }
+        else if (pulsing)
         {
             dl.AddRect(min - new Vector2(3, 3), max + new Vector2(3, 3), U(look.Tone, 0.10f + 0.16f * pulse), 8f, ImDrawFlags.None, 3f);
             dl.AddRect(min, max, U(look.Tone, 0.6f + 0.4f * pulse), 6f, ImDrawFlags.None, 2f);
