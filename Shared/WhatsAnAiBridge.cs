@@ -121,6 +121,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         StopWatchdog();
         _tcpServer?.Dispose();
         _tcpServer = null;
+        RecordingCut("hud_closing");
         _recordingWriter?.Dispose();
         _recordingWriter = null;
     }
@@ -130,8 +131,40 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         StopWatchdog();
         _tcpServer?.Dispose();
         _tcpServer = null;
+        RecordingCut("bridge_reload");
         _recordingWriter?.Dispose();
         _recordingWriter = null;
+    }
+
+    private string InterruptedRecordingFile => Path.Combine(_bridgeDir, "recordings", "interrupted.json");
+
+    /// <summary>
+    /// The HUD is going away while a recording runs (a restart, which Sessions.cs lets through only when the user pressed
+    /// Restart now over it, or a quit): flush the file and leave a note, so record:stop / record:status on the next HUD
+    /// can say the recording was cut, when and whose it was, instead of a bare "not recording".
+    /// </summary>
+    private void RecordingCut(string why)
+    {
+        if (!_isRecording || _currentRecordingPath == null) return;
+        try
+        {
+            _recordingWriter?.Flush();
+            var note = new RecordingInterrupted
+            {
+                File = Path.GetFileName(_currentRecordingPath), Who = _recordingWho, StartedAt = _recordingStart,
+                EndedAt = DateTime.UtcNow, Frames = _frameCount, Why = why,
+            };
+            File.WriteAllText(InterruptedRecordingFile, JsonConvert.SerializeObject(note));
+        }
+        catch (Exception ex) { LogError($"[Recording] writing {InterruptedRecordingFile}: {ex.Message}"); }
+        _isRecording = false;
+    }
+
+    /// <summary>The recording the last HUD closed on, until a new one starts; null when there is none.</summary>
+    private RecordingInterrupted? LastCutRecording()
+    {
+        try { return File.Exists(InterruptedRecordingFile) ? JsonConvert.DeserializeObject<RecordingInterrupted>(File.ReadAllText(InterruptedRecordingFile)) : null; }
+        catch { return null; }
     }
 
     // ── Request processing: Tick, with a background fallback ─────────
@@ -936,6 +969,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
             var recDir = Path.Combine(_bridgeDir, "recordings");
             if (!Directory.Exists(recDir)) Directory.CreateDirectory(recDir);
+            try { File.Delete(InterruptedRecordingFile); } catch { }   // a new recording: the last cut one is old news
 
             var fileName = $"rec_{DateTime.Now:yyyyMMdd_HHmmss}.jsonl";
             _currentRecordingPath = Path.Combine(recDir, fileName);
@@ -956,7 +990,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         if (ql == "record:stop")
         {
             if (!_isRecording)
-                return Serialize(new RecordingStatusResponse { Status = "not_recording" });
+                return Serialize(new RecordingStatusResponse { Status = "not_recording", Interrupted = LastCutRecording() });
 
             _isRecording = false;
             _recordingWriter?.Flush();
@@ -981,7 +1015,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         if (ql == "record:status")
         {
             if (!_isRecording)
-                return Serialize(new RecordingStatusResponse { Status = "idle", IsRecording = false });
+                return Serialize(new RecordingStatusResponse { Status = "idle", IsRecording = false, Interrupted = LastCutRecording() });
             var elapsed = (DateTime.UtcNow - _recordingStart).TotalMilliseconds;
             return Serialize(new RecordingStatusResponse
             {
