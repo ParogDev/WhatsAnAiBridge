@@ -83,6 +83,7 @@ public partial class WhatsAnAiBridge
         public List<int> Missing = new();  // target indexes that resolved to nothing
         public bool Auto = true;            // sequences follow the user: a later step appearing, a met condition or the current target leaving moves on
         public Dictionary<int, bool> WasFound = new();   // order -> found at the last resolution
+        public string? Session, Who;        // the session that set it (Sessions.cs): another session can't replace an unanswered question
     }
 
     private readonly object _hlLock = new();
@@ -203,14 +204,24 @@ public partial class WhatsAnAiBridge
 
     internal JObject HighlightSet(JToken? p)
     {
+        // The highlight is one shared slot. A question another session asked the user (ask, unanswered) is not silently
+        // lost to a later call: that session is refused unless it passes force. The HUD itself (no session: the user
+        // pressing Start on a queued step, a flow ending) and the asking session may always replace it.
+        var me = CurrentSession();   // before the lock (Sessions.cs lock order)
         lock (_hlLock)
         {
+            var pending = _hl.Targets.Count(t => t.Ask != null && t.Answer == null);
+            if (pending > 0 && me != null && _hl.Session != null && _hl.Session != me.Id && p?["force"]?.Value<bool>() != true)
+                return Err("asked_by_other", $"{_hl.Who ?? "another agent"} is still waiting for the user's answer to {pending} question(s) on the current highlight " +
+                                             $"(e.g. '{_hl.Targets.First(t => t.Ask != null && t.Answer == null).Ask}'). Wait for it (await_verdicts), or pass force=true to replace it.");
             if (p?["clear"]?.Value<bool>() == true || p?["targets"] is not JArray arr)
             {
                 _hl.Targets.Clear(); _hl.Boxes.Clear(); _hl.Missing.Clear(); _hl.Title = null; _hl.Current = null; _hl.Until = null;
+                _hl.Session = null; _hl.Who = null;
                 _hl.Rev++;
                 return new JObject { ["ok"] = true, ["cleared"] = true };
             }
+            _hl.Session = me?.Id; _hl.Who = me?.Label;
             var targets = new List<HighlightTarget>();
             foreach (var t in arr.OfType<JObject>().Take(40))
             {
@@ -256,7 +267,7 @@ public partial class WhatsAnAiBridge
             lock (_verdictLock) verdictSeq = _verdictSeq;
             return new JObject
             {
-                ["ok"] = true, ["rev"] = _hl.Rev, ["title"] = _hl.Title, ["current"] = _hl.Current,
+                ["ok"] = true, ["rev"] = _hl.Rev, ["title"] = _hl.Title, ["current"] = _hl.Current, ["who"] = _hl.Who,
                 ["until"] = _hl.Until?.ToString("O"),
                 ["verdictSeq"] = verdictSeq,   // await_verdicts since=: answers after this call
                 ["targets"] = new JArray(_hl.Targets.Select((t, i) => new JObject

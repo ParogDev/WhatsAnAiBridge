@@ -257,6 +257,9 @@ public partial class WhatsAnAiBridge
         lock (_guideLock)
             if (_guide.Status is "waiting" or "detected" or "settling" && _guide.Instruction != null)
                 list.Add(new Blocker("pilot", $"waiting for the user: {_guide.Instruction}", _guide.Who, null, Yours(_guide.Who)));
+        lock (_hlLock)
+            if (_hl.Targets.FirstOrDefault(t => t.Ask != null && t.Answer == null) is { } asked)
+                list.Add(new Blocker("pilot", $"question for the user: {asked.Ask}", _hl.Who, _hl.Until, Yours(_hl.Who)));
         foreach (var l in _leases) list.Add(new Blocker(l.Kind, l.Label, l.Who, l.Until, l.Session == requester, l.Id));
         return list;
     }
