@@ -36,6 +36,7 @@ public partial class WhatsAnAiBridge
         public string? Detail;
         public DateTime UpdatedAt = DateTime.MinValue;
         public DateTime? InstructionSince;
+        public string? Who;     // the session that set the instruction or status (Sessions.cs); shown when several agents are connected
         public int Rev;
         public readonly List<GuideLogEntry> Log = new();
     }
@@ -57,6 +58,9 @@ public partial class WhatsAnAiBridge
 
     private JObject GuideSet(JToken? p)
     {
+        // Resolved before the lock: CurrentWho takes the sessions lock, which BlockersLocked (Sessions.cs) holds while it reads
+        // the guide state under this lock. Never nest them the other way round.
+        var who = p?["instruction"] != null || p?["status"] != null ? CurrentWho() : null;
         lock (_guideLock)
         {
             if (p?["clear"]?.Value<bool>() == true)
@@ -65,7 +69,9 @@ public partial class WhatsAnAiBridge
                 _guide.Step = _guide.Steps = null;
                 _guide.Status = "idle";
                 _guide.InstructionSince = null;
+                _guide.Who = null;
             }
+            if (who != null) _guide.Who = who;
             if (p?["title"] is { } t) _guide.Title = Clip(t.Type == JTokenType.Null ? null : t.ToString(), 80);
             if (p?["instruction"] is { } i)
             {
@@ -108,16 +114,16 @@ public partial class WhatsAnAiBridge
     private JObject GuideStateJsonLocked() => new()
     {
         ["ok"] = true, ["rev"] = _guide.Rev, ["title"] = _guide.Title, ["instruction"] = _guide.Instruction,
-        ["step"] = _guide.Step, ["steps"] = _guide.Steps, ["status"] = _guide.Status, ["detail"] = _guide.Detail,
+        ["step"] = _guide.Step, ["steps"] = _guide.Steps, ["status"] = _guide.Status, ["detail"] = _guide.Detail, ["who"] = _guide.Who,
         ["log"] = new JArray(_guide.Log.TakeLast(10).Select(e => new JObject { ["at"] = e.At.ToString("HH:mm:ss"), ["kind"] = e.Kind, ["text"] = e.Text, ["title"] = e.Title })),
     };
 
     /// <summary>A consistent copy for drawing (taken once per frame).</summary>
-    internal (string? title, string? instruction, int? step, int? steps, string status, string? detail, DateTime updatedAt, DateTime? instructionSince, int rev, GuideLogEntry[] log) GuideSnapshot()
+    internal (string? title, string? instruction, int? step, int? steps, string status, string? detail, DateTime updatedAt, DateTime? instructionSince, int rev, GuideLogEntry[] log, string? who) GuideSnapshot()
     {
         lock (_guideLock)
             return (_guide.Title, _guide.Instruction, _guide.Step, _guide.Steps, _guide.Status, _guide.Detail, _guide.UpdatedAt,
-                _guide.InstructionSince, _guide.Rev, _guide.Log.ToArray());
+                _guide.InstructionSince, _guide.Rev, _guide.Log.ToArray(), _guide.Who);
     }
 
     /// <summary>Clear the sticky instruction from the panel itself (the user's "dismiss").</summary>

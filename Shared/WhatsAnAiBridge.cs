@@ -74,6 +74,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
     // Recording state
     private bool _isRecording;
     private DateTime _recordingStart;
+    private string? _recordingWho;   // the session that started the recording (Sessions.cs: a restart waits for it)
     private DateTime _lastSnapshot;
     private int _frameCount;
     private StreamWriter? _recordingWriter;
@@ -105,6 +106,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                 msg => LogMessage($"[TCP] {msg}"),
                 msg => LogError($"[TCP] {msg}")
             );
+            _tcpServer.ClientClosed += SessionDisconnected;
             _tcpServer.Start(Settings.TcpPort.Value, _bridgeDir);
             StartWatchdog();
         }
@@ -210,6 +212,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             processed++;
             try
             {
+                _reqClientId = request.ClientId;   // who is asking (Sessions.cs); requests run one at a time under _requestLock
+                SessionTouch();
                 var result = ProcessTcpRequest(request.Method, request.Params);
                 request.Response.TrySetResult(result);
 
@@ -225,6 +229,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                 request.Response.TrySetResult(Serialize(new ErrorResponse { Error = ex.Message }));
                 _status.LastError = ex.Message;
             }
+            finally { _reqClientId = 0; }
         }
     }
 
@@ -243,7 +248,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessLayoutMethod(method, parameters) ?? ProcessMotionMethod(method, parameters)
                          ?? ProcessLabMethod(method, parameters) ?? ProcessProfileMethod(method, parameters)
                          ?? ProcessSelfPerfMethod(method, parameters) ?? ProcessGcPoolMethod(method, parameters)
-                         ?? ProcessSettingsMethod(method, parameters) ?? ProcessFocusMethod(method, parameters);
+                         ?? ProcessSettingsMethod(method, parameters) ?? ProcessFocusMethod(method, parameters)
+                         ?? ProcessSessionMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
@@ -290,7 +296,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         sp = SelfStart(); RunPendingScript(); SelfEnd(1, sp);
         sp = SelfStart(); RunQueuedStep(); SelfEnd(2, sp);
         sp = SelfStart(); ObserveTick(); SelfEnd(3, sp);
-        sp = SelfStart(); FlowTick(); SelfEnd(4, sp);
+        sp = SelfStart(); FlowTick(); SessionsTick(); SelfEnd(4, sp);
         sp = SelfStart();   // ipcAndRecording: ends before DrawStatusHud
 
         var now = DateTime.UtcNow;
@@ -935,6 +941,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             _currentRecordingPath = Path.Combine(recDir, fileName);
             _recordingWriter = new StreamWriter(_currentRecordingPath, false, System.Text.Encoding.UTF8);
             _isRecording = true;
+            _recordingWho = CurrentWho();
             _recordingStart = DateTime.UtcNow;
             _lastSnapshot = DateTime.MinValue;
             _frameCount = 0;

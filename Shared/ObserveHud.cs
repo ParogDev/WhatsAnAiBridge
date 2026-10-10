@@ -83,6 +83,7 @@ public partial class WhatsAnAiBridge
         "pipeline.trace", "profile.plugin", "tracker.start", "tracker.stop",
         "stats.select", "stats.set_filter", "stats.set_pinned", "stats.set_view",
         "observe.layer_set", "observe.layer_remove",
+        "restart.request", "restart.cancel", "lease.acquire", "lease.release",
     ];
 
     /// <summary>Called for every bridge request: the ones in AgentMethods become agent events while observing.</summary>

@@ -58,6 +58,7 @@ public partial class WhatsAnAiBridge
         ["ToastResult"] = ("Toasts: results", "Agent guide", "Show a toast for results and done receipts.", false),
         ["ToastWarn"] = ("Toasts: warnings", "Agent guide", "", false),
         ["ToastError"] = ("Toasts: errors", "Agent guide", "", false),
+        ["RestartHoldSec"] = ("HUD restart hold (s)", "Agent guide", "An agent's HUD restart that nothing blocks still waits this long on the card, with Not now. 0 = at once.", false),
     };
 
     private readonly ConcurrentQueue<Action> _mainActions = new();

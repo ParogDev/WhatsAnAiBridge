@@ -65,4 +65,7 @@ public class WhatsAnAiBridgeSettings : ISettings
     public ToggleNode ToastResult { get; set; } = new(true);
     public ToggleNode ToastWarn { get; set; } = new(true);
     public ToggleNode ToastError { get; set; } = new(true);
+    // HUD restarts asked for by agents (Shared\Sessions.cs): a request that nothing blocks still waits this long on the guide
+    // card, with Not now, before it is granted. 0 = at once.
+    public RangeNode<int> RestartHoldSec { get; set; } = new(5, 0, 60);
 }
