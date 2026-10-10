@@ -131,7 +131,7 @@ public partial class WhatsAnAiBridge
         {
             Id = Guid.NewGuid().ToString("N")[..10], Experiment = experiment, Label = Clip(p?["label"]?.ToString(), 40) ?? "step",
             Instruction = instruction!, Title = Clip(p?["title"]?.ToString(), 80), Note = Clip(p?["note"]?.ToString(), 300),
-            By = Clip(p?["by"]?.ToString(), 40), Watch = watch, Chain = p?["chain"]?.Value<bool>() == true, Highlight = p?["highlight"] as JArray, Flow = p?["flow"] as JObject,
+            By = Clip(p?["by"]?.ToString(), 40) ?? CurrentWho(), Watch = watch, Chain = p?["chain"]?.Value<bool>() == true, Highlight = p?["highlight"] as JArray, Flow = p?["flow"] as JObject,
             Repeats = Math.Clamp(p?["repeats"]?.Value<int>() ?? 1, 1, 10),
             SettleMs = Math.Clamp(p?["settleMs"]?.Value<int>() ?? 500, 100, 5000),
             TimeoutMs = Math.Clamp(p?["timeoutMs"]?.Value<int>() ?? 120_000, 5_000, 600_000),

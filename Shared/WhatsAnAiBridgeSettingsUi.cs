@@ -208,6 +208,8 @@ public class WhatsAnAiBridgeSettingsUi
             "Toasts: Warnings", "Amber toasts");
         Toggle("cb_te", s.ToastError, dl, x, cx, ref y,
             "Toasts: Errors", "Red toasts");
+        IntSlider("cb_rh", s.RestartHoldSec, dl, x, cx, ref y, sw,
+            "HUD Restart Hold (s)", "An agent's HUD restart that nothing blocks still waits this long on the card, with Not now. 0 = at once. Restarts never interrupt a running test unless you press Restart now");
 
         SectionHeader(dl, x, ref y, "Query Limits");
         IntSlider("cb_er", s.MaxEntityRange, dl, x, cx, ref y, sw,

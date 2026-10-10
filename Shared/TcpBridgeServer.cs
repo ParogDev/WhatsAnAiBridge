@@ -25,6 +25,8 @@ public class TcpBridgeServer : IDisposable
         public JToken? Params { get; init; }
         public required object Id { get; init; }
         public required TaskCompletionSource<string> Response { get; init; }
+        /// <summary>The connection the request came in on (1, 2, ...): sessions (Shared\Sessions.cs) are keyed by it.</summary>
+        public long ClientId { get; init; }
     }
 
     private const int PortFallbackRange = 10;
@@ -42,6 +44,9 @@ public class TcpBridgeServer : IDisposable
     private string? _authToken;
     private string? _tokenFilePath;
     private int _clientCount;
+    private long _clientSeq;
+    /// <summary>A connection closed (its ClientId): the session it carried is marked disconnected (Shared\Sessions.cs).</summary>
+    public event Action<long>? ClientClosed;
     private readonly Action<string> _log;
     private readonly Action<string> _logError;
 
@@ -137,8 +142,9 @@ public class TcpBridgeServer : IDisposable
     private async Task HandleClientAsync(TcpClient client, CancellationToken ct)
     {
         Interlocked.Increment(ref _clientCount);
+        var clientId = Interlocked.Increment(ref _clientSeq);
         var endpoint = client.Client.RemoteEndPoint?.ToString() ?? "unknown";
-        _log($"Client connected: {endpoint}");
+        _log($"Client connected: {endpoint} (#{clientId})");
 
         try
         {
@@ -160,7 +166,7 @@ public class TcpBridgeServer : IDisposable
                     if (line == null) break; // Client disconnected
                     if (string.IsNullOrWhiteSpace(line)) continue;
 
-                    var response = await ProcessJsonRpcMessage(line);
+                    var response = await ProcessJsonRpcMessage(line, clientId);
                     if (response != null)
                     {
                         try
@@ -179,11 +185,12 @@ public class TcpBridgeServer : IDisposable
         finally
         {
             Interlocked.Decrement(ref _clientCount);
-            _log($"Client disconnected: {endpoint}");
+            _log($"Client disconnected: {endpoint} (#{clientId})");
+            try { ClientClosed?.Invoke(clientId); } catch (Exception ex) { _logError($"ClientClosed handler: {ex.Message}"); }
         }
     }
 
-    private async Task<string?> ProcessJsonRpcMessage(string json)
+    private async Task<string?> ProcessJsonRpcMessage(string json, long clientId)
     {
         JObject msg;
         try
@@ -236,6 +243,7 @@ public class TcpBridgeServer : IDisposable
             Params = msg["params"],
             Id = id?.ToObject<object>() ?? 0,
             Response = tcs,
+            ClientId = clientId,
         };
 
         PendingRequests.Enqueue(pending);

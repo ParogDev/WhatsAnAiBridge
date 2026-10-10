@@ -8,7 +8,7 @@ using Newtonsoft.Json.Linq;
 namespace WhatsAnAiBridge;
 
 using GuideSnap =(string? title, string? instruction, int? step, int? steps, string status, string? detail,
-    DateTime updatedAt, DateTime? instructionSince, int rev, WhatsAnAiBridge.GuideLogEntry[] log);
+    DateTime updatedAt, DateTime? instructionSince, int rev, WhatsAnAiBridge.GuideLogEntry[] log, string? who);
 using FlowSnap = (string? title, (string label, string state)[] steps, string? showing, string status, int rev);
 
 /// <summary>
@@ -90,6 +90,14 @@ public partial class WhatsAnAiBridge
         public string? WrapSrc, Wrap1, Wrap2;
         public float WrapSize, WrapW;
         public string? TitleCapsSrc, TitleCaps;
+        // Several agents connected (Sessions.cs): the title row names who asked ("whats-a-route - Experiment: stash"),
+        // composed only when who or the title change.
+        public bool ShowWho;
+        public string? WhoTitleWho, WhoTitleTitle, WhoTitle;
+        public string? SeenRestart;        // id of the restart request on the card last frame (its arrival flashes)
+        public double RestartArrivedAt = -1e9;
+        public string[]? SessionsLabels;   // the sessions strip's line, recomposed only when the connected set changes
+        public string? SessionsLine;
         public string? LastError;
     }
 
@@ -150,10 +158,14 @@ public partial class WhatsAnAiBridge
         var q = QueueViewOf(QueueSnapshot());
         var fl = FlowSnapshot();
         var plan = fl.status == "running" ? FlowPlan() : [];
+        // Who is connected and whether one of them waits to restart the HUD (Sessions.cs), once per frame.
+        var rs = RestartSnapshot();
         var now = ImGui.GetTime();
         var utc = DateTime.UtcNow;
         ObserveGuide(g, q, now);
         ObserveFlow(fl, plan, now);
+        _guideUi.ShowWho = rs.connected >= 2;
+        if (rs.request?.Id != _guideUi.SeenRestart) { _guideUi.SeenRestart = rs.request?.Id; if (rs.request != null) _guideUi.RestartArrivedAt = now; }
         var th = PanelTheme.Current();
         var fv = new FlowView(
             fl.status == "running" || (fl.status == "done" && now - _guideUi.FlowEndedAt < GuideFlowDoneShowSec),
@@ -167,7 +179,8 @@ public partial class WhatsAnAiBridge
         var hasCard = (g.instruction != null || g.status != "idle") && g.status != "done";
         var needsUser = g.status is "waiting" or "failed" or "detected" or "settling";
         var quietFor = (utc - g.updatedAt).TotalSeconds;
-        var hide = (!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null);
+        // A pending HUD restart (blocked, or counting down with Not now) keeps the panel up: the user must be able to answer it.
+        var hide = ((!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null)) && rs.request == null;
 
         // Attention, decided once per frame for every surface (GuideAttentionFor). Inputs: the highlight boxes on
         // screen (a consistent copy; the overlay re-resolves them after this panel, so they may be one frame old),
@@ -233,7 +246,7 @@ public partial class WhatsAnAiBridge
             u.WinPos = ImGui.GetWindowPos();
             u.WinH = shown ? ImGui.GetWindowSize().Y : 0;
             if (!shifted) u.Home = u.WinPos;
-            if (shown) DrawGuideBody(g, q, fv, at, hasCard, needsUser, th, now, utc);
+            if (shown) DrawGuideBody(g, q, fv, at, hasCard, needsUser, rs.request, rs.connected, rs.sessions, th, now, utc);
         }
         catch (Exception ex) { GuideReport(ex); }
         finally
@@ -405,11 +418,19 @@ public partial class WhatsAnAiBridge
 
     // ── Body ─────────────────────────────────────────────────────────
 
-    private void DrawGuideBody(in GuideSnap g, in QueueView q, in FlowView fv, in GuideAttention at, bool hasCard, bool needsUser, PanelTheme th, double now, DateTime utc)
+    private void DrawGuideBody(in GuideSnap g, in QueueView q, in FlowView fv, in GuideAttention at, bool hasCard, bool needsUser,
+        RestartRequest? restart, int connected, SessionInfo[] sessions, PanelTheme th, double now, DateTime utc)
     {
         if (hasCard)
         {
             DrawGuideCard(g, q.Running, fv, at, th, now, utc);
+            ImGui.Dummy(new Vector2(GuideWidth, 5));
+        }
+        if (restart != null)
+        {
+            // An agent waits to restart the HUD: what it waits for, or the countdown, with Restart now / Not now. Under the
+            // live card, above the queue: it is the one thing here the user may want to answer right away.
+            DrawRestartCard(restart, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
         if (q.Next != null)
@@ -418,6 +439,13 @@ public partial class WhatsAnAiBridge
             // redo, or the queued step that is recording): the queue then shrinks to a one-line "next" strip.
             if (needsUser || q.Running != null) DrawQueueStrip(q, th);
             else DrawQueueCard(q, th, now, utc);
+            ImGui.Dummy(new Vector2(GuideWidth, 5));
+        }
+        // Several agents share this HUD: one quiet line says who is connected and what each is doing, while the panel is
+        // up anyway (never a reason to show it on its own).
+        if (connected >= 2 && (hasCard || restart != null || q.Next != null))
+        {
+            DrawSessionsStrip(sessions, th, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
     }
@@ -581,10 +609,22 @@ public partial class WhatsAnAiBridge
             dl.AddText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(GuideToastMuted), t);
             rx -= pillW + 10;
         }
-        // The guide's title (the experiment), dimmed caps in the space left on the title row (cached caps).
-        if (g.title != null && g.instruction != null && !compact && rx - x > 60)
+        // The guide's title (the experiment), dimmed caps in the space left on the title row (cached caps). With several
+        // agents connected it starts with who asked, so two agents' instructions never read as one voice.
+        var titleShown = g.title;
+        if (_guideUi.ShowWho && g.who != null)
         {
-            if (!ReferenceEquals(_guideUi.TitleCapsSrc, g.title)) { _guideUi.TitleCapsSrc = g.title; _guideUi.TitleCaps = GuideCaps(g.title); }
+            var u0 = _guideUi;
+            if (!ReferenceEquals(u0.WhoTitleWho, g.who) || !ReferenceEquals(u0.WhoTitleTitle, g.title))
+            {
+                u0.WhoTitleWho = g.who; u0.WhoTitleTitle = g.title;
+                u0.WhoTitle = g.title == null ? g.who : $"{g.who} - {g.title}";
+            }
+            titleShown = u0.WhoTitle;
+        }
+        if (titleShown != null && g.instruction != null && !compact && rx - x > 60)
+        {
+            if (!ReferenceEquals(_guideUi.TitleCapsSrc, titleShown)) { _guideUi.TitleCapsSrc = titleShown; _guideUi.TitleCaps = GuideCaps(titleShown); }
             var t = GuideClipTracked(_guideUi.TitleCaps!, font, small, GuideToastMsgTrack, rx - x);
             GuideTrackedText(dl, font, small, new Vector2(x, hy - small * 0.5f), U(GuideToastMuted), t, GuideToastMsgTrack);
         }

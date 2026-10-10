@@ -31,6 +31,8 @@ public partial class WhatsAnAiBridge
         public bool? AtStart, AtEnd;
         public bool OwnsCard;
         public Timer? Timer;
+        public string? Who;        // the session that asked (Sessions.cs: a restart waits for it)
+        public DateTime EndsAt;
     }
 
     private Measure? _measure;
@@ -51,14 +53,15 @@ public partial class WhatsAnAiBridge
     /// <summary>Start of a measurement of about durationMs: announce it and start sampling focus.</summary>
     private void MeasureBegin(string what, int durationMs)
     {
+        var who = CurrentWho();   // before the lock: BlockersLocked (Sessions.cs) takes _measureLock under the sessions lock
         lock (_measureLock)
         {
             MeasureStopLocked();
-            var m = new Measure { What = what, AtStart = GameInFront() };
+            var m = new Measure { What = what, AtStart = GameInFront(), Who = who, EndsAt = DateTime.UtcNow.AddMilliseconds(durationMs + 2000) };
             var seconds = Math.Max(1, (int)Math.Round(durationMs / 1000.0));
             if (Settings.ShowAgentGuide.Value)
             {
-                var (_, instruction, _, _, status, _, _, _, _, _) = GuideSnapshot();
+                var (_, instruction, _, _, status, _, _, _, _, _, _) = GuideSnapshot();
                 var text = $"Keep the game in front for {seconds} s (no alt-tab): the HUD is being measured";
                 if (instruction == null && status is "idle" or "done" or "info" or "captured")
                 {

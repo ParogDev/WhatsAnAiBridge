@@ -40,6 +40,7 @@ public partial class WhatsAnAiBridge
         public string? DoneWhy;                // why the current step is not done (first failing link)
         public string?[] OptionWhy = [];        // per option of the current step: null = available, else why not
         public List<string> Preflight = new();  // static paths that do not resolve: API or layout changes
+        public string? Who;                     // the session that started it (Sessions.cs: a restart waits for a running flow)
         public int Rev;
     }
 
@@ -64,7 +65,7 @@ public partial class WhatsAnAiBridge
             if (wasRunning) GuideSet(new JObject { ["clear"] = true });   // the card showed the flow: don't leave its instruction behind
             return FlowStateJson();
         }
-        var flow = new FlowState { Title = Clip(p["title"]?.ToString(), 80), Goal = p["goal"], Status = "running", StartedAt = DateTime.UtcNow };
+        var flow = new FlowState { Title = Clip(p["title"]?.ToString(), 80), Goal = p["goal"], Status = "running", StartedAt = DateTime.UtcNow, Who = CurrentWho() };
         var timeout = p["timeoutSec"]?.Value<double>();
         if (timeout is > 0) flow.EndsAt = DateTime.UtcNow.AddSeconds(Math.Min(timeout.Value, 3600));
         foreach (var s in steps.OfType<JObject>().Take(20))

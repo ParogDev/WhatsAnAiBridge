@@ -29,7 +29,7 @@ public partial class WhatsAnAiBridge
     private readonly ConcurrentQueue<ReloadRequest> _pendingReloads = new();
     private volatile ReloadResultDto? _lastReload;
 
-    private sealed record ReloadRequest(string Folder, string? CompiledPath, string? FailedSourceDir, DateTime QueuedAt);
+    private sealed record ReloadRequest(string Folder, string? CompiledPath, string? FailedSourceDir, DateTime QueuedAt, string? Who = null);
 
     /// <summary>Routes "hud.*" JSON-RPC methods. Returns null for anything else.</summary>
     private string? ProcessHudMethod(string method, JToken? p)
@@ -140,7 +140,7 @@ public partial class WhatsAnAiBridge
         if (_pendingReloads.Any(r => r.Folder == folder))
             return new ReloadQueuedResponse { Queued = true, Plugin = folder, Message = "Already queued." };
 
-        _pendingReloads.Enqueue(new ReloadRequest(folder, loaded?.CompiledPath, failedDir, DateTime.UtcNow));
+        _pendingReloads.Enqueue(new ReloadRequest(folder, loaded?.CompiledPath, failedDir, DateTime.UtcNow, CurrentWho()));
         return new ReloadQueuedResponse
         {
             Queued = true,
