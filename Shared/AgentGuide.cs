@@ -359,11 +359,11 @@ public partial class WhatsAnAiBridge
     };
 
     /// <summary>A consistent copy for drawing (taken once per frame).</summary>
-    internal (string? title, string? instruction, int? step, int? steps, string status, string? detail, DateTime updatedAt, DateTime? instructionSince, int rev, GuideLogEntry[] log, string? who) GuideSnapshot()
+    internal (string? title, string? instruction, int? step, int? steps, string status, string? detail, DateTime updatedAt, DateTime? instructionSince, int rev, GuideLogEntry[] log, string? who, string? session) GuideSnapshot()
     {
         lock (_guideLock)
             return (_guide.Title, _guide.Instruction, _guide.Step, _guide.Steps, _guide.Status, _guide.Detail, _guide.UpdatedAt,
-                _guide.InstructionSince, _guide.Rev, _guide.Log.ToArray(), _guide.Who);
+                _guide.InstructionSince, _guide.Rev, _guide.Log.ToArray(), _guide.Who, _guide.Session);
     }
 
     /// <summary>

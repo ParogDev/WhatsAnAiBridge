@@ -61,7 +61,7 @@ public partial class WhatsAnAiBridge
             var seconds = Math.Max(1, (int)Math.Round(durationMs / 1000.0));
             if (Settings.ShowAgentGuide.Value)
             {
-                var (_, instruction, _, _, status, _, _, _, _, _, _) = GuideSnapshot();
+                var (_, instruction, _, _, status, _, _, _, _, _, _, _) = GuideSnapshot();
                 var text = $"Keep the game in front for {seconds} s (no alt-tab): the HUD is being measured";
                 if (instruction == null && status is "idle" or "done" or "info" or "captured")
                 {

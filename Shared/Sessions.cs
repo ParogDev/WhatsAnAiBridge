@@ -63,14 +63,22 @@ public partial class WhatsAnAiBridge
     /// The agents the in-game UI may mention, rebuilt by SessionsTick at 4 Hz (read per frame by reference, no lock):
     /// only connected sessions with something going on, plus HUD-run work asking the user under a name nobody is
     /// connected as. Idle and disconnected sessions are left out (session.list keeps them). Names maps every known
-    /// label to its display name.
+    /// label to its display name; Sessions maps every known session id to its display name and who-dot hue, so a
+    /// surface that knows the session (an attention item, the card, a restart request) names and colours it the same
+    /// way after a re-hello changed its label (ids don't change; Hue is kept per session, AttnPickHueLocked).
     /// </summary>
-    internal sealed record AgentsView(AgentView[] Active, IReadOnlyDictionary<string, string> Names)
+    internal sealed record AgentsView(AgentView[] Active, IReadOnlyDictionary<string, string> Names,
+        Dictionary<string, (string Name, int Hue)> Sessions, Dictionary<string, int> Hues)
     {
-        public static readonly AgentsView Empty = new([], new Dictionary<string, string>());
+        public static readonly AgentsView Empty = new([], new Dictionary<string, string>(), new(), new());
         /// <summary>Two or more agents active: the card says whose step it is.</summary>
         public bool Ambiguous => Active.Length >= 2;
         public string NameOf(string? label) => label == null ? "" : Names.TryGetValue(label, out var n) ? n : BaseDisplayName(label, null);
+        /// <summary>The name of a session when it is known by id (stable across a label change), else of its label.</summary>
+        public string NameOf(string? session, string? label) => session != null && Sessions.TryGetValue(session, out var s) ? s.Name : NameOf(label);
+        /// <summary>A session's who-dot hue by id, else the hue of the newest session with that label, else the fallback (slate).</summary>
+        public int HueOf(string? session, string? label) =>
+            session != null && Sessions.TryGetValue(session, out var s) ? s.Hue : label != null && Hues.TryGetValue(label, out var h) ? h : AttnHueFallback;
     }
 
     /// <summary>The MCP server build behind a session, as its hello reported it (hello.mcp).</summary>
@@ -133,6 +141,9 @@ public partial class WhatsAnAiBridge
         public DateTime? HoldUntil;        // waiting with nothing blocking: granted at this time
         public DateTime? DecidedAt;
         public List<Blocker> Blockers = new();
+        // Set on the panel's copy only (RestartCopyLocked): the requester's who-dot hue and how many later requests merged into this one.
+        public int Hue = AttnHueFallback;
+        public int MergedCount;
     }
 
     /// <summary>Something a restart would interrupt: what, whose, until when (when known), and whether it is the requester's own.</summary>
@@ -404,7 +415,14 @@ public partial class WhatsAnAiBridge
     {
         var blockers = BlockersLocked(null);
         var names = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var s in _sessions.Values.OrderBy(s => s.Connected).ThenBy(s => s.LastSeen)) names[s.Label] = DisplayNameLocked(s);   // connected, newest win
+        var byId = new Dictionary<string, (string Name, int Hue)>(StringComparer.Ordinal);
+        var hues = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var s in _sessions.Values.OrderBy(s => s.Connected).ThenBy(s => s.LastSeen))   // connected, newest win
+        {
+            names[s.Label] = DisplayNameLocked(s);
+            byId[s.Id] = (DisplayNameLocked(s), s.Hue is >= 0 and < AttnHues ? s.Hue : AttnHueFallback);
+            hues[s.Label] = byId[s.Id].Hue;
+        }
         var byLabel = _sessions.Values.Where(s => s.Connected).GroupBy(s => s.Label).ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.HelloAt).First());
         var list = new List<AgentView>();
         foreach (var g in blockers.Where(b => b.Who != null).GroupBy(b => b.Who!))
@@ -420,8 +438,10 @@ public partial class WhatsAnAiBridge
         var active = list.OrderByDescending(a => a.Asks.Length > 0).ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray();
         // Same as last time: keep the instance, so the UI (which recomposes its text when the reference changes) does nothing.
         var old = _agentsView;
-        if (SameAgents(old.Active, active) && old.Names.Count == names.Count && names.All(kv => old.Names.TryGetValue(kv.Key, out var v) && v == kv.Value)) return;
-        _agentsView = new AgentsView(active, names);
+        if (SameAgents(old.Active, active) && old.Names.Count == names.Count && names.All(kv => old.Names.TryGetValue(kv.Key, out var v) && v == kv.Value)
+            && old.Sessions.Count == byId.Count && byId.All(kv => old.Sessions.TryGetValue(kv.Key, out var v) && v == kv.Value)
+            && old.Hues.Count == hues.Count && hues.All(kv => old.Hues.TryGetValue(kv.Key, out var v) && v == kv.Value)) return;
+        _agentsView = new AgentsView(active, names, byId, hues);
     }
 
     private static bool SameAgents(AgentView[] a, AgentView[] b)
@@ -605,13 +625,15 @@ public partial class WhatsAnAiBridge
 
     /// <summary>
     /// One waiting request against the HUD's state now: blocked (hold reset, blockers listed), or free and holding
-    /// (the card's countdown), or past the hold and granted.
+    /// (the card's countdown), or past the hold and granted. The countdown starts when the card takes the panel's top
+    /// slot: after the floor card that blocked it has shown its answer receipt, faded and left the hand-over gap
+    /// (AttnSlotTopAtLocked; attention-queue-ui.md 3), so the player always sees the whole countdown.
     /// </summary>
     private void RestartEvaluateLocked(RestartRequest req, DateTime now)
     {
         req.Blockers = BlockersLocked(req.Session);
         if (req.Blockers.Count > 0) { req.HoldUntil = null; return; }
-        req.HoldUntil ??= now.AddSeconds(Settings.RestartHoldSec.Value);
+        req.HoldUntil ??= AttnSlotTopAtLocked(now).AddSeconds(Settings.RestartHoldSec.Value);
         if (now >= req.HoldUntil.Value) RestartGrantLocked(req, "auto", now);
     }
 
@@ -730,12 +752,14 @@ public partial class WhatsAnAiBridge
         foreach (var s in sessions) if (s.Connected) connected++;
         var waiting = _restarts.Where(r => r.Status == "waiting").OrderBy(r => r.At).FirstOrDefault();
         var granted = _restarts.FirstOrDefault(r => r.Status == "go");
-        _sessionsView = new SessionsView(sessions, connected, RestartCopy(waiting), RestartCopy(granted), McpRolloutLocked());
+        _sessionsView = new SessionsView(sessions, connected, RestartCopyLocked(waiting), RestartCopyLocked(granted), McpRolloutLocked());
     }
 
-    private static RestartRequest? RestartCopy(RestartRequest? req) => req == null ? null : new RestartRequest
+    /// <summary>The panel's copy of a request, with the requester's who-dot hue and how many later requests merged into it.</summary>
+    private RestartRequest? RestartCopyLocked(RestartRequest? req) => req == null ? null : new RestartRequest
     {
         Id = req.Id, Session = req.Session, Who = req.Who, Reason = req.Reason, At = req.At, Status = req.Status, By = req.By,
         HoldUntil = req.HoldUntil, DecidedAt = req.DecidedAt, Blockers = req.Blockers.ToList(),
+        Hue = AttnHueLocked(req.Session, req.Who), MergedCount = _restarts.Count(r => r.Status == "merged" && r.Into == req.Id),
     };
 }

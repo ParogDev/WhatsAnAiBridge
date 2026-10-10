@@ -8,7 +8,7 @@ using Newtonsoft.Json.Linq;
 namespace WhatsAnAiBridge;
 
 using GuideSnap =(string? title, string? instruction, int? step, int? steps, string status, string? detail,
-    DateTime updatedAt, DateTime? instructionSince, int rev, WhatsAnAiBridge.GuideLogEntry[] log, string? who);
+    DateTime updatedAt, DateTime? instructionSince, int rev, WhatsAnAiBridge.GuideLogEntry[] log, string? who, string? session);
 using FlowSnap = (string? title, (string label, string state)[] steps, string? showing, string status, int rev);
 
 /// <summary>
@@ -106,9 +106,6 @@ public partial class WhatsAnAiBridge
         public string? WhoTitleName, WhoTitleTitle, WhoTitle;
         public string? SeenRestart;        // id of the restart request on the card last frame (its arrival flashes)
         public double RestartArrivedAt = -1e9;
-        // The "who is asking" strip: its line and hover text, recomposed only when the agents view changes (4 Hz at most).
-        public AgentsView? SessionsAgents;
-        public string? SessionsLine, SessionsTip;
         // Sessions chip (GuidePanelSessions.cs): its rect last frame (the hover hit-test), its eased opacity and hover, the
         // count and countdown texts rebuilt only when their number changes, and the hover texts rebuilt once a second.
         public Vector2 ChipMin, ChipMax;
@@ -201,12 +198,16 @@ public partial class WhatsAnAiBridge
         var rs = SessionsSnapshot();
         var ag = AgentsSnapshot();
         var ask = AttnAskSnapshot();   // the attention queue's floor holder when it is a question (AttentionQueue.cs)
+        var queue = _askUi.Queue = AttnQueueSnapshot();   // who waits behind it (the next strip, the dot; GuidePanelQueue.cs)
         var now = ImGui.GetTime();
         var utc = DateTime.UtcNow;
         ObserveGuide(g, q, now);
         ObserveFlow(fl, plan, now);
-        // Only with two or more agents active does the card say whose step it is; one obvious agent needs no name.
-        _guideUi.ShowWho = ag.Ambiguous;
+        AskObserveGuideOwner(g.who, g.session, ag, now);   // the slot's owner for the hand-over cues (GuidePanelAsk.cs)
+        // The floor's card slot: the ask shown, leaving (receipt, fade) or the empty gap after it (GuidePanelAsk.cs).
+        var askUp = AskSlotUp(ask, now, utc, ImGui.GetIO().MousePos);
+        // The card says whose it is only when that isn't obvious: two or more agents active, or another one in line.
+        _guideUi.ShowWho = GuideShowWho(ag, queue, g.who ?? (ask != null ? ask.Whos[0] : null));
         if (rs.Waiting?.Id != _guideUi.SeenRestart) { _guideUi.SeenRestart = rs.Waiting?.Id; if (rs.Waiting != null) _guideUi.RestartArrivedAt = now; }
         var th = PanelTheme.Current();
         var fv = new FlowView(
@@ -224,7 +225,7 @@ public partial class WhatsAnAiBridge
         // dropped lines do not wake the card).
         var quietFor = (utc - (g.updatedAt > _toastShownAt ? g.updatedAt : _toastShownAt)).TotalSeconds;
         // A pending HUD restart (blocked, or counting down with Not now) keeps the panel up: the user must be able to answer it.
-        var quiet = ((!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null)) && rs.Waiting == null && ask == null;
+        var quiet = ((!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null)) && rs.Waiting == null && !askUp;
 
         // Attention, decided once per frame for every surface (GuideAttentionFor). Inputs: the highlight boxes on
         // screen (a consistent copy; the overlay re-resolves them after this panel, so they may be one frame old),
@@ -251,11 +252,14 @@ public partial class WhatsAnAiBridge
         // The user has pressed Done (checking): their part is done, so the card no longer asks them to act now.
         var mustAct = g.status is "waiting" or "failed" && g.instruction != null && !GuideChecking(a, g.status);
         var bridgeDown = _tcpServer?.IsRunning != true;
+        var peekable = hasCard || q.Next != null || askUp;
+        var waiting = queue.Rows.Length > 0 || ask != null;   // something for the player, on screen or not: the dot means something
         var at = GuideAttentionFor(boxes.Count > 0, hovered, now - u.HoverAt, needsUser, mustAct, avoid,
-            CombatNear(now), quiet, hasCard || q.Next != null || ask != null, g.rev > 0 || bridgeDown, bridgeDown, toastsH > 0);
+            CombatNear(now), quiet, peekable, g.rev > 0 || bridgeDown || waiting, bridgeDown, toastsH > 0, rs.Waiting != null);
         FeedGuideToasts(g, at, hl, utc);
         PublishAttention(at);
         var hide = at.CardHidden;
+        if (u.CardHidden && !hide) u.AlphaNow = 0.02f;   // back from the quiet dot or combat: fades in, no flash
         u.CardHidden = hide;
         u.DotShown = at.ShowDot;
 
@@ -278,7 +282,9 @@ public partial class WhatsAnAiBridge
             u.HoverAboveY = u.WinPos.Y;
             u.HoverBelowY = anchor.Y + (toastsH > 0 ? toastsH : 0);
             if (!DrawGuideLogSheet(g, th, now, anchor)) { if (at.ToastsAllowed) DrawGuideToasts(th, now, utc, anchor); }
-            if (at.ShowDot) DrawGuideDot(at, hovered, hasCard || q.Next != null, now);
+            var dot = GuideDotLookFor(at, g.status, hasCard, ask != null, queue, ag);   // the floor item's tone while combat hides it, accent while items wait
+            AskDotHover(at.ShowDot && hovered, peekable, queue);
+            if (at.ShowDot) DrawGuideDot(at, hovered, peekable, now, dot.tone, dot.tip);
             // Who shares the HUD and whether a restart or an MCP rollout is on: beside the card's strip, card or no card.
             DrawSessionsChip(rs, at, now, utc);
         }
@@ -350,23 +356,29 @@ public partial class WhatsAnAiBridge
     /// <param name="DropEchoes">Output: a toast whose text a visible highlight already says is dropped.</param>
     /// <param name="CardHidden">Output: the card (and the queue / sessions strips under it) is not drawn.</param>
     /// <param name="ShowDot">Output: the quiet status dot is drawn where the card was.</param>
+    /// <param name="RestartUp">Input: a restart card is on screen (it stays drawn in combat: its countdown and Not now must stay reachable).</param>
+    /// <param name="FloorHidden">Output: combat hides the floor card (an ask, an instruction) and the dot stands in; hovering the dot brings it back.</param>
     private readonly record struct GuideAttention(
         bool Highlights, bool Hovered, double HoverAgo, bool NeedsUser, bool MustAct, bool Overlapped,
         bool Combat, bool Quiet, bool Peekable, bool BridgeDown,
         float CardAlpha, bool CardPulse, bool Urgent, bool CardInput, bool ShowPlan, bool ToastsAllowed, Vector2 CardShift,
-        bool ToastHold, bool DropEchoes, bool CardHidden, bool ShowDot);
+        bool ToastHold, bool DropEchoes, bool CardHidden, bool ShowDot, bool RestartUp, bool FloorHidden);
 
     private static GuideAttention GuideAttentionFor(bool highlights, bool hovered, double hoverAgo, bool needsUser, bool mustAct, Vector2 avoid,
-        bool combat, bool quiet, bool peekable, bool dotWanted, bool bridgeDown, bool toastsUp)
+        bool combat, bool quiet, bool peekable, bool dotWanted, bool bridgeDown, bool toastsUp, bool restartUp)
     {
         var explicitly = hovered || hoverAgo < GuideHoverKeepSec;   // rule 7: a hovered surface shows until 5 s after
         // rule 8: a card that asks the user to act is never ghosted - it is the thing to look at, highlight or not.
         // rule 2: otherwise, while highlights are on screen, the highlight carries the words and the card ghosts.
         var ghost = highlights && !explicitly && !mustAct;
         var alpha = mustAct ? 1f : ghost ? GuideGhostAlpha : highlights ? GuideHoverAlpha : 1f;
+        // rule 1 (combat, attention-queue-ui.md 4.1): while a hostile is near the floor card itself is not drawn, an ask or
+        // a waiting step included - the player is fighting. The dot in the item's tone stands in; hovering it brings the
+        // card back for 5 s (rule 7), input on. A restart card keeps the panel up (its countdown must stay answerable).
+        var floorHidden = combat && !explicitly;
         // rule 5 (quiet dot): after the quiet hide the card leaves a dot where it was; hovering the dot brings the card
         // back (rule 7 keeps it 5 s after the mouse leaves). Only quiet states: a card asking for the user is never quiet.
-        var hidden = quiet && !mustAct && !(explicitly && peekable);
+        var hidden = (quiet && !mustAct && !(explicitly && peekable)) || (floorHidden && !restartUp);
         // With the card hidden its toasts anchor at its home, right where the dot sits: the dot waits until they are gone.
         // rule 1 (combat): while a hostile is near, the non-actionable toasts (agent, result) wait. Cards, warnings,
         // errors and steps are untouched: what asks the user to act always wins (rule 8).
@@ -376,7 +388,7 @@ public partial class WhatsAnAiBridge
         return new GuideAttention(highlights, hovered, hoverAgo, needsUser, mustAct, avoid != Vector2.Zero,
             combat, quiet, peekable, bridgeDown,
             alpha, !ghost, mustAct, !ghost, !ghost, true, avoid,
-            combat, highlights, hidden, hidden && dotWanted && !toastsUp);
+            combat, highlights, hidden, hidden && dotWanted && !toastsUp, restartUp, floorHidden);
     }
 
     /// <summary>
@@ -504,14 +516,12 @@ public partial class WhatsAnAiBridge
     private void DrawGuideBody(in GuideSnap g, in GuideAskView a, in QueueView q, in FlowView fv, in GuideAttention at, bool hasCard, bool needsUser,
         RestartRequest? restart, AgentsView ag, AskView? ask, PanelTheme th, double now, DateTime utc)
     {
-        // The attention queue's question (minimal card, GuidePanelAsk.cs): first, since it holds the floor. Not drawn in
-        // combat or during the hand-over gap (the bridge's visibleSince); the player answers when calm.
-        if (ask is { Hidden: false } && !at.Combat)
-        {
-            DrawAskCard(ask, th, now, utc);
-            ImGui.Dummy(new Vector2(GuideWidth, 5));
-        }
-        if (hasCard)
+        // The floor's slot (GuidePanelAsk.cs): the attention queue's question, its answer receipt and fade, or the empty
+        // hand-over gap. First, since it holds the floor. Not drawn in combat (the dot stands in, attention FloorHidden).
+        var slot = DrawAskSlot(at, ag, th, now, utc);
+        if (slot) ImGui.Dummy(new Vector2(GuideWidth, 5));
+        var floorUp = slot || (hasCard && !at.FloorHidden);
+        if (hasCard && !at.FloorHidden)
         {
             DrawGuideCard(g, a, q.Running, fv, at, ag, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
@@ -519,8 +529,8 @@ public partial class WhatsAnAiBridge
         if (restart != null)
         {
             // An agent waits to restart the HUD: what it waits for, or the countdown, with Restart now / Not now. Under the
-            // live card, above the queue: it is the one thing here the user may want to answer right away.
-            DrawRestartCard(restart, ag, th, now, utc);
+            // floor card while one is up (its holder is a blocker), else the top card; above the queue.
+            DrawRestartCard(restart, floorUp, ag, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
         if (q.Next != null)
@@ -531,23 +541,16 @@ public partial class WhatsAnAiBridge
             else DrawQueueCard(q, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
-        // Two or more agents ask the user for something at once: one quiet line says who, so their requests never read as
-        // one voice. Only then (one asker is obvious; idle or disconnected sessions are nobody's business here), and only
-        // while the panel is up anyway (never a reason to show it on its own: the sessions chip is the always-there surface).
-        if (GuideAskers(ag) >= 2 && (hasCard || restart != null || q.Next != null))
+        // Several agents want the player: one quiet line says who is next in the attention queue, or, with nobody in line,
+        // who is asking (two or more at once). Never for one obvious agent, never idle or gone sessions, and only while
+        // the panel is up anyway (never a reason to show it on its own; GuidePanelQueue.cs).
+        if (NextStripWanted(ag) && (floorUp || restart != null || q.Next != null))
         {
-            DrawSessionsStrip(ag, th);
+            DrawNextStrip(ag, restart != null, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
     }
 
-    /// <summary>How many active agents ask the user for something right now (a step, a question, a flow, a recording step).</summary>
-    private static int GuideAskers(AgentsView ag)
-    {
-        var n = 0;
-        foreach (var x in ag.Active) if (x.Asks.Length > 0) n++;
-        return n;
-    }
     /// <summary>
     /// The live card: the persistent member of the toast family. The look follows syrairc's ExileImGui2 (ExileMaps:
     /// its toast stack and MessageBar, "the persistent cousin of a toast"), ported by hand, not referenced: a slate
@@ -636,7 +639,7 @@ public partial class WhatsAnAiBridge
             : (float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 1.6));
         dl.AddRectFilled(min, max, U(GuideToastInk, 0.94f), 0f);
         var flashT = (now - _guideUi.ArrivedAt) / GuideFlashSec;
-        if (flashT < 1) dl.AddRectFilled(min, max, U(look.Tone, 0.35f * (float)(1 - flashT)), 0f);
+        if (flashT < 1) dl.AddRectFilled(min, max, U(_askUi.CardFlashHue ?? look.Tone, 0.35f * (float)(1 - flashT)), 0f);   // a new owner: its hue (GuidePanelAsk.cs)
         if (urgent)
         {
             dl.AddRectFilled(min, max, U(look.Tone, 0.05f + 0.15f * pulse), 0f);
@@ -681,8 +684,10 @@ public partial class WhatsAnAiBridge
         var showDismiss = g.instruction != null || g.status != "idle";
         if (running != null)
         {
+            // Every control on the title row ignores clicks for the click guard after the card appeared or changed owner
+            // (GuidePanelAsk.cs): the player's last click on the previous card must not land on this one.
             rx -= GuideCardPill(dl, "##guide_stop", rx, hy, "Stop", GuidePill.Stop, "Stop recording this step. It is marked cancelled; an agent can queue it again.", out var stop) + 8;
-            if (stop) QueueCancel(running.Id);
+            if (stop && !AskClickGuarded(now)) QueueCancel(running.Id);
         }
         else if (showDismiss)
         {
@@ -690,7 +695,7 @@ public partial class WhatsAnAiBridge
             ImGui.SetCursorScreenPos(bx);
             ImGui.InvisibleButton("##guide_dismiss", new Vector2(16, 16));
             var hov = ImGui.IsItemHovered();
-            if (ImGui.IsItemClicked()) GuideDismiss();
+            if (ImGui.IsItemClicked() && !AskClickGuarded(now)) GuideDismiss();
             // On a step that offers Done the x is Cancel: the asker reads the mark and stops instead of waiting out its timeout.
             if (hov) GuideTooltip(a.OfferDone ? "Cancel this step. The agent stops waiting for it." : "Dismiss this instruction");
             if (hov) dl.AddRectFilled(bx, bx + new Vector2(16, 16), U(GuideToastLine), 0f);
@@ -703,13 +708,13 @@ public partial class WhatsAnAiBridge
             // ends the settle wait and captures right away.
             rx -= GuideCardPill(dl, "##guide_done", rx, hy, "Done", GuidePill.Primary,
                 "You did it: the agent checks what it watches now instead of waiting.", out var done) + 8;
-            if (done) GuideMarkDone();
+            if (done && !AskClickGuarded(now)) GuideMarkDone();
         }
         else if (checking)
         {
             rx -= GuideCardPill(dl, "##guide_undone", rx, hy, "Not done yet", GuidePill.Secondary,
                 "Takes Done back: the step waits for you again.", out var undo) + 8;
-            if (undo) GuideUnmarkDone();
+            if (undo && !AskClickGuarded(now)) GuideUnmarkDone();
         }
         if (g.status is "waiting" or "failed" && g.instructionSince is DateTime since)
         {
@@ -737,7 +742,7 @@ public partial class WhatsAnAiBridge
         if (_guideUi.ShowWho && g.who != null)
         {
             var u0 = _guideUi;
-            var name = ag.NameOf(g.who);
+            var name = ag.NameOf(g.session, g.who);
             if (!string.Equals(u0.WhoTitleName, name, StringComparison.Ordinal) || !ReferenceEquals(u0.WhoTitleTitle, g.title))
             {
                 u0.WhoTitleName = name; u0.WhoTitleTitle = g.title;
@@ -747,6 +752,7 @@ public partial class WhatsAnAiBridge
         }
         if (titleShown != null && g.instruction != null && !compact && rx - x > 60)
         {
+            if (_guideUi.ShowWho && g.who != null) { DrawWhoDot(dl, new Vector2(x + GuideDotR, hy), _askUi.GuideWhoHue); x += WhoDotW; }   // the who-dot (GuidePanelAsk.cs)
             if (!ReferenceEquals(_guideUi.TitleCapsSrc, titleShown)) { _guideUi.TitleCapsSrc = titleShown; _guideUi.TitleCaps = GuideCaps(titleShown); }
             var t = GuideClipTracked(_guideUi.TitleCaps!, font, small, GuideToastMsgTrack, rx - x);
             GuideTrackedText(dl, font, small, new Vector2(x, hy - small * 0.5f), U(GuideToastMuted), t, GuideToastMsgTrack);
@@ -800,7 +806,7 @@ public partial class WhatsAnAiBridge
                     string? foot = null;
                     if (showWho)
                     {
-                        var name = ag.NameOf(g.who);
+                        var name = ag.NameOf(g.session, g.who);
                         if (!string.Equals(u.MsgFootName, name, StringComparison.Ordinal)) { u.MsgFootName = name; u.MsgFoot = "Asked by " + name; }
                         foot = u.MsgFoot;
                     }
@@ -1250,12 +1256,14 @@ public partial class WhatsAnAiBridge
     /// faster. Hovering brings the card back (attention); with nothing to bring back, a toast-styled label (ink,
     /// hairline, the tone's stripe, muted caps) says so, on the foreground draw list, kept on screen.
     /// </summary>
-    private void DrawGuideDot(in GuideAttention at, bool hovered, bool peekable, double now)
+    /// <param name="tone">The dot's tone when the bridge is up (GuideDotLookFor: the hidden floor item's, accent while items wait, else neutral).</param>
+    /// <param name="tip">Its hover label when nothing can come back (null: the idle label).</param>
+    private void DrawGuideDot(in GuideAttention at, bool hovered, bool peekable, double now, Vector4 tone, string? tip)
     {
         var u = _guideUi;
         var dl = ImGui.GetBackgroundDrawList();
         var c = GuideDotCenter(u);
-        var tone = at.BridgeDown ? ToneBad : ToneNeutral;
+        if (at.BridgeDown) tone = ToneBad;
         u.DotHover += ((hovered ? 1f : 0f) - u.DotHover) * (1f - MathF.Exp(-ImGui.GetIO().DeltaTime / (float)GuideDotHoverSec));
         var h = u.DotHover;
         var breathe = at.BridgeDown ? 0.5f + 0.5f * MathF.Sin((float)(now * Math.PI * 2 / GuideDotBreatheSec)) : 0f;
@@ -1264,7 +1272,7 @@ public partial class WhatsAnAiBridge
         dl.AddCircleFilled(c, r + 1.5f, U(GuideToastInk, 0.85f), 20);
         var a = at.BridgeDown ? 0.65f + 0.25f * breathe : 0.8f;
         dl.AddCircleFilled(c, r, U(tone, MathF.Min(1f, a + 0.2f * h)), 20);
-        if (hovered && !peekable) DrawGuideDotTip(c, at.BridgeDown ? GuideDotTipDown : GuideDotTipIdle, tone);
+        if (hovered && !peekable) DrawGuideDotTip(c, at.BridgeDown ? GuideDotTipDown : tip ?? GuideDotTipIdle, tone);
     }
 
     /// <summary>The dot's label, in the toast family (the message line's size, tracking and muted grey), below and

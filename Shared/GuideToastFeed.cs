@@ -6,7 +6,7 @@ using Newtonsoft.Json.Linq;
 namespace WhatsAnAiBridge;
 
 using GuideSnap =(string? title, string? instruction, int? step, int? steps, string status, string? detail,
-    DateTime updatedAt, DateTime? instructionSince, int rev, WhatsAnAiBridge.GuideLogEntry[] log, string? who);
+    DateTime updatedAt, DateTime? instructionSince, int rev, WhatsAnAiBridge.GuideLogEntry[] log, string? who, string? session);
 
 /// <summary>
 /// What the guide's toast stack shows, and the combat sense that mutes part of it (attention v2 proposals, issue #66).

@@ -64,6 +64,7 @@ public partial class WhatsAnAiBridge
         public bool Priority;               // the user pressed Start (queued step): next after a restart
         public string? Pending;             // the call to replay when granted: guide.set | guide.flow | experiment.start
         public JToken? PendingParams;
+        [JsonIgnore] public bool ReplayDue; // granted, the replay waits for the hand-over gap (the previous card's receipt and fade)
         public string? StepId;              // the queued experiment step it covers
         public string? HlOwner;             // the highlight layer whose question strips it holds (asked highlight)
         public string? Reason;              // why it ended, as a code: later_x3 | unanswered | disconnected | ...
@@ -77,9 +78,32 @@ public partial class WhatsAnAiBridge
         public bool Paused => State is "loading" or "menu";
     }
 
-    /// <summary>The showing ask, as the card draws it (a copy, rebuilt only when the queue changes).</summary>
-    internal sealed record AskView(string Id, string[] Whos, int[] Hues, string Title, string Question, string? Detail, AttnOption[] Options,
-        DateTime ShownAt, int LaterCount, bool Hidden);
+    /// <summary>
+    /// The showing ask, as the card draws it (a copy, rebuilt only when the queue changes). Whos / Sessions / Hues list
+    /// the owner first, then the sessions whose identical ask shares this card (labels and ids: the panel names them
+    /// through AgentsView, never by label). LaterAt: when the player last said Later (the "again" pill). Softened: the
+    /// session re-asked within 60 s of the player's x, so the card arrives without flash or pulse. Hidden: the hand-over
+    /// gap has not passed yet (visibleSince unset).
+    /// </summary>
+    internal sealed record AskView(string Id, string[] Whos, string[] Sessions, int[] Hues, string Title, string Question, string? Detail, AttnOption[] Options,
+        string Urgency, DateTime CreatedAt, DateTime ShownAt, DateTime? VisibleSince, int LaterCount, DateTime? LaterAt, bool Softened, bool Hidden);
+
+    /// <summary>
+    /// One waiting item for the next strip and its hover: who (label and session id; the panel shows the display name),
+    /// in which hue, what (an ask's question, else the title), and why not yet.
+    /// </summary>
+    internal sealed record AttnQueueRow(string Who, string Session, int Hue, string Kind, string Text, string Urgency, DateTime QueuedAt, DateTime? EligibleAt);
+
+    /// <summary>
+    /// The queue as the panel shows it (rebuilt only when the queue changes): the waiting items in turn order, the floor
+    /// holder (for the strip's "after this" and whose card it is), and the player's state (for "when things calm down").
+    /// Only what waits for the player: idle sessions are not in it (the in-game UI never lists them).
+    /// </summary>
+    internal sealed record AttnQueueView(AttnQueueRow[] Rows, string? HolderWho, string? HolderSession, string? HolderKind, string? HolderUrgency, bool RestartWaiting,
+        bool Calm, bool Combat, bool Paused)
+    {
+        public static readonly AttnQueueView Empty = new([], null, null, null, null, false, false, false, false);
+    }
 
     private static readonly HashSet<string> AttnEnded = new(StringComparer.Ordinal) { "answered", "dismissed", "expired", "cancelled", "done" };
     private const int AttnTtlDefaultAsk = 600, AttnTtlDefaultRequest = 300, AttnTtlImplicit = 300, AttnTtlMin = 10, AttnTtlMax = 3600;
@@ -99,6 +123,12 @@ public partial class WhatsAnAiBridge
     private double _attnLastCombatAt = -1e9;
     private AskView? _askView;
     private long _askViewSeq = -1;
+    private AttnQueueView _queueView = AttnQueueView.Empty;
+    private long _queueViewSeq = -1;
+    // The panel's card slot: when the card that is leaving (answer receipt, fade) is gone. The hand-over gap counts from
+    // here (attention-queue-ui.md 5): the next card's visibleSince, a queued call's replay and a restart's countdown wait
+    // for max(granted, slot free) + the gap, so the player sees one card leave before the next arrives.
+    private DateTime _attnSlotFreeAt = DateTime.MinValue;
     private bool _attnLoaded;
     private string _attnSavedKey = "";
 
@@ -172,6 +202,13 @@ public partial class WhatsAnAiBridge
             _attnSeq++;
             AttnArbitrateLocked(now, effects);
             reply = AttnItemJsonLocked(item, me.Id, now);
+            // Queued behind someone (attention-queue-ui.md 6.6): an agent-kind line (off as a toast by default), so the
+            // player who turned those on hears that a question waits, and after whom.
+            if (item is { Kind: "ask", Question: not null, Status: "queued", MergedInto: null } && AttnHolderLocked() is { } holder)
+            {
+                var who = AttnNameLocked(item); var after = AttnNameLocked(holder);
+                effects.Add(() => GuideLog(new JObject { ["text"] = $"{who} has a question for you - after {after}", ["kind"] = "agent", ["title"] = "Queued" }));
+            }
         }
         AttnRun(effects);
         return reply;
@@ -218,7 +255,7 @@ public partial class WhatsAnAiBridge
             {
                 if (status == "cancelled" && item is { Kind: "ask", Status: "showing", VisibleSince: not null })
                 {
-                    var who = item.Who;
+                    var who = AttnNameLocked(item);
                     effects.Add(() => GuideLog(new JObject { ["text"] = $"{who} no longer needs an answer", ["kind"] = "step", ["title"] = "Withdrawn" }));
                 }
                 AttnEndLocked(item, status, now, verb == "cancel" ? "withdrawn" : null, verb == "cancel" ? "the agent withdrew it" : null, effects);
@@ -436,13 +473,29 @@ public partial class WhatsAnAiBridge
         // own card, and cards nobody owns (a measurement), stay.
         effects.Add(() => GuideClearUnlessOwnedBy(who));
         if (item.HlOwner is { } layer) effects.Add(() => HighlightHoldAsks(layer, false));
-        if (replay && item.Pending != null)
-        {
-            var method = item.Pending;
-            var p = item.PendingParams ?? new JObject();
-            var id = item.Id;
-            effects.Add(() => AttnReplay(method, p, who, id));
-        }
+        // A replayed call puts a card up at once, so it waits for the hand-over gap like an ask's visibleSince does
+        // (AttnTickLocked runs it when the gap has passed, outside combat).
+        if (replay && item.Pending != null) item.ReplayDue = true;
+    }
+
+    /// <summary>When the hand-over gap after <paramref name="shownAt"/> ends: the gap after the later of the grant and the slot coming free.</summary>
+    private DateTime AttnGapEndLocked(DateTime shownAt) => (shownAt > _attnSlotFreeAt ? shownAt : _attnSlotFreeAt).AddSeconds(AttnHandoverGapSec);
+
+    /// <summary>When the top slot of the panel is free for a card that is not a floor item (a restart): now, unless a card is leaving.</summary>
+    private DateTime AttnSlotTopAtLocked(DateTime now)
+    {
+        var gapEnd = _attnSlotFreeAt.AddSeconds(AttnHandoverGapSec);
+        return gapEnd > now ? gapEnd : now;
+    }
+
+    private void AttnReplayEffect(AttentionItem item, List<Action> effects)
+    {
+        item.ReplayDue = false;
+        var method = item.Pending!;
+        var p = item.PendingParams ?? new JObject();
+        var who = item.Who;
+        var id = item.Id;
+        effects.Add(() => AttnReplay(method, p, who, id));
     }
 
     /// <summary>End an item (and the followers of a shared ask with it). reason: a code for agents; why: words.</summary>
@@ -611,19 +664,23 @@ public partial class WhatsAnAiBridge
         }
 
         var h = AttnHolderLocked();
-        // The card is visible once the hand-over gap has passed outside combat and pauses (C5); an ask's showTtlSec counts from here.
-        if (h is { VisibleSince: null } && !player.Combat && !player.Paused && (now - h.ShownAt!.Value).TotalSeconds >= AttnHandoverGapSec)
+        // The card is visible once the hand-over gap has passed outside combat and pauses (C5); an ask's showTtlSec counts
+        // from here. The gap runs from the grant, or from the previous card leaving the panel's slot, whichever is later.
+        var gapOver = h != null && !player.Combat && !player.Paused && now >= AttnGapEndLocked(h.ShownAt!.Value);
+        if (h is { VisibleSince: null } && gapOver)
         {
             h.VisibleSince = now;
             foreach (var f in _attn.Where(f => f.MergedInto == h.Id)) f.VisibleSince = now;
             _attnSeq++;
         }
+        // A granted call replays once the gap has passed: the new owner's card arrives after the old one left.
+        if (h is { ReplayDue: true, Pending: not null } && gapOver) AttnReplayEffect(h, effects);
         // An implicit step turn (a plain guide.set) lasts while its card asks the player to act; once the card rests
-        // (captured, info, done, cleared) or belongs to someone else, the floor is free again.
-        if (h is { Implicit: true, Kind: "step", StepId: null } && now - h.ShownAt!.Value > AttnImplicitGrace
+        // (captured, info, done, cleared) or belongs to someone else, the floor is free again. Not before its replay ran.
+        if (h is { Implicit: true, Kind: "step", StepId: null, ReplayDue: false } && now - h.ShownAt!.Value > AttnImplicitGrace
             && !(guide.who == h.Who && guide.instruction != null && guide.status is "waiting" or "detected" or "settling" or "failed"))
             AttnEndLocked(h, "done", now, "card_quiet", "the card went quiet", effects);
-        if (h is { Implicit: true, Kind: "flow" } && now - h.ShownAt!.Value > AttnImplicitGrace && !(flowRunning && flowWho == h.Who))
+        if (h is { Implicit: true, Kind: "flow", ReplayDue: false } && now - h.ShownAt!.Value > AttnImplicitGrace && !(flowRunning && flowWho == h.Who))
             AttnEndLocked(h, "done", now, "flow_ended", "the flow ended", effects);
         // Asked highlights: every question answered ends the turn; a layer that went (cleared, timed out) takes its item with it.
         foreach (var i in _attn.Where(i => i.HlOwner != null && i.Status is "queued" or "showing" && now - i.CreatedAt > AttnImplicitGrace).ToList())
@@ -647,15 +704,65 @@ public partial class WhatsAnAiBridge
             _askViewSeq = _attnSeq;
             var h = AttnHolderLocked();
             if (h is not { Kind: "ask", Question: not null }) return _askView = null;
+            var now = DateTime.UtcNow;
             var whos = new[] { h }.Concat(_attn.Where(f => f.MergedInto == h.Id && f.Status == "showing")).ToList();
-            return _askView = new AskView(h.Id, whos.Select(x => x.Who).ToArray(), whos.Select(x => AttnHueLocked(x.SessionId, x.Who)).ToArray(), h.Title, h.Question,
-                h.Detail, h.Options.ToArray(), h.ShownAt ?? DateTime.UtcNow, h.LaterCount, h.VisibleSince == null);
+            // Re-asked after the player's x within the de-dup window: the card may stay, it may not shout (4.5).
+            var softened = _attn.Any(d => d != h && d.SessionId == h.SessionId && d is { Status: "dismissed", Reason: "user_dismissed", Question: not null, EndedAt: { } e }
+                && (now - e).TotalSeconds <= AttnDedupWindowSec && string.Equals(d.Question, h.Question, StringComparison.OrdinalIgnoreCase));
+            return _askView = new AskView(h.Id, whos.Select(x => x.Who).ToArray(), whos.Select(x => x.SessionId).ToArray(), whos.Select(x => AttnHueLocked(x.SessionId, x.Who)).ToArray(), h.Title, h.Question,
+                h.Detail, h.Options.ToArray(), h.Urgency, h.CreatedAt, h.ShownAt ?? now, h.VisibleSince, h.LaterCount, h.LaterCount > 0 ? h.QueuedAt : null,
+                softened, h.VisibleSince == null);
         }
+    }
+
+    /// <summary>The waiting items, holder and player state for the next strip and the dot (GuidePanelQueue.cs); rebuilt only when the queue changes.</summary>
+    internal AttnQueueView AttnQueueSnapshot()
+    {
+        lock (_sessionLock)
+        {
+            if (_queueViewSeq == _attnSeq) return _queueView;
+            _queueViewSeq = _attnSeq;
+            AttnLoadLocked();
+            var now = DateTime.UtcNow;
+            var holder = AttnHolderLocked();
+            var order = AttnOrderLocked(now);
+            if (order.Count == 0 && holder == null && !AttnRestartWaitingLocked()) return _queueView = AttnQueueView.Empty;
+            var rows = order.Select(i => new AttnQueueRow(i.Who, i.SessionId, AttnHueLocked(i.SessionId, i.Who), i.Kind, i.Question ?? i.Title, i.Urgency, i.QueuedAt, i.EligibleAt)).ToArray();
+            return _queueView = new AttnQueueView(rows, holder?.Who, holder?.SessionId, holder?.Kind, holder?.Urgency, AttnRestartWaitingLocked(),
+                _attnPlayer.Calm, _attnPlayer.Combat, _attnPlayer.Paused);
+        }
+    }
+
+    /// <summary>The panel's card slot stays busy until <paramref name="until"/> (a card's answer receipt and fade): the hand-over gap counts from then.</summary>
+    internal void AttnSlotBusyUntil(DateTime until)
+    {
+        lock (_sessionLock) if (until > _attnSlotFreeAt) _attnSlotFreeAt = until;
+    }
+
+    /// <summary>
+    /// The player hovered the accent dot while items waited with nothing on screen: give the floor to the next one now,
+    /// calm or not, Later hold or not. The player reaching for the dot is the player deciding (principle 4).
+    /// </summary>
+    internal void AttnUserPeek()
+    {
+        var effects = new List<Action>();
+        lock (_sessionLock)
+        {
+            var now = DateTime.UtcNow;
+            AttnLoadLocked();
+            if (AttnHolderLocked() != null || !AttnMayGrantNowLocked()) return;
+            var next = AttnOrderLocked(now).FirstOrDefault();
+            if (next == null) return;
+            next.EligibleAt = null;
+            AttnGrantLocked(next, now, effects, replay: true);
+        }
+        AttnRun(effects);
     }
 
     /// <summary>
     /// The player's answer on the card: an option, or Later (optionId null). Later puts the ask back in line as a calm
-    /// item, not before 180 s (then 600 s); the third Later dismisses it (later_x3).
+    /// item, not before 180 s (then 600 s); the third Later dismisses it (later_x3). An answer logs a result line
+    /// ("WHATS-A-ROUTE / North stairs"), a Later an agent line.
     /// </summary>
     internal void AttnAnswerFromCard(string id, string? optionId)
     {
@@ -665,6 +772,7 @@ public partial class WhatsAnAiBridge
             var now = DateTime.UtcNow;
             var item = _attn.FirstOrDefault(i => i.Id == id);
             if (item is not { Status: "showing" }) return;
+            var who = AttnWhosLocked(item);
             if (optionId == null)
             {
                 if (item.LaterCount + 1 > AttnLaterHoldSec.Length) AttnEndLocked(item, "dismissed", now, "later_x3", "the player said Later three times", effects);
@@ -680,11 +788,14 @@ public partial class WhatsAnAiBridge
                     }
                     _attnSeq++;
                 }
+                effects.Add(() => GuideLog(new JObject { ["text"] = $"{who}: later", ["kind"] = "agent", ["title"] = "Later" }));
             }
             else if (item.Options.FirstOrDefault(o => o.Id == optionId) is { } opt)
             {
                 item.Answer = new AttnAnswer { OptionId = opt.Id, Label = opt.Label, At = now };
                 AttnEndLocked(item, "answered", now, null, null, effects);
+                var label = opt.Label;
+                effects.Add(() => GuideLog(new JObject { ["text"] = label, ["kind"] = "result", ["title"] = who }));
             }
             else return;
             AttnArbitrateLocked(now, effects);
@@ -715,6 +826,7 @@ public partial class WhatsAnAiBridge
     {
         var effects = new List<Action>();
         JObject reply;
+        string? toast = null;
         lock (_sessionLock)
         {
             var now = DateTime.UtcNow;
@@ -736,11 +848,27 @@ public partial class WhatsAnAiBridge
             reply["ok"] = true;
             reply["queued"] = item.Status == "queued";
             reply["attention"] = item.Id;
+            if (item.Status == "queued") toast = $"Starts when it is its turn: {AttnLineForPlayerLocked(item, now)}";
         }
         AttnRun(effects);
-        if (reply["queued"]?.Value<bool>() == true)
-            GuideLog(new JObject { ["text"] = $"Starts when it is its turn: {AttnLineText(reply)}", ["kind"] = "step", ["title"] = "Queued step" });
+        if (toast != null) GuideLog(new JObject { ["text"] = toast, ["kind"] = "step", ["title"] = "Queued step" });
         return reply;
+    }
+
+    /// <summary>
+    /// "2nd in line, after Claude" for a toast: AttnLineText's words with display names instead of labels (agents read
+    /// the labels in the JSON; the player reads names).
+    /// </summary>
+    private string AttnLineForPlayerLocked(AttentionItem i, DateTime now)
+    {
+        var (pos, _, waitingFor) = AttnPlaceLocked(i, now);
+        if (pos <= 0) return "it has the floor";
+        var ahead = new List<string>();
+        if (AttnHolderLocked() is { } h) ahead.Add(AttnNameLocked(h));
+        foreach (var r in _restarts.Where(r => r.Status is "waiting" or "go").OrderBy(r => r.At)) ahead.Add($"{DisplayNameOfLocked(r.Who)}'s HUD restart");
+        foreach (var x in AttnOrderLocked(now)) { if (x == i) break; ahead.Add(AttnNameLocked(x)); }
+        var text = $"{AttnOrdinal(pos)} in line" + (ahead.Count > 0 ? $", after {string.Join(", ", ahead.Distinct())}" : "");
+        return waitingFor != null ? $"{text} (waiting for {waitingFor})" : text;
     }
 
     // ── Hues (C1) ────────────────────────────────────────────────────
@@ -974,8 +1102,15 @@ public partial class WhatsAnAiBridge
 
     private static string AttnKindWord(string kind) => kind switch { "ask" => "Question", "flow" => "Guided task", "restart" => "HUD restart", _ => "Guided step" };
 
+    /// <summary>The names on a card, as the player reads them: the owner's display name, then those of the sessions sharing it.</summary>
     private string AttnWhosLocked(AttentionItem i) =>
-        string.Join(", ", new[] { i.Who }.Concat(_attn.Where(f => f.MergedInto == i.Id && f.Status == "showing").Select(f => f.Who)));
+        string.Join(", ", new[] { i }.Concat(_attn.Where(f => f.MergedInto == i.Id && f.Status == "showing")).Select(AttnNameLocked));
+
+    /// <summary>
+    /// An item's owner as the player reads it (Sessions.cs display names: never a label, a branch or a folder): its
+    /// session's name by id, else the name of the label it was made under (a queued step's "by", a session gone).
+    /// </summary>
+    private string AttnNameLocked(AttentionItem i) => _sessions.TryGetValue(i.SessionId, out var s) ? DisplayNameLocked(s) : DisplayNameOfLocked(i.Who);
 
     private static string AttnSlug(string label, int n)
     {
