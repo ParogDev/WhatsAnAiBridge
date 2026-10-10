@@ -28,6 +28,9 @@ namespace WhatsAnAiBridge;
 /// on the guide card ("whats-a-route restarts the HUD in 5 s - Not now") and is then granted; the requester runs the restart
 /// (tools\restart-hud.ps1 in the scaffolding repo), which asks here first. The card's "Restart now" grants over the blockers
 /// (their holders are told in the guide log); "Not now" denies. Only one request is granted at a time; others merge into it.
+/// The attention queue (AttentionQueue.cs) lives under the same lock: a waiting restart stops new turns (restarts first),
+/// the floor holder is a blocker, and a pilot lease asked for while a restart waits is queued behind it, not granted.
+/// Each session gets a hue (0-5) at hello for the who-dot on the card.
 /// State is in memory: a restart ends it, and a new HUD has nothing running. Written from the request thread and the panel
 /// (Render), read in Render, so everything goes through the lock.
 /// </summary>
@@ -45,6 +48,9 @@ public partial class WhatsAnAiBridge
         public bool Connected;
         public string Name = "";           // what the player reads (RenameLocked): never a system folder, unique among the connected
         public SessionMcp? Mcp;            // the MCP server build it runs (null: an old server or a script)
+        public int Hue = -1;               // 0-5, the who-dot's colour (AttentionQueue.cs AttnPickHueLocked), stable for the HUD's lifetime
+        public DateTime? DisconnectedAt;   // its cleanup runs after a grace (AttentionQueue.cs AttnTickLocked)
+        public bool AttnCleaned;            // that cleanup ran (a reconnect resets it)
     }
 
     /// <summary>
@@ -156,7 +162,7 @@ public partial class WhatsAnAiBridge
         "restart.request" => SafeMemory(() => RestartRequestNew(p)),
         "restart.status" => SafeMemory(() => RestartStatus(p?["id"]?.ToString())),
         "restart.cancel" => SafeMemory(() => RestartCancel(p?["id"]?.ToString())),
-        _ => null,
+        _ => ProcessAttentionMethod(method, p),
     };
 
     // ── Sessions ─────────────────────────────────────────────────────
@@ -195,12 +201,19 @@ public partial class WhatsAnAiBridge
             s.ClientId = _reqClientId;
             s.Connected = true;
             s.LastSeen = DateTime.UtcNow;
+            s.DisconnectedAt = null; s.AttnCleaned = false;   // back within the grace: its turn and requests stay
+            s.Hue = AttnPickHueLocked(s);
             // Another entry still bound to this connection (a client that re-identified) is no longer on it.
-            foreach (var o in _sessions.Values) if (o != s && (o.ClientId == _reqClientId || o.PrevClientId == _reqClientId)) { o.Connected = false; o.PrevClientId = 0; }
+            foreach (var o in _sessions.Values)
+                if (o != s && (o.ClientId == _reqClientId || o.PrevClientId == _reqClientId))
+                {
+                    if (o.Connected) o.DisconnectedAt = DateTime.UtcNow;
+                    o.Connected = false; o.PrevClientId = 0;
+                }
             RenameLocked();
             var others = _sessions.Values.Count(o => o != s && o.Connected);
             SessionsPublishLocked();
-            var reply = new JObject { ["ok"] = true, ["id"] = s.Id, ["label"] = s.Label, ["name"] = s.Name, ["others"] = others, ["holdSec"] = Settings.RestartHoldSec.Value };
+            var reply = new JObject { ["ok"] = true, ["id"] = s.Id, ["label"] = s.Label, ["name"] = s.Name, ["hue"] = s.Hue, ["others"] = others, ["holdSec"] = Settings.RestartHoldSec.Value };
             if (McpRolloutLocked() is { } ro) reply["mcpRollout"] = ro.Json();
             return reply;
         }
@@ -218,25 +231,28 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>
-    /// A connection closed (TcpBridgeServer.ClientClosed): its session is disconnected, its leases stay until they expire,
-    /// and a step it left asking the user to act is cleared from the card (nobody would read the answer). The old
-    /// connection of a swapped worker closing disconnects nothing: the session lives on its new one, its step stays.
+    /// A connection closed (TcpBridgeServer.ClientClosed): its session is disconnected and its name leaves the uniqueness
+    /// set; its leases stay until they expire. What it left in front of the player (its waiting step on the card, its
+    /// attention items, its highlight layer) is released after a grace by one cleanup (AttnSessionGoneLocked, from
+    /// SessionsTick), so a client that reconnects within it keeps its turn and its card. The old connection of a swapped
+    /// worker closing disconnects nothing: the session lives on its new one, its step and its turn stay.
     /// </summary>
     private void SessionDisconnected(long clientId)
     {
-        var gone = new List<string>();
         lock (_sessionLock)
         {
+            var any = false;
             foreach (var s in _sessions.Values)
             {
                 if (s.PrevClientId == clientId) s.PrevClientId = 0;
-                else if (s.ClientId == clientId && s.Connected) { s.Connected = false; s.PrevClientId = 0; s.LastSeen = DateTime.UtcNow; gone.Add(s.Id); }
+                else if (s.ClientId == clientId && s.Connected)
+                {
+                    s.Connected = false; s.PrevClientId = 0; s.LastSeen = DateTime.UtcNow; s.DisconnectedAt = s.LastSeen; any = true;
+                }
             }
-            if (gone.Count > 0) RenameLocked();
+            if (any) RenameLocked();
             SessionsPublishLocked();
         }
-        // Outside the sessions lock: the guide lock is only ever taken inside it, never around it (AgentGuide.cs).
-        foreach (var id in gone) GuideOwnerGone(id);
     }
 
     /// <summary>Record that the current session spoke (called per request; cheap).</summary>
@@ -271,8 +287,11 @@ public partial class WhatsAnAiBridge
         var me = CurrentSession();
         lock (_sessionLock)
         {
-            SessionsExpireLocked(DateTime.UtcNow);
+            var now = DateTime.UtcNow;
+            SessionsExpireLocked(now);
+            AttnLoadLocked();
             var blockers = BlockersLocked(me?.Id);
+            var holder = AttnHolderLocked();
             return new JObject
             {
                 ["ok"] = true,
@@ -280,12 +299,20 @@ public partial class WhatsAnAiBridge
                 ["holdSec"] = Settings.RestartHoldSec.Value,
                 ["sessions"] = new JArray(_sessions.Values.OrderByDescending(s => s.Connected).ThenBy(s => s.HelloAt).Select(s => new JObject
                 {
-                    ["id"] = s.Id, ["label"] = s.Label, ["name"] = DisplayNameLocked(s), ["branch"] = s.Branch, ["cwd"] = s.Cwd, ["pid"] = s.Pid, ["kind"] = s.Kind,
+                    ["id"] = s.Id, ["label"] = s.Label, ["name"] = DisplayNameLocked(s), ["hue"] = s.Hue, ["branch"] = s.Branch, ["cwd"] = s.Cwd, ["pid"] = s.Pid, ["kind"] = s.Kind,
                     ["connected"] = s.Connected, ["helloAt"] = s.HelloAt.ToString("O"), ["lastSeen"] = s.LastSeen.ToString("O"),
                     ["leases"] = _leases.Count(l => l.Session == s.Id),
                     ["doing"] = new JArray(blockers.Where(b => b.Who == s.Label).Select(b => b.Label)),
                     ["mcp"] = s.Mcp?.Json(),
+                    // Its attention items (AttentionQueue.cs): what it waits to show the player, and where it stands.
+                    ["queued"] = AttnOfSessionLocked(s.Id, now),
                 })),
+                ["floor"] = holder == null ? null : new JObject
+                {
+                    ["itemId"] = holder.Id, ["who"] = holder.Who, ["hue"] = AttnHueLocked(holder.SessionId, holder.Who), ["kind"] = holder.Kind,
+                    ["title"] = holder.Title, ["since"] = holder.ShownAt?.ToString("O"),
+                },
+                ["attentionSeq"] = _attnSeq,
                 ["leases"] = new JArray(_leases.Select(LeaseJson)),
                 ["blockers"] = new JArray(blockers.Select(BlockerJson)),
                 ["restarts"] = new JArray(_restarts.OrderByDescending(r => r.At).Select(RestartJsonLocked)),
@@ -427,6 +454,16 @@ public partial class WhatsAnAiBridge
             if (_restarts.FirstOrDefault(r => r.Status == "go") is { } go)
                 return Err("restart_pending", $"{go.Who} was granted a HUD restart {(int)(now - go.DecidedAt!.Value).TotalSeconds} s ago" +
                                               (go.Reason != null ? $" ({go.Reason})" : "") + ". Wait for the HUD to come back, then try again.");
+            // Restart first (attention queue): a piloted test would hold the restart off, so it waits for the restart instead.
+            // Not refused: queued, with where it stands; acquire again once the HUD is back.
+            if (kind == "pilot" && _restarts.Where(r => r.Status == "waiting" && r.Session != me.Id).OrderBy(r => r.At).FirstOrDefault() is { } wr)
+                return new JObject
+                {
+                    ["ok"] = true, ["queued"] = true, ["status"] = "queued", ["id"] = null, ["kind"] = kind, ["label"] = label,
+                    ["position"] = 2, ["ahead"] = new JArray($"{wr.Who} (HUD restart)"),
+                    ["note"] = $"{wr.Who} is waiting to restart the HUD{(wr.Reason != null ? $" ({wr.Reason})" : "")}: restarts go first, so no pilot lease now. " +
+                               "Acquire it again once the restart is done (bridge_status shows the HUD back) or the user declined it.",
+                };
             var l = new Lease { Id = $"L{++_leaseSeq}", Kind = kind, Label = label!, Session = me.Id, Who = me.Label, Since = now, Until = now.AddSeconds(ttl) };
             _leases.Add(l);
             var waiting = _restarts.Where(r => r.Status == "waiting" && r.Session != me.Id).Select(r => r.Who).Distinct().ToList();
@@ -493,6 +530,7 @@ public partial class WhatsAnAiBridge
             foreach (var l in _hlLayers)
                 if (l.Targets.FirstOrDefault(t => t.Ask != null && t.Answer == null && !t.Expired) is { } asked)
                     list.Add(new Blocker("pilot", $"question for the user: {asked.Ask}" + (l.Pending > 1 ? $" (+{l.Pending - 1})" : ""), l.Who, l.Until, Yours(l.Who)));
+        if (AttnFloorBlockerLocked(requesterLabel) is { } floor) list.Add(floor);   // the attention queue's floor holder (C8)
         foreach (var l in _leases) list.Add(new Blocker(l.Kind, l.Label, l.Who, l.Until, l.Session == requester, l.Id));
         return list;
     }
@@ -646,25 +684,34 @@ public partial class WhatsAnAiBridge
         _sessionsTickAt = now;
         // A waiting step whose agent went quiet (guide.set expiresSec) leaves the card (AgentGuide.cs; its own lock, first).
         GuideExpireTick(now);
+        // The attention queue's inputs are read before the sessions lock: game reads, and the guide, flow and highlight
+        // locks are only ever taken nested inside the sessions lock, never around it.
+        var player = AttnSamplePlayer();
+        (string status, string? instruction, string? who) guide;
+        lock (_guideLock) guide = (_guide.Status, _guide.Instruction, _guide.Who);
+        bool flowRunning; string? flowWho;
+        lock (_flowLock) { flowRunning = _flow.Status == "running"; flowWho = _flow.Who; }
+        var hlPending = HighlightPendingByLayer();
+        var effects = new List<Action>();
         lock (_sessionLock)
         {
-            AgentsViewRebuildLocked();
-            if (_sessions.Count == 0 && _leases.Count == 0 && _restarts.Count == 0)
+            if (_sessions.Count > 0 || _leases.Count > 0 || _restarts.Count > 0)
             {
-                if (_sessionsView.Sessions.Length > 0 || _sessionsView.Waiting != null || _sessionsView.Granted != null) _sessionsView = SessionsView.Empty;
-                return;
+                SessionsExpireLocked(now);
+                foreach (var r in _restarts.Where(r => r.Status == "waiting").OrderBy(r => r.At).ToList())
+                    if (r.Status == "waiting") RestartEvaluateLocked(r, now);   // a grant merges the others, so re-check the status
+                // Granted but the HUD is still here: the requester never restarted (crashed, declined its own UAC prompt).
+                foreach (var r in _restarts.Where(r => r.Status == "go" && now - r.DecidedAt!.Value > RestartGoExpiry))
+                {
+                    r.Status = "expired";
+                    GuideLog(new JObject { ["text"] = $"{DisplayNameOfLocked(r.Who)} was granted a HUD restart but didn't restart it", ["kind"] = "warn", ["title"] = "HUD restart" });
+                }
             }
-            SessionsExpireLocked(now);
-            foreach (var r in _restarts.Where(r => r.Status == "waiting").OrderBy(r => r.At).ToList())
-                if (r.Status == "waiting") RestartEvaluateLocked(r, now);   // a grant merges the others, so re-check the status
-            // Granted but the HUD is still here: the requester never restarted (crashed, declined its own UAC prompt).
-            foreach (var r in _restarts.Where(r => r.Status == "go" && now - r.DecidedAt!.Value > RestartGoExpiry))
-            {
-                r.Status = "expired";
-                GuideLog(new JObject { ["text"] = $"{DisplayNameOfLocked(r.Who)} was granted a HUD restart but didn't restart it", ["kind"] = "warn", ["title"] = "HUD restart" });
-            }
+            AttnTickLocked(now, player, guide, flowRunning, flowWho, hlPending, effects);
+            AgentsViewRebuildLocked();   // after the queue moved: the floor holder is one of the asks
             SessionsPublishLocked();
         }
+        AttnRun(effects);
     }
 
     /// <summary>What the panel shows about sessions (SessionsView): the copy published last, never taken per frame.</summary>

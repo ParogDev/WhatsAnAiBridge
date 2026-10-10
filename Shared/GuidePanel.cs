@@ -200,6 +200,7 @@ public partial class WhatsAnAiBridge
         // (the first on every change too): no lock here.
         var rs = SessionsSnapshot();
         var ag = AgentsSnapshot();
+        var ask = AttnAskSnapshot();   // the attention queue's floor holder when it is a question (AttentionQueue.cs)
         var now = ImGui.GetTime();
         var utc = DateTime.UtcNow;
         ObserveGuide(g, q, now);
@@ -223,7 +224,7 @@ public partial class WhatsAnAiBridge
         // dropped lines do not wake the card).
         var quietFor = (utc - (g.updatedAt > _toastShownAt ? g.updatedAt : _toastShownAt)).TotalSeconds;
         // A pending HUD restart (blocked, or counting down with Not now) keeps the panel up: the user must be able to answer it.
-        var quiet = ((!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null)) && rs.Waiting == null;
+        var quiet = ((!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null)) && rs.Waiting == null && ask == null;
 
         // Attention, decided once per frame for every surface (GuideAttentionFor). Inputs: the highlight boxes on
         // screen (a consistent copy; the overlay re-resolves them after this panel, so they may be one frame old),
@@ -251,7 +252,7 @@ public partial class WhatsAnAiBridge
         var mustAct = g.status is "waiting" or "failed" && g.instruction != null && !GuideChecking(a, g.status);
         var bridgeDown = _tcpServer?.IsRunning != true;
         var at = GuideAttentionFor(boxes.Count > 0, hovered, now - u.HoverAt, needsUser, mustAct, avoid,
-            CombatNear(now), quiet, hasCard || q.Next != null, g.rev > 0 || bridgeDown, bridgeDown, toastsH > 0);
+            CombatNear(now), quiet, hasCard || q.Next != null || ask != null, g.rev > 0 || bridgeDown, bridgeDown, toastsH > 0);
         FeedGuideToasts(g, at, hl, utc);
         PublishAttention(at);
         var hide = at.CardHidden;
@@ -309,7 +310,7 @@ public partial class WhatsAnAiBridge
             u.WinPos = ImGui.GetWindowPos();
             u.WinH = shown ? ImGui.GetWindowSize().Y : 0;
             if (!shifted) u.Home = u.WinPos;
-            if (shown) DrawGuideBody(g, a, q, fv, at, hasCard, needsUser, rs.Waiting, ag, th, now, utc);
+            if (shown) DrawGuideBody(g, a, q, fv, at, hasCard, needsUser, rs.Waiting, ag, ask, th, now, utc);
         }
         catch (Exception ex) { GuideReport(ex); }
         finally
@@ -501,8 +502,15 @@ public partial class WhatsAnAiBridge
     // ── Body ─────────────────────────────────────────────────────────
 
     private void DrawGuideBody(in GuideSnap g, in GuideAskView a, in QueueView q, in FlowView fv, in GuideAttention at, bool hasCard, bool needsUser,
-        RestartRequest? restart, AgentsView ag, PanelTheme th, double now, DateTime utc)
+        RestartRequest? restart, AgentsView ag, AskView? ask, PanelTheme th, double now, DateTime utc)
     {
+        // The attention queue's question (minimal card, GuidePanelAsk.cs): first, since it holds the floor. Not drawn in
+        // combat or during the hand-over gap (the bridge's visibleSince); the player answers when calm.
+        if (ask is { Hidden: false } && !at.Combat)
+        {
+            DrawAskCard(ask, th, now, utc);
+            ImGui.Dummy(new Vector2(GuideWidth, 5));
+        }
         if (hasCard)
         {
             DrawGuideCard(g, a, q.Running, fv, at, ag, th, now, utc);
@@ -1816,7 +1824,7 @@ public partial class WhatsAnAiBridge
         var x = min.X + pad;
         DrawQueueGlyph(dl, new Vector2(x + 6, hy), U(ToneNeutral));
         x += 18;
-        var label = q.NextAuto ? "THEN" : "NEXT";
+        var label = q.NextAuto ? "THEN" : "QUEUED";   // never NEXT: that word belongs to the attention queue's next strip
         dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(ToneNeutral), label);
         x += ImGui.CalcTextSize(label).X * (small / f) + 10;
         var rx = max.X - pad;

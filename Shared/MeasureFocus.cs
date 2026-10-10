@@ -65,7 +65,7 @@ public partial class WhatsAnAiBridge
                 var text = $"Keep the game in front for {seconds} s (no alt-tab): the HUD is being measured";
                 if (instruction == null && status is "idle" or "done" or "info" or "captured")
                 {
-                    GuideSet(new JObject { ["title"] = $"Measuring: {what}", ["instruction"] = text, ["status"] = "settling", ["step"] = null, ["steps"] = null, ["detail"] = null });
+                    GuideSet(new JObject { ["title"] = $"Measuring: {what}", ["instruction"] = text, ["status"] = "settling", ["step"] = null, ["steps"] = null, ["detail"] = null }, who);
                     m.OwnsCard = true;
                 }
                 else GuideLog(new JObject { ["text"] = $"Measuring ({what}, {seconds} s): keep the game in front", ["kind"] = "warn" });
@@ -91,7 +91,7 @@ public partial class WhatsAnAiBridge
             var share = m.Samples == 0 ? (m.AtStart == true && m.AtEnd == true ? 1.0 : 0.0) : (double)m.Foreground / m.Samples;
             // The card was only for "keep the game in front" while it ran: give it back, and say how it went in a toast
             // (it fades by itself; a card would stay until dismissed).
-            if (m.OwnsCard) GuideSet(new JObject { ["clear"] = true });
+            if (m.OwnsCard) GuideSet(new JObject { ["clear"] = true }, null);
             if (m.OwnsCard || Settings.ShowAgentGuide.Value)
                 GuideLog(new JObject
                 {

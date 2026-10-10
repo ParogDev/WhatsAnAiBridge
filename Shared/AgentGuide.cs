@@ -80,18 +80,65 @@ public partial class WhatsAnAiBridge
 
     private string? ProcessGuideMethod(string method, JToken? p) => method switch
     {
-        "guide.set" => GuideSet(p).ToString(Newtonsoft.Json.Formatting.None),
+        "guide.set" => GuideSetRequest(p).ToString(Newtonsoft.Json.Formatting.None),
         "guide.log" => GuideLog(p).ToString(Newtonsoft.Json.Formatting.None),
         "guide.state" => GuideStateJson().ToString(Newtonsoft.Json.Formatting.None),
         "guide.user" => GuideUser(p?["stepId"]?.ToString()).ToString(Newtonsoft.Json.Formatting.None),
         _ => null,
     };
 
-    private JObject GuideSet(JToken? p)
+    /// <summary>
+    /// guide.set from an agent, under the attention queue's ownership (AttentionQueue.cs): an instruction from a session
+    /// that does not hold the floor is queued (the reply says where) and shown when its turn comes, never written over
+    /// another session's card; status / detail / clear touch the card only when it is the caller's (or nobody's while
+    /// the floor is free).
+    /// </summary>
+    private JObject GuideSetRequest(JToken? p)
     {
-        // Resolved before the lock: CurrentSession takes the sessions lock, which BlockersLocked (Sessions.cs) holds while it
-        // reads the guide state under this lock. Never nest them the other way round.
-        var me = p?["instruction"] != null || p?["status"] != null ? CurrentSession() : null;
+        // Resolved before the guide lock: CurrentSession takes the sessions lock, which BlockersLocked (Sessions.cs) holds
+        // while it reads the guide state under this lock. Never nest them the other way round.
+        var me = CurrentSession();
+        // ifStep is the asker's cleanup of its own step: GuideSet applies it only while the card still shows that step,
+        // so it needs no floor and is never refused as another session's card.
+        var ifStep = p?["ifStep"] is { Type: not JTokenType.Null } ifs ? ifs.ToString() : null;
+        if (p?["instruction"] is { Type: not JTokenType.Null } ins && ins.ToString().Length > 0)
+        {
+            var gate = AttnGate(me, "guide.set", p, "step", Clip(ins.ToString(), 80));
+            if (!gate.Proceed) return gate.Reply!;
+        }
+        else if (me != null && ifStep == null)
+        {
+            string? owner, ownerSession; bool empty;
+            lock (_guideLock) { owner = _guide.Who; ownerSession = _guide.Session; empty = _guide.Instruction == null && _guide.Status is "idle" or "done"; }
+            var mine = ownerSession != null ? ownerSession == me.Id : owner == me.Label;
+            bool mineOrFree;
+            AttentionItem? holder;
+            lock (_sessionLock) { holder = AttnHolderLocked(); mineOrFree = holder?.SessionId == me.Id || (holder == null && (owner == null || empty)); }
+            if (!mine && !mineOrFree)
+                return Err("not_your_card", $"The guide card is {owner ?? holder?.Who ?? "another session"}'s" + (holder != null ? $" ({holder.Who} has the floor: {holder.Title})" : "") +
+                                            ": status, detail and clear act only on your own card. Show something of your own with instruction (it waits its turn) or attention.ask.");
+        }
+        var r = GuideSet(p, me?.Label, me?.Id);
+        // A plain guide.set turn ends with its card: clearing it frees the floor at once instead of at the next tick.
+        if (p?["clear"]?.Value<bool>() == true && me != null && r["skipped"] == null)
+        {
+            string? end = null;
+            lock (_sessionLock) if (AttnHolderLocked() is { Implicit: true, Kind: "step", StepId: null } h && h.SessionId == me.Id) end = h.Id;
+            AttnEndById(end, "done", "card_cleared", "the agent cleared its card");
+        }
+        return r;
+    }
+
+    /// <summary>
+    /// Write the card. who / session: the session the write stands for (its label and id), stamped on the card when the
+    /// write sets an instruction or a status; the id is what GuideOwnerGone clears by. Writes made from Render (flows,
+    /// queued steps, the attention queue's replays) pass their owner explicitly: outside a request there is no current
+    /// session, and the card must not keep whoever wrote last. The HUD's own steps (queue runner, flow) pass no session,
+    /// so no disconnect clears them; without who, an instruction from Render takes "who" from the params.
+    /// </summary>
+    private JObject GuideSet(JToken? p, string? who = null, string? session = null)
+    {
+        if (p?["instruction"] == null && p?["status"] == null) { who = null; session = null; }
         lock (_guideLock)
         {
             var now = DateTime.UtcNow;
@@ -114,9 +161,9 @@ public partial class WhatsAnAiBridge
                 _guide.Who = _guide.Session = null;
                 GuideStepResetLocked(null);
             }
-            if (me != null) { _guide.Who = me.Label; _guide.Session = me.Id; }
-            // The HUD's own steps (the queue runner, from Render: no session) name who queued them, and belong to no
-            // connection, so no disconnect clears them.
+            if (who != null) { _guide.Who = who; _guide.Session = session; }
+            // The HUD's own steps (from Render: no session) name who queued them, and belong to no connection, so no
+            // disconnect clears them.
             else if (p?["instruction"] != null && _reqClientId == 0) { _guide.Who = Clip(p["who"]?.ToString(), 40); _guide.Session = null; }
             if (p?["title"] is { } t) _guide.Title = Clip(t.Type == JTokenType.Null ? null : t.ToString(), 80);
             if (p?["instruction"] is { } i)
@@ -325,8 +372,10 @@ public partial class WhatsAnAiBridge
     /// </summary>
     internal void GuideDismiss()
     {
+        string? who;
         lock (_guideLock)
         {
+            who = _guide.Who;
             if (_guide.OfferDone && GuideActive(_guide.Status) && _guide.StepId != null) { _guide.Mark = "cancelled"; _guide.MarkAt = DateTime.UtcNow; }
             _guide.Instruction = null;
             _guide.Status = "idle";
@@ -337,6 +386,7 @@ public partial class WhatsAnAiBridge
             _guide.StepGen++;
             _guide.Rev++;
         }
+        AttnDismissedByUser(who);   // after the guide lock (lock order): the turn behind the card ends as dismissed
     }
 
     /// <summary>The user's mark on the queue runner's own step (ExperimentQueue.cs), read without the JSON round trip.</summary>
