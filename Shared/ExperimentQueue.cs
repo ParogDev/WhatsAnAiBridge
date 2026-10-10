@@ -55,6 +55,7 @@ public partial class WhatsAnAiBridge
         public JArray? Highlight;          // targets shown (guide.highlight) while the step records
         public JObject? Flow;              // guided flow (guide.flow) run from Start until the step ends
         public string? Error;
+        public bool UserMarkedDone;        // the user pressed Done on a repeat in which nothing watched changed
         public List<QueuedCapture> Captures = new();
     }
 
@@ -72,12 +73,16 @@ public partial class WhatsAnAiBridge
         public Dictionary<string, JToken> Before = new();
         public Dictionary<string, JToken> Last = new();
         public string BeforeKey = "", LastKey = "";
+        public DateTime? DoneAt;           // the user pressed Done and nothing has changed yet: the grace runs from here
+        public string GuideStep => $"q:{Id}:{Repeat}";   // this repeat's step id on the card (guide.set stepId)
     }
 
     private readonly object _queueLock = new();
     private List<QueuedStep>? _queue;
     private QueueRun? _queueRun;
     private const int QueueKeep = 50;
+    // After Done, a change still gets this long to show up (the click and the game's update race); then the repeat ends.
+    private const int QueueDoneGraceMs = 2000;
 
     private string QueueFile => Path.Combine(_bridgeDir, "experiments", "queue.json");
 
@@ -163,6 +168,7 @@ public partial class WhatsAnAiBridge
         ["note"] = s.Note, ["by"] = s.By, ["chain"] = s.Chain, ["watch"] = new JArray(s.Watch), ["repeats"] = s.Repeats, ["status"] = s.Status,
         ["captured"] = s.Captures.Count, ["queuedAt"] = s.QueuedAt.ToString("O"), ["startedAt"] = s.StartedAt?.ToString("O"),
         ["finishedAt"] = s.FinishedAt?.ToString("O"), ["startedFrom"] = s.StartedFrom, ["collected"] = s.Collected, ["error"] = s.Error,
+        ["userMarkedDone"] = s.UserMarkedDone ? true : null,
     };
 
     private JObject QueueResult(JToken? p)
@@ -188,7 +194,7 @@ public partial class WhatsAnAiBridge
             var s = id == null ? Queue().FirstOrDefault(x => x.Status == "queued") : Queue().FirstOrDefault(x => x.Id == id);
             if (s == null) return Err("unknown_id", "No such queued step.");
             if (s.Status != "queued") return Err("not_queued", $"Step is {s.Status}.");
-            s.Status = "running"; s.StartedAt = DateTime.UtcNow; s.StartedFrom = from; s.Captures.Clear(); s.Error = null;
+            s.Status = "running"; s.StartedAt = DateTime.UtcNow; s.StartedFrom = from; s.Captures.Clear(); s.Error = null; s.UserMarkedDone = false;
             _queueRun = new QueueRun { Id = s.Id, PhaseStart = DateTime.UtcNow };
             SaveQueue();
             return new JObject { ["ok"] = true, ["id"] = s.Id };
@@ -262,11 +268,18 @@ public partial class WhatsAnAiBridge
                     ["title"] = step.Title ?? $"Experiment: {step.Experiment}", ["instruction"] = step.Instruction, ["status"] = "waiting",
                     ["step"] = step.Repeats > 1 ? run.Repeat : null, ["steps"] = step.Repeats > 1 ? step.Repeats : null,
                     ["detail"] = run.Repeat > 1 ? $"Again ({run.Repeat} of {step.Repeats}) - recording" : "Recording - do it now",
+                    ["stepId"] = run.GuideStep, ["offerDone"] = true, ["who"] = step.By,
                 });
                 return;
             }
             var current = CaptureWatch(step.Watch);
             var key = Fingerprint(current);
+            // The user's Done on the card (AgentGuide.cs): a change seen is captured now instead of after the settle; with
+            // nothing changed, a change still gets QueueDoneGraceMs, then the repeat ends saying the watch saw nothing.
+            // "Not done yet" clears the mark and the repeat goes on as before.
+            var mark = GuideMarkFor(run.GuideStep);
+            if (mark == "done") run.DoneAt ??= now;
+            else run.DoneAt = null;
             if (run.Phase == "waiting")
             {
                 if (key != run.BeforeKey)
@@ -274,11 +287,12 @@ public partial class WhatsAnAiBridge
                     run.Phase = "detected"; run.ChangedAt = run.StableSince = now; run.Last = current; run.LastKey = key;
                     GuideSet(new JObject { ["status"] = "detected", ["detail"] = "Change seen - hold still" });
                 }
+                else if (run.DoneAt is DateTime doneAt && (now - doneAt).TotalMilliseconds > QueueDoneGraceMs) FinishQueuedUnseen(step, run);
                 else if ((now - run.PhaseStart).TotalMilliseconds > step.TimeoutMs) FinishQueued(step, "failed", "No lasting change before the time limit");
                 return;
             }
-            if (key != run.LastKey) { run.StableSince = now; run.Last = current; run.LastKey = key; return; }
-            if ((now - run.StableSince).TotalMilliseconds < step.SettleMs) return;
+            if (key != run.LastKey) { run.StableSince = now; run.Last = current; run.LastKey = key; if (run.DoneAt == null) return; }
+            if (run.DoneAt == null && (now - run.StableSince).TotalMilliseconds < step.SettleMs) return;
             if (run.LastKey == run.BeforeKey)
             {
                 // Went back to the baseline (hover, animation): not the action.
@@ -301,9 +315,11 @@ public partial class WhatsAnAiBridge
             {
                 // Next repeat starts from the state the last one left (a toggle goes back, a move continues).
                 var next = run.Repeat + 1;
-                run.Repeat = next; run.Phase = "waiting"; run.Transients = 0;
+                run.Repeat = next; run.Phase = "waiting"; run.Transients = 0; run.DoneAt = null;
                 run.Before = run.Last; run.BeforeKey = run.LastKey; run.PhaseStart = now;
-                GuideSet(new JObject { ["status"] = "waiting", ["step"] = next, ["steps"] = step.Repeats, ["detail"] = $"Again ({next} of {step.Repeats}) - recording" });
+                // A new step id per repeat: the last repeat's Done must not end this one.
+                GuideSet(new JObject { ["status"] = "waiting", ["step"] = next, ["steps"] = step.Repeats, ["detail"] = $"Again ({next} of {step.Repeats}) - recording",
+                    ["stepId"] = run.GuideStep, ["offerDone"] = true });
                 return;
             }
             FinishQueued(step, "captured", $"Recorded {step.Repeats}x - Claude can read it any time");
@@ -315,7 +331,23 @@ public partial class WhatsAnAiBridge
         }
     }
 
-    private void FinishQueued(QueuedStep step, string status, string detail)
+    /// <summary>
+    /// The user pressed Done but nothing watched changed within the grace: the step ends failed (repeats already
+    /// recorded are kept for collection) and says, on the card and in its error, that the watch specs probably don't
+    /// follow the action, naming them, so whoever queued it watches something else next time.
+    /// </summary>
+    private void FinishQueuedUnseen(QueuedStep step, QueueRun run)
+    {
+        lock (_queueLock)
+        {
+            step.UserMarkedDone = true;
+            step.Error = $"The user pressed Done on repeat {run.Repeat}, but nothing watched changed: the watch spec is probably wrong " +
+                         $"({string.Join("; ", step.Watch)})" + (step.Captures.Count > 0 ? $". {step.Captures.Count} earlier repeat(s) were recorded." : ".");
+        }
+        FinishQueued(step, "failed", $"You said done, but none of the {step.Watch.Length} watched value(s) changed - the agent will watch something else", "unseen");
+    }
+
+    private void FinishQueued(QueuedStep step, string status, string detail, string? guideStatus = null)
     {
         lock (_queueLock)
         {
@@ -325,7 +357,7 @@ public partial class WhatsAnAiBridge
         }
         if (step.Highlight != null) HighlightSetLayer(HlQueue, null, step.By, new JObject { ["clear"] = true });
         if (step.Flow != null) FlowSet(new JObject { ["stop"] = true });
-        GuideSet(new JObject { ["status"] = status == "captured" ? "captured" : "failed", ["detail"] = detail });
+        GuideSet(new JObject { ["status"] = guideStatus ?? (status == "captured" ? "captured" : "failed"), ["detail"] = detail });
         if (status != "captured") GuideLog(new JObject { ["text"] = $"'{step.Label}': {detail}", ["kind"] = "warn" });
         if (status != "captured") return;
         // A chained follow-up of the same experiment starts at once: the user pressed Start once for the whole series.

@@ -220,6 +220,7 @@ public partial class WhatsAnAiBridge
                 ["title"] = f.Title, ["instruction"] = option >= 0 ? step.Options[option].Label ?? step.Label : step.Label,
                 ["status"] = "waiting", ["step"] = current + 1, ["steps"] = f.Steps.Count,
                 ["detail"] = option >= 0 ? null : "Not on screen yet - open the panel it is in",
+                ["who"] = f.Who,   // the flow runs in the HUD (no session on this call): the card names who started it
             });
         }
         catch (Exception ex) { LogError($"[GuideFlow] {ex.Message}"); }
