@@ -59,9 +59,15 @@ public partial class WhatsAnAiBridge
         // events) and what was already seen (entity kinds, unmapped panels), so a restart doesn't report them as new.
         try
         {
-            var j = Path.Combine(ObsDir, "journal.jsonl");
-            if (File.Exists(j))
-                foreach (var line in JournalTail(j, 16 * 1024 * 1024))
+            // 16 MB in all, newest last: the rotated journal (ObsFlush rotates at 128 MB) fills what the current one lacks,
+            // since right after a rotation the current one is near empty.
+            const long budget = 16 * 1024 * 1024;
+            var current = Path.Combine(ObsDir, "journal.jsonl");
+            var currentBytes = File.Exists(current) ? new FileInfo(current).Length : 0;
+            foreach (var (j, bytes) in new[] { (Path.Combine(ObsDir, "journal.1.jsonl"), budget - currentBytes), (current, budget) })
+            {
+                if (bytes <= 0 || !File.Exists(j)) continue;
+                foreach (var line in JournalTail(j, bytes))
                 {
                     if (line.Length == 0) continue;
                     JObject e;
@@ -70,6 +76,7 @@ public partial class WhatsAnAiBridge
                     if (e["kind"]?.ToString() == "entity" && e["type"]?.ToString() is { } t) _obsEntityTypes.Add(t);
                     if (e["firstSeen"]?.Value<bool>() == true && e["index"] != null) _obsUnmappedSeen.Add(PanelKey(e["texts"] as JArray, e["index"]!.Value<int>()));
                 }
+            }
         }
         catch { }
         return _obs;
@@ -175,6 +182,8 @@ public partial class WhatsAnAiBridge
 
     private static readonly System.Diagnostics.Stopwatch ObsClock = System.Diagnostics.Stopwatch.StartNew();
     private readonly List<string> _obsPending = new();
+    private DateTime _obsSizeCheckedAt = DateTime.MinValue;
+    private const long JournalMaxBytes = 128L * 1024 * 1024;
 
     /// <summary>Writes the events emitted since the last flush to the journal (once per observer tick, not per event).</summary>
     private void ObsFlush()
@@ -184,7 +193,15 @@ public partial class WhatsAnAiBridge
         try
         {
             Directory.CreateDirectory(ObsDir);
-            File.AppendAllLines(Path.Combine(ObsDir, "journal.jsonl"), lines);
+            var journal = Path.Combine(ObsDir, "journal.jsonl");
+            // One generation is kept: at 128 MB the journal becomes journal.1.jsonl (replacing the older one).
+            if ((DateTime.UtcNow - _obsSizeCheckedAt).TotalSeconds >= 60)
+            {
+                _obsSizeCheckedAt = DateTime.UtcNow;
+                if (File.Exists(journal) && new FileInfo(journal).Length > JournalMaxBytes)
+                    File.Move(journal, Path.Combine(ObsDir, "journal.1.jsonl"), overwrite: true);
+            }
+            File.AppendAllLines(journal, lines);
         }
         catch { }
     }
