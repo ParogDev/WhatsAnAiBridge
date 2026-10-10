@@ -13,9 +13,11 @@ namespace WhatsAnAiBridge;
 ///   hud.plugin_perf      per-plugin Tick/Render cost from the HUD's own DebugInformation counters
 ///   hud.plugin_settings  a plugin's live settings (ISettings nodes), secrets redacted
 ///   hud.bridge_methods   everything plugins registered on PluginBridge (the cross-plugin API), with signatures
+///   hud.bridge_call      invoke one registered PluginBridge delegate by name (scalar arguments only) and return its result
 /// Same API on ExileCore and ExileCore2: Core.Current.pluginManager.Plugins (PluginWrapper: Name, IsEnable,
 /// Plugin, Tick/RenderDebugInformation), IPlugin._Settings, GameController.PluginBridge (private _methods).
-/// Everything is read through reflection and tolerant of members a HUD build lacks. Nothing is written.
+/// Everything is read through reflection and tolerant of members a HUD build lacks. Nothing is written by the
+/// introspection methods; hud.bridge_call runs whatever the named plugin method does.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
@@ -24,6 +26,7 @@ public partial class WhatsAnAiBridge
         "hud.plugin_perf" => PluginPerf().ToString(Newtonsoft.Json.Formatting.None),
         "hud.plugin_settings" => PluginSettings(p?["name"]?.Value<string>()).ToString(Newtonsoft.Json.Formatting.None),
         "hud.bridge_methods" => BridgeMethods().ToString(Newtonsoft.Json.Formatting.None),
+        "hud.bridge_call" => BridgeCall(p).ToString(Newtonsoft.Json.Formatting.None),
         _ => null,
     };
 
@@ -185,6 +188,100 @@ public partial class WhatsAnAiBridge
                        "Agents can invoke them with run_csharp (dynamic) - inspect side effects first.",
             ["methods"] = new JArray(rows.OrderBy(r => r["name"]?.ToString(), StringComparer.OrdinalIgnoreCase)),
         };
+    }
+
+    // ── Calling a PluginBridge method ────────────────────────────────
+
+    /// <summary>
+    /// hud.bridge_call {name, args?: [scalars]}: invoke one delegate another plugin registered on PluginBridge and return
+    /// what it gave back. Every link that can break is named: the registry (unavailable), the method (method_missing,
+    /// with what is registered), the value (not_a_delegate), the arguments (arity_mismatch / unsupported_parameter /
+    /// bad_argument) and the call itself (invoke_failed, with the exception). A string result that parses as JSON comes
+    /// back as `result` with resultType "json"; other strings as "text", scalars as "value", null as "null".
+    /// </summary>
+    private JObject BridgeCall(JToken? p)
+    {
+        var name = p?["name"]?.Value<string>();
+        if (string.IsNullOrWhiteSpace(name))
+            return new JObject { ["error"] = "missing_name", ["message"] = "Pass name: a PluginBridge method as hud.bridge_methods lists it, e.g. WhatsARoute.GetState." };
+        var bridge = GameController.PluginBridge;
+        var field = bridge?.GetType().GetField("_methods", BindingFlags.NonPublic | BindingFlags.Instance);
+        if (field?.GetValue(bridge) is not IDictionary dict)
+            return new JObject { ["error"] = "unavailable", ["message"] = "PluginBridge._methods not found in this HUD build (check with hud_type)." };
+
+        object? value = null;
+        var found = false;
+        foreach (DictionaryEntry e in dict)
+        {
+            if (!string.Equals(e.Key?.ToString(), name, StringComparison.Ordinal)) continue;
+            value = e.Value; found = true; break;
+        }
+        if (!found)
+        {
+            var registered = dict.Keys.Cast<object?>().Select(k => k?.ToString() ?? "").OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
+            var prefix = name.Contains('.') ? name[..name.IndexOf('.')] : name;
+            var samePlugin = registered.Where(r => r.StartsWith(prefix + ".", StringComparison.OrdinalIgnoreCase)).ToList();
+            return new JObject
+            {
+                ["error"] = "method_missing",
+                ["message"] = samePlugin.Count > 0
+                    ? $"PluginBridge has no '{name}'. '{prefix}' registers: {string.Join(", ", samePlugin)} (an older build of that plugin?)."
+                    : $"PluginBridge has no '{name}' and nothing under '{prefix}.': the plugin that registers it is not loaded (hud.plugins lists loaded and failed plugins). Registered: {(registered.Count == 0 ? "nothing" : string.Join(", ", registered))}.",
+                ["registered"] = new JArray(registered),
+            };
+        }
+        if (value is not Delegate d)
+            return new JObject { ["error"] = "not_a_delegate", ["message"] = $"'{name}' is registered as {value?.GetType().FullName ?? "null"}, not a delegate: it cannot be called." };
+
+        var ps = d.Method.GetParameters();
+        var signature = $"{TypeName(d.Method.ReturnType)} ({string.Join(", ", ps.Select(x => $"{TypeName(x.ParameterType)} {x.Name}"))})";
+        var argTokens = p?["args"] as JArray ?? new JArray();
+        if (argTokens.Count != ps.Length)
+            return new JObject { ["error"] = "arity_mismatch", ["message"] = $"'{name}' takes {ps.Length} argument(s) ({signature}); {argTokens.Count} given.", ["signature"] = signature };
+        var args = new object?[ps.Length];
+        for (var i = 0; i < ps.Length; i++)
+        {
+            var t = ps[i].ParameterType;
+            var scalar = t.IsPrimitive || t.IsEnum || t == typeof(string) || t == typeof(decimal);
+            if (!scalar)
+                return new JObject { ["error"] = "unsupported_parameter", ["message"] = $"'{name}' parameter {i} ({ps[i].Name}) is a {TypeName(t)}: hud.bridge_call passes scalars only (numbers, strings, bools, enums). Call it from run_csharp instead.", ["signature"] = signature };
+            try { args[i] = argTokens[i].Type == JTokenType.Null ? null : argTokens[i].ToObject(t); }
+            catch (Exception ex) { return new JObject { ["error"] = "bad_argument", ["message"] = $"'{name}' parameter {i} ({ps[i].Name}, {TypeName(t)}): {ex.Message}", ["signature"] = signature }; }
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        object? result;
+        try { result = d.DynamicInvoke(args); }
+        catch (TargetInvocationException tie) when (tie.InnerException != null)
+        {
+            return new JObject { ["error"] = "invoke_failed", ["message"] = $"'{name}' threw {tie.InnerException.GetType().Name}: {tie.InnerException.Message}", ["signature"] = signature, ["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 2) };
+        }
+        catch (Exception ex)
+        {
+            return new JObject { ["error"] = "invoke_failed", ["message"] = $"'{name}' could not be invoked: {ex.GetType().Name}: {ex.Message}", ["signature"] = signature, ["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 2) };
+        }
+        var reply = new JObject { ["ok"] = true, ["name"] = name, ["signature"] = signature, ["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 2) };
+        switch (result)
+        {
+            case null:
+                reply["resultType"] = "null"; reply["result"] = JValue.CreateNull(); break;
+            case string s:
+                var trimmed = s.TrimStart();
+                JToken? parsed = null;
+                if (trimmed.StartsWith('{') || trimmed.StartsWith('['))
+                    try { parsed = JToken.Parse(s); } catch (Newtonsoft.Json.JsonException) { parsed = null; }
+                if (parsed != null) { reply["resultType"] = "json"; reply["result"] = parsed; }
+                else { reply["resultType"] = "text"; reply["result"] = s; }
+                break;
+            case IConvertible c when result.GetType().IsPrimitive || result is decimal || result is Enum:
+                reply["resultType"] = "value"; reply["result"] = result is Enum ? result.ToString() : JToken.FromObject(c); break;
+            default:
+                reply["resultType"] = "value";
+                try { reply["result"] = JToken.FromObject(result); }
+                catch (Exception ex) { reply["result"] = result.ToString(); reply["note"] = $"result of type {result.GetType().FullName} could not be serialized ({ex.Message}); its ToString() is given"; }
+                break;
+        }
+        return reply;
     }
 
     private static string TypeName(Type t)
