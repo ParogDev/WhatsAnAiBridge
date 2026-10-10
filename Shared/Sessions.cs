@@ -8,8 +8,15 @@ namespace WhatsAnAiBridge;
 /// <summary>
 /// Who is talking to this HUD, what each of them is doing, and who may restart it. Several agents (Claude Code sessions in
 /// worktrees, Claude Desktop, scripts) share one HUD; this is the one place that knows them apart.
-///   session.hello  {id, label, branch?, cwd?, pid?, kind?}   tags this connection; every later request is "by" that session
-///   session.list   {}                                         sessions, leases, blockers, restart requests (the "who does what" view)
+///   session.hello  {id, label, branch?, cwd?, pid?, kind?, mcp?}   tags this connection; every later request is "by" that session
+///       mcp {version, sha, mode: supervised|local|unsupervised, deployedVersion, deployedSha, workerPid}: which MCP server build
+///       the session runs and what was deployed when it said hello (supervised = follows deployments, local = pinned to its own
+///       checkout's build, unsupervised = an old launcher that needs a session restart to get a supervisor). Optional: old servers
+///       don't send it. A hot swap connects a new worker that says hello with the SAME id: the session moves to the new connection,
+///       the old one stays known (PrevClientId) until it closes, so its in-flight calls keep their "who" and its close disconnects nothing.
+///   session.list   {}                                         sessions (with mcp), leases, blockers, restart requests, mcpRollout
+///       mcpRollout {deployedVersion, deployedSha, total, onDeployed, behind, local, unsupervised}: the deployed build from the newest
+///       hello that carried one, and the connected sessions that reported mcp sorted against it (behind = supervised, not on it yet).
 ///   lease.acquire  {kind: perf|pilot|record|reload|other, label, ttlSec?}  -> {id, until}; refused while a restart is granted
 ///   lease.renew    {id, ttlSec?} / lease.release {id}
 ///   restart.request {reason?}  -> {id, status: go|waiting|merged|denied, blockers, holdUntil}
@@ -34,8 +41,10 @@ public partial class WhatsAnAiBridge
         public int? Pid;
         public DateTime HelloAt, LastSeen;
         public long ClientId;              // the connection it last spoke on
+        public long PrevClientId;          // a hot swap: the connection it spoke on before, still open (0 when none)
         public bool Connected;
         public string Name = "";           // what the player reads (RenameLocked): never a system folder, unique among the connected
+        public SessionMcp? Mcp;            // the MCP server build it runs (null: an old server or a script)
     }
 
     /// <summary>
@@ -56,6 +65,43 @@ public partial class WhatsAnAiBridge
         /// <summary>Two or more agents active: the card says whose step it is.</summary>
         public bool Ambiguous => Active.Length >= 2;
         public string NameOf(string? label) => label == null ? "" : Names.TryGetValue(label, out var n) ? n : BaseDisplayName(label, null);
+    }
+
+    /// <summary>The MCP server build behind a session, as its hello reported it (hello.mcp).</summary>
+    internal sealed record SessionMcp(string? Version, string? Sha, string Mode, string? DeployedVersion, string? DeployedSha, int? WorkerPid)
+    {
+        public bool Local => Mode == "local";
+        public bool Unsupervised => Mode == "unsupervised";
+        /// <summary>A supervised server not on <paramref name="deployedSha"/> yet: the swap hasn't reached it.</summary>
+        public bool Behind(string deployedSha) => !Local && !Unsupervised && !string.Equals(Sha, deployedSha, StringComparison.Ordinal);
+        public JObject Json() => new()
+        {
+            ["version"] = Version, ["sha"] = Sha, ["mode"] = Mode, ["deployedVersion"] = DeployedVersion, ["deployedSha"] = DeployedSha, ["workerPid"] = WorkerPid,
+        };
+    }
+
+    /// <summary>The MCP rollout: the deployed build (from the newest hello that carried one) against the connected sessions that reported mcp.</summary>
+    internal sealed record McpRollout(string? DeployedVersion, string DeployedSha, int Total, int OnDeployed, string[] Behind, string[] Local, string[] Unsupervised)
+    {
+        /// <summary>Supervised sessions still wait for their swap: informational, nothing is cut.</summary>
+        public bool InProgress => Behind.Length > 0;
+        public JObject Json() => new()
+        {
+            ["deployedVersion"] = DeployedVersion, ["deployedSha"] = DeployedSha, ["total"] = Total, ["onDeployed"] = OnDeployed,
+            ["behind"] = new JArray(Behind), ["local"] = new JArray(Local), ["unsupervised"] = new JArray(Unsupervised),
+        };
+    }
+
+    /// <summary>One session as the panel sees it (an immutable copy; Name is what the player reads).</summary>
+    internal sealed record SessionView(string Id, string Label, string Name, string? Branch, string? Kind, bool Connected, DateTime LastSeen, SessionMcp? Mcp);
+
+    /// <summary>
+    /// What the guide panel shows about sessions this frame: taken under the lock by SessionsTick (4 Hz) and whenever the state
+    /// changes (hello, a connection closing, a restart request, the user's Restart now / Not now), never per frame. Immutable.
+    /// </summary>
+    internal sealed record SessionsView(SessionView[] Sessions, int Connected, RestartRequest? Waiting, RestartRequest? Granted, McpRollout? Rollout)
+    {
+        public static readonly SessionsView Empty = new([], 0, null, null, null);
     }
 
     internal sealed class Lease
@@ -94,6 +140,8 @@ public partial class WhatsAnAiBridge
     private volatile AgentsView _agentsView = AgentsView.Empty;
     private long _reqClientId;                         // the connection of the request being served (set in DrainRequests)
     private DateTime _sessionsTickAt = DateTime.MinValue;
+    private string? _mcpDeployedSha, _mcpDeployedVersion;   // the deployed MCP build, from the newest hello that carried one
+    private volatile SessionsView _sessionsView = SessionsView.Empty;   // written under the lock, read by the panel every frame
     private static readonly TimeSpan SessionForget = TimeSpan.FromMinutes(30), RestartGoExpiry = TimeSpan.FromMinutes(3), RestartKeep = TimeSpan.FromMinutes(20);
     private static readonly HashSet<string> LeaseKinds = new(StringComparer.Ordinal) { "perf", "pilot", "record", "reload", "other" };
     private const int LeaseTtlDefault = 120, LeaseTtlMax = 3600;
@@ -118,7 +166,8 @@ public partial class WhatsAnAiBridge
     {
         var cid = _reqClientId;
         if (cid == 0) return null;
-        lock (_sessionLock) return _sessions.Values.FirstOrDefault(s => s.ClientId == cid && s.Connected);
+        // A swapped worker's old connection (PrevClientId) still belongs to the session while it finishes its calls.
+        lock (_sessionLock) return _sessions.Values.FirstOrDefault(s => (s.ClientId == cid || s.PrevClientId == cid) && s.Connected);
     }
 
     /// <summary>The current session's label, for "who asked" lines; null when unknown.</summary>
@@ -138,28 +187,54 @@ public partial class WhatsAnAiBridge
             s.Cwd = Clip(p?["cwd"]?.ToString(), 200);
             s.Kind = Clip(p?["kind"]?.ToString(), 20);
             s.Pid = p?["pid"]?.Type == JTokenType.Integer ? p["pid"]!.Value<int>() : null;
+            s.Mcp = ParseMcp(p?["mcp"] as JObject);
+            if (s.Mcp?.DeployedSha != null) { _mcpDeployedSha = s.Mcp.DeployedSha; _mcpDeployedVersion = s.Mcp.DeployedVersion; }
+            // The same session on a new connection (a hot-swapped MCP worker, or a reconnect): the old connection, if still
+            // open, stays its own until it closes - the old worker is finishing its in-flight calls on it.
+            if (s.ClientId != 0 && s.ClientId != _reqClientId && s.Connected) s.PrevClientId = s.ClientId;
             s.ClientId = _reqClientId;
             s.Connected = true;
             s.LastSeen = DateTime.UtcNow;
             // Another entry still bound to this connection (a client that re-identified) is no longer on it.
-            foreach (var o in _sessions.Values) if (o != s && o.ClientId == _reqClientId) o.Connected = false;
+            foreach (var o in _sessions.Values) if (o != s && (o.ClientId == _reqClientId || o.PrevClientId == _reqClientId)) { o.Connected = false; o.PrevClientId = 0; }
             RenameLocked();
             var others = _sessions.Values.Count(o => o != s && o.Connected);
-            return new JObject { ["ok"] = true, ["id"] = s.Id, ["label"] = s.Label, ["name"] = s.Name, ["others"] = others, ["holdSec"] = Settings.RestartHoldSec.Value };
+            SessionsPublishLocked();
+            var reply = new JObject { ["ok"] = true, ["id"] = s.Id, ["label"] = s.Label, ["name"] = s.Name, ["others"] = others, ["holdSec"] = Settings.RestartHoldSec.Value };
+            if (McpRolloutLocked() is { } ro) reply["mcpRollout"] = ro.Json();
+            return reply;
         }
+    }
+
+    /// <summary>hello.mcp, clipped; null when absent. An unknown mode is kept as written (and sorted as supervised in the rollout).</summary>
+    private static SessionMcp? ParseMcp(JObject? m)
+    {
+        if (m == null) return null;
+        var mode = Clip(m["mode"]?.ToString(), 20);
+        if (string.IsNullOrWhiteSpace(mode)) mode = "supervised";
+        return new SessionMcp(Clip(m["version"]?.ToString(), 40), Clip(m["sha"]?.ToString(), 40), mode!,
+            Clip(m["deployedVersion"]?.ToString(), 40), Clip(m["deployedSha"]?.ToString(), 40),
+            m["workerPid"]?.Type == JTokenType.Integer ? m["workerPid"]!.Value<int>() : null);
     }
 
     /// <summary>
     /// A connection closed (TcpBridgeServer.ClientClosed): its session is disconnected, its leases stay until they expire,
-    /// and a step it left asking the user to act is cleared from the card (nobody would read the answer).
+    /// and a step it left asking the user to act is cleared from the card (nobody would read the answer). The old
+    /// connection of a swapped worker closing disconnects nothing: the session lives on its new one, its step stays.
     /// </summary>
     private void SessionDisconnected(long clientId)
     {
         var gone = new List<string>();
         lock (_sessionLock)
+        {
             foreach (var s in _sessions.Values)
-                if (s.ClientId == clientId && s.Connected) { s.Connected = false; s.LastSeen = DateTime.UtcNow; gone.Add(s.Id); }
-        if (gone.Count > 0) lock (_sessionLock) RenameLocked();
+            {
+                if (s.PrevClientId == clientId) s.PrevClientId = 0;
+                else if (s.ClientId == clientId && s.Connected) { s.Connected = false; s.PrevClientId = 0; s.LastSeen = DateTime.UtcNow; gone.Add(s.Id); }
+            }
+            if (gone.Count > 0) RenameLocked();
+            SessionsPublishLocked();
+        }
         // Outside the sessions lock: the guide lock is only ever taken inside it, never around it (AgentGuide.cs).
         foreach (var id in gone) GuideOwnerGone(id);
     }
@@ -170,7 +245,25 @@ public partial class WhatsAnAiBridge
         var cid = _reqClientId;
         if (cid == 0) return;
         lock (_sessionLock)
-            foreach (var s in _sessions.Values) if (s.ClientId == cid && s.Connected) s.LastSeen = DateTime.UtcNow;
+            foreach (var s in _sessions.Values) if ((s.ClientId == cid || s.PrevClientId == cid) && s.Connected) s.LastSeen = DateTime.UtcNow;
+    }
+
+    /// <summary>The MCP rollout against the connected sessions that reported mcp; null until a hello carried a deployed build.</summary>
+    private McpRollout? McpRolloutLocked()
+    {
+        if (_mcpDeployedSha == null) return null;
+        var total = 0; var on = 0;
+        List<string>? behind = null, local = null, unsup = null;
+        foreach (var s in _sessions.Values)
+        {
+            if (!s.Connected || s.Mcp == null) continue;
+            total++;
+            if (s.Mcp.Local) (local ??= new()).Add(s.Label);
+            else if (s.Mcp.Unsupervised) (unsup ??= new()).Add(s.Label);
+            else if (s.Mcp.Behind(_mcpDeployedSha)) (behind ??= new()).Add(s.Label);
+            else on++;
+        }
+        return new McpRollout(_mcpDeployedVersion, _mcpDeployedSha, total, on, behind?.ToArray() ?? [], local?.ToArray() ?? [], unsup?.ToArray() ?? []);
     }
 
     private JObject SessionList()
@@ -191,10 +284,12 @@ public partial class WhatsAnAiBridge
                     ["connected"] = s.Connected, ["helloAt"] = s.HelloAt.ToString("O"), ["lastSeen"] = s.LastSeen.ToString("O"),
                     ["leases"] = _leases.Count(l => l.Session == s.Id),
                     ["doing"] = new JArray(blockers.Where(b => b.Who == s.Label).Select(b => b.Label)),
+                    ["mcp"] = s.Mcp?.Json(),
                 })),
                 ["leases"] = new JArray(_leases.Select(LeaseJson)),
                 ["blockers"] = new JArray(blockers.Select(BlockerJson)),
                 ["restarts"] = new JArray(_restarts.OrderByDescending(r => r.At).Select(RestartJsonLocked)),
+                ["mcpRollout"] = McpRolloutLocked()?.Json(),
             };
         }
     }
@@ -442,6 +537,7 @@ public partial class WhatsAnAiBridge
                     ["kind"] = req.Blockers.Count > 0 ? "warn" : "step", ["title"] = "HUD restart",
                 });
             }
+            SessionsPublishLocked();
             return RestartJsonLocked(req);
         }
     }
@@ -464,7 +560,7 @@ public partial class WhatsAnAiBridge
         {
             var req = _restarts.FirstOrDefault(r => r.Id == id);
             if (req == null) return Err("unknown_request", $"No restart request '{id}'.");
-            if (req.Status is "waiting" or "go") { req.Status = "cancelled"; req.By = req.Who; req.DecidedAt = DateTime.UtcNow; }
+            if (req.Status is "waiting" or "go") { req.Status = "cancelled"; req.By = req.Who; req.DecidedAt = DateTime.UtcNow; SessionsPublishLocked(); }
             return RestartJsonLocked(req);
         }
     }
@@ -523,7 +619,7 @@ public partial class WhatsAnAiBridge
         lock (_sessionLock)
         {
             var req = _restarts.FirstOrDefault(r => r.Id == id);
-            if (req is { Status: "waiting" }) { req.Blockers = BlockersLocked(req.Session); RestartGrantLocked(req, "user", DateTime.UtcNow); }
+            if (req is { Status: "waiting" }) { req.Blockers = BlockersLocked(req.Session); RestartGrantLocked(req, "user", DateTime.UtcNow); SessionsPublishLocked(); }
         }
     }
 
@@ -537,6 +633,7 @@ public partial class WhatsAnAiBridge
             {
                 req.Status = "denied"; req.By = "user"; req.DecidedAt = DateTime.UtcNow;
                 GuideLog(new JObject { ["text"] = $"Not now: {DisplayNameOfLocked(req.Who)}'s HUD restart was declined", ["kind"] = "result", ["title"] = "HUD restart" });
+                SessionsPublishLocked();
             }
         }
     }
@@ -552,7 +649,11 @@ public partial class WhatsAnAiBridge
         lock (_sessionLock)
         {
             AgentsViewRebuildLocked();
-            if (_sessions.Count == 0 && _leases.Count == 0 && _restarts.Count == 0) return;
+            if (_sessions.Count == 0 && _leases.Count == 0 && _restarts.Count == 0)
+            {
+                if (_sessionsView.Sessions.Length > 0 || _sessionsView.Waiting != null || _sessionsView.Granted != null) _sessionsView = SessionsView.Empty;
+                return;
+            }
             SessionsExpireLocked(now);
             foreach (var r in _restarts.Where(r => r.Status == "waiting").OrderBy(r => r.At).ToList())
                 if (r.Status == "waiting") RestartEvaluateLocked(r, now);   // a grant merges the others, so re-check the status
@@ -562,21 +663,32 @@ public partial class WhatsAnAiBridge
                 r.Status = "expired";
                 GuideLog(new JObject { ["text"] = $"{DisplayNameOfLocked(r.Who)} was granted a HUD restart but didn't restart it", ["kind"] = "warn", ["title"] = "HUD restart" });
             }
+            SessionsPublishLocked();
         }
     }
 
-    /// <summary>The request the card shows this frame (waiting: blocked or counting down), and how many sessions are connected.</summary>
-    internal (RestartRequest? request, int connected, SessionInfo[] sessions) RestartSnapshot()
+    /// <summary>What the panel shows about sessions (SessionsView): the copy published last, never taken per frame.</summary>
+    internal SessionsView SessionsSnapshot() => _sessionsView;
+
+    /// <summary>
+    /// Publish the panel's copy: the sessions (connected first, then by hello), the oldest waiting restart request (the card:
+    /// blocked or counting down), the granted one (about to happen), and the MCP rollout. Called under the lock, at 4 Hz from
+    /// SessionsTick and on every state change, so the indicator never waits a tick after a click or a hello.
+    /// </summary>
+    private void SessionsPublishLocked()
     {
-        lock (_sessionLock)
-        {
-            var req = _restarts.Where(r => r.Status == "waiting").OrderBy(r => r.At).FirstOrDefault();
-            var copy = req == null ? null : new RestartRequest
-            {
-                Id = req.Id, Session = req.Session, Who = req.Who, Reason = req.Reason, At = req.At, Status = req.Status,
-                HoldUntil = req.HoldUntil, Blockers = req.Blockers.ToList(),
-            };
-            return (copy, _sessions.Values.Count(s => s.Connected), _sessions.Values.ToArray());
-        }
+        var sessions = _sessions.Values.OrderByDescending(s => s.Connected).ThenBy(s => s.HelloAt)
+            .Select(s => new SessionView(s.Id, s.Label, DisplayNameLocked(s), s.Branch, s.Kind, s.Connected, s.LastSeen, s.Mcp)).ToArray();
+        var connected = 0;
+        foreach (var s in sessions) if (s.Connected) connected++;
+        var waiting = _restarts.Where(r => r.Status == "waiting").OrderBy(r => r.At).FirstOrDefault();
+        var granted = _restarts.FirstOrDefault(r => r.Status == "go");
+        _sessionsView = new SessionsView(sessions, connected, RestartCopy(waiting), RestartCopy(granted), McpRolloutLocked());
     }
+
+    private static RestartRequest? RestartCopy(RestartRequest? req) => req == null ? null : new RestartRequest
+    {
+        Id = req.Id, Session = req.Session, Who = req.Who, Reason = req.Reason, At = req.At, Status = req.Status, By = req.By,
+        HoldUntil = req.HoldUntil, DecidedAt = req.DecidedAt, Blockers = req.Blockers.ToList(),
+    };
 }

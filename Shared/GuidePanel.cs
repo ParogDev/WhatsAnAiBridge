@@ -109,6 +109,16 @@ public partial class WhatsAnAiBridge
         // The "who is asking" strip: its line and hover text, recomposed only when the agents view changes (4 Hz at most).
         public AgentsView? SessionsAgents;
         public string? SessionsLine, SessionsTip;
+        // Sessions chip (GuidePanelSessions.cs): its rect last frame (the hover hit-test), its eased opacity and hover, the
+        // count and countdown texts rebuilt only when their number changes, and the hover texts rebuilt once a second.
+        public Vector2 ChipMin, ChipMax;
+        public float ChipAlpha, ChipHover;
+        public int ChipCount = -1, ChipSecs = -1;
+        public string ChipCountText = "", ChipSecsText = "";
+        public SessionsView? ChipTipView;
+        public AgentsView? ChipTipAgents;
+        public long ChipTipSecond = -1;
+        public string? ChipTipTitle, ChipTipBody, ChipTipNote, ChipTipFoot;
         public string? LastError;
         // Quiet dot (attention rule 5): the card was hidden last frame, and the dot was drawn in its place; its hover
         // halo eased 0..1.
@@ -185,8 +195,10 @@ public partial class WhatsAnAiBridge
         var q = QueueViewOf(QueueSnapshot());
         var fl = FlowSnapshot();
         var plan = fl.status == "running" ? FlowPlan() : [];
-        // Whether an agent waits to restart the HUD, and which agents are active (readable names, what each asks), once per frame.
-        var rs = RestartSnapshot();
+        // Who is connected, whether one of them waits to restart the HUD and the MCP rollout (SessionsView), and which
+        // agents are active (readable names, what each asks: AgentsView). Both are copies Sessions.cs publishes at 4 Hz
+        // (the first on every change too): no lock here.
+        var rs = SessionsSnapshot();
         var ag = AgentsSnapshot();
         var now = ImGui.GetTime();
         var utc = DateTime.UtcNow;
@@ -194,7 +206,7 @@ public partial class WhatsAnAiBridge
         ObserveFlow(fl, plan, now);
         // Only with two or more agents active does the card say whose step it is; one obvious agent needs no name.
         _guideUi.ShowWho = ag.Ambiguous;
-        if (rs.request?.Id != _guideUi.SeenRestart) { _guideUi.SeenRestart = rs.request?.Id; if (rs.request != null) _guideUi.RestartArrivedAt = now; }
+        if (rs.Waiting?.Id != _guideUi.SeenRestart) { _guideUi.SeenRestart = rs.Waiting?.Id; if (rs.Waiting != null) _guideUi.RestartArrivedAt = now; }
         var th = PanelTheme.Current();
         var fv = new FlowView(
             fl.status == "running" || (fl.status == "done" && now - _guideUi.FlowEndedAt < GuideFlowDoneShowSec),
@@ -211,7 +223,7 @@ public partial class WhatsAnAiBridge
         // dropped lines do not wake the card).
         var quietFor = (utc - (g.updatedAt > _toastShownAt ? g.updatedAt : _toastShownAt)).TotalSeconds;
         // A pending HUD restart (blocked, or counting down with Not now) keeps the panel up: the user must be able to answer it.
-        var quiet = ((!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null)) && rs.request == null;
+        var quiet = ((!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null)) && rs.Waiting == null;
 
         // Attention, decided once per frame for every surface (GuideAttentionFor). Inputs: the highlight boxes on
         // screen (a consistent copy; the overlay re-resolves them after this panel, so they may be one frame old),
@@ -266,6 +278,8 @@ public partial class WhatsAnAiBridge
             u.HoverBelowY = anchor.Y + (toastsH > 0 ? toastsH : 0);
             if (!DrawGuideLogSheet(g, th, now, anchor)) { if (at.ToastsAllowed) DrawGuideToasts(th, now, utc, anchor); }
             if (at.ShowDot) DrawGuideDot(at, hovered, hasCard || q.Next != null, now);
+            // Who shares the HUD and whether a restart or an MCP rollout is on: beside the card's strip, card or no card.
+            DrawSessionsChip(rs, at, now, utc);
         }
         catch (Exception ex) { GuideReport(ex); }
 
@@ -295,7 +309,7 @@ public partial class WhatsAnAiBridge
             u.WinPos = ImGui.GetWindowPos();
             u.WinH = shown ? ImGui.GetWindowSize().Y : 0;
             if (!shifted) u.Home = u.WinPos;
-            if (shown) DrawGuideBody(g, a, q, fv, at, hasCard, needsUser, rs.request, ag, th, now, utc);
+            if (shown) DrawGuideBody(g, a, q, fv, at, hasCard, needsUser, rs.Waiting, ag, th, now, utc);
         }
         catch (Exception ex) { GuideReport(ex); }
         finally
@@ -511,7 +525,7 @@ public partial class WhatsAnAiBridge
         }
         // Two or more agents ask the user for something at once: one quiet line says who, so their requests never read as
         // one voice. Only then (one asker is obvious; idle or disconnected sessions are nobody's business here), and only
-        // while the panel is up anyway (never a reason to show it on its own).
+        // while the panel is up anyway (never a reason to show it on its own: the sessions chip is the always-there surface).
         if (GuideAskers(ag) >= 2 && (hasCard || restart != null || q.Next != null))
         {
             DrawSessionsStrip(ag, th);
