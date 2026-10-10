@@ -221,8 +221,9 @@ public partial class WhatsAnAiBridge
     {
         var l = label.Trim();
         if (l.StartsWith("ps:", StringComparison.Ordinal)) return (l.Length > 3 ? l[3..] : "script") + " (script)";
-        if (cwd != null && IsSystemCwd(cwd)) return "Claude Desktop";
-        if (l.Length == 0 || SystemFolders.Contains(l) || (l.Length == 2 && l[1] == ':')) return "Claude";
+        // Only a label that is a folder name says nothing; an explicit name (HEXILE_AGENT, a branch) is kept wherever it runs.
+        if (l.Length == 0 || SystemFolders.Contains(l) || (l.Length == 2 && l[1] == ':'))
+            return cwd != null && IsSystemCwd(cwd) && cwd.Contains("Windows", StringComparison.OrdinalIgnoreCase) ? "Claude Desktop" : "Claude";
         if (l.StartsWith("detached@", StringComparison.Ordinal)) return "detached checkout";
         // Worktree branches end in a random hex tail ("cranky-wilbur-f2659c"): it tells nothing to the player.
         var dash = l.LastIndexOf('-');
@@ -294,7 +295,19 @@ public partial class WhatsAnAiBridge
             list.Add(new AgentView(names.TryGetValue(g.Key, out var n) ? n : BaseDisplayName(g.Key, null), g.Key, asks, connected ? doing : []));
         }
         // Agents that are asking come first, then by name: the strip and the hover list read in that order.
-        _agentsView = new AgentsView(list.OrderByDescending(a => a.Asks.Length > 0).ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray(), names);
+        var active = list.OrderByDescending(a => a.Asks.Length > 0).ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+        // Same as last time: keep the instance, so the UI (which recomposes its text when the reference changes) does nothing.
+        var old = _agentsView;
+        if (SameAgents(old.Active, active) && old.Names.Count == names.Count && names.All(kv => old.Names.TryGetValue(kv.Key, out var v) && v == kv.Value)) return;
+        _agentsView = new AgentsView(active, names);
+    }
+
+    private static bool SameAgents(AgentView[] a, AgentView[] b)
+    {
+        if (a.Length != b.Length) return false;
+        for (var i = 0; i < a.Length; i++)
+            if (a[i].Name != b[i].Name || a[i].Label != b[i].Label || !a[i].Asks.SequenceEqual(b[i].Asks) || !a[i].Doing.SequenceEqual(b[i].Doing)) return false;
+        return true;
     }
 
     /// <summary>The agents the in-game UI may mention (rebuilt at 4 Hz; no lock).</summary>
