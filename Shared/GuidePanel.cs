@@ -92,14 +92,15 @@ public partial class WhatsAnAiBridge
         public string? WrapSrc, Wrap1, Wrap2;
         public float WrapSize, WrapW;
         public string? TitleCapsSrc, TitleCaps;
-        // Several agents connected (Sessions.cs): the title row names who asked ("whats-a-route - Experiment: stash"),
-        // composed only when who or the title change.
+        // Several agents active (Sessions.cs AgentsView.Ambiguous): the title row names who asked, by its readable name
+        // ("Claude - Experiment: stash"), composed only when that name or the title change.
         public bool ShowWho;
-        public string? WhoTitleWho, WhoTitleTitle, WhoTitle;
+        public string? WhoTitleName, WhoTitleTitle, WhoTitle;
         public string? SeenRestart;        // id of the restart request on the card last frame (its arrival flashes)
         public double RestartArrivedAt = -1e9;
-        public string[]? SessionsLabels;   // the sessions strip's line, recomposed only when the connected set changes
-        public string? SessionsLine;
+        // The "who is asking" strip: its line and hover text, recomposed only when the agents view changes (4 Hz at most).
+        public AgentsView? SessionsAgents;
+        public string? SessionsLine, SessionsTip;
         public string? LastError;
         // Quiet dot (attention rule 5): the card was hidden last frame, and the dot was drawn in its place; its hover
         // halo eased 0..1.
@@ -134,17 +135,27 @@ public partial class WhatsAnAiBridge
     /// <summary>How a status looks: its label, tone, whether the card shouts (big text, strong frame) and pulses.</summary>
     private readonly record struct GuideLook(string Label, Vector4 Tone, bool Loud, bool Pulse);
 
+    /// <summary>
+    /// The look per status. "checking" is not a status an agent sets: it is a waiting card whose user pressed Done
+    /// (GuideAskView.Mark), calm while the agent checks what it watches. "unseen" is the step over: the user said done
+    /// and the agent saw nothing change - not the user's fault, so the warn tone, calm, never loud.
+    /// </summary>
     private static GuideLook GuideLookFor(string status) => status switch
     {
         "waiting" => new("DO THIS NOW", ToneAccent, true, true),
+        "checking" => new("CHECKING", ToneAccent, false, false),
         "detected" => new("CHANGE SEEN", ToneAccent, false, false),
         "settling" => new("HOLDING STILL", ToneAccent, false, false),
         "captured" => new("CAPTURED", ToneOk, false, false),
         "failed" => new("TRY AGAIN", ToneBad, true, false),
+        "unseen" => new("COULDN'T SEE IT", ToneWarn, false, false),
         "done" => new("DONE", ToneNeutral, false, false),
         "info" => new("NOTE", ToneNeutral, false, false),
         _ => new("", ToneNeutral, false, false),
     };
+
+    /// <summary>The user pressed Done on a waiting step: the card is calm while the agent checks (CHECKING), not shouting.</summary>
+    private static bool GuideChecking(in GuideAskView a, string status) => a.Mark == "done" && status == "waiting";
 
     // ── Frame ────────────────────────────────────────────────────────
 
@@ -160,17 +171,21 @@ public partial class WhatsAnAiBridge
         if (!Settings.ShowAgentGuide.Value) return;
 
         var g = GuideSnapshot();
+        // The Done side of the card (AgentGuide.cs): whether Done is offered, the user's mark, the "can't see it" clock.
+        var a = GuideAskSnapshot();
         // Once per frame: it takes the queue lock. Open steps only, in queue order.
         var q = QueueViewOf(QueueSnapshot());
         var fl = FlowSnapshot();
         var plan = fl.status == "running" ? FlowPlan() : [];
-        // Who is connected and whether one of them waits to restart the HUD (Sessions.cs), once per frame.
+        // Whether an agent waits to restart the HUD, and which agents are active (readable names, what each asks), once per frame.
         var rs = RestartSnapshot();
+        var ag = AgentsSnapshot();
         var now = ImGui.GetTime();
         var utc = DateTime.UtcNow;
         ObserveGuide(g, q, now);
         ObserveFlow(fl, plan, now);
-        _guideUi.ShowWho = rs.connected >= 2;
+        // Only with two or more agents active does the card say whose step it is; one obvious agent needs no name.
+        _guideUi.ShowWho = ag.Ambiguous;
         if (rs.request?.Id != _guideUi.SeenRestart) { _guideUi.SeenRestart = rs.request?.Id; if (rs.request != null) _guideUi.RestartArrivedAt = now; }
         var th = PanelTheme.Current();
         var fv = new FlowView(
@@ -212,7 +227,8 @@ public partial class WhatsAnAiBridge
         var homeMin = u.Home;
         var homeMax = u.Home + new Vector2(GuideWidth, cardH + (cardH > 0 && toastsH > 0 ? 2 : 0) + toastsH);
         var avoid = GuideAvoid(homeMin, homeMax, boxes, io.DisplaySize);
-        var mustAct = g.status is "waiting" or "failed" && g.instruction != null;
+        // The user has pressed Done (checking): their part is done, so the card no longer asks them to act now.
+        var mustAct = g.status is "waiting" or "failed" && g.instruction != null && !GuideChecking(a, g.status);
         var bridgeDown = _tcpServer?.IsRunning != true;
         var at = GuideAttentionFor(boxes.Count > 0, hovered, now - u.HoverAt, needsUser, mustAct, avoid,
             CombatNear(now), quiet, hasCard || q.Next != null, g.rev > 0 || bridgeDown, bridgeDown, toastsH > 0);
@@ -266,7 +282,7 @@ public partial class WhatsAnAiBridge
             u.WinPos = ImGui.GetWindowPos();
             u.WinH = shown ? ImGui.GetWindowSize().Y : 0;
             if (!shifted) u.Home = u.WinPos;
-            if (shown) DrawGuideBody(g, q, fv, at, hasCard, needsUser, rs.request, rs.connected, rs.sessions, th, now, utc);
+            if (shown) DrawGuideBody(g, a, q, fv, at, hasCard, needsUser, rs.request, ag, th, now, utc);
         }
         catch (Exception ex) { GuideReport(ex); }
         finally
@@ -457,19 +473,19 @@ public partial class WhatsAnAiBridge
 
     // ── Body ─────────────────────────────────────────────────────────
 
-    private void DrawGuideBody(in GuideSnap g, in QueueView q, in FlowView fv, in GuideAttention at, bool hasCard, bool needsUser,
-        RestartRequest? restart, int connected, SessionInfo[] sessions, PanelTheme th, double now, DateTime utc)
+    private void DrawGuideBody(in GuideSnap g, in GuideAskView a, in QueueView q, in FlowView fv, in GuideAttention at, bool hasCard, bool needsUser,
+        RestartRequest? restart, AgentsView ag, PanelTheme th, double now, DateTime utc)
     {
         if (hasCard)
         {
-            DrawGuideCard(g, q.Running, fv, at, th, now, utc);
+            DrawGuideCard(g, a, q.Running, fv, at, ag, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
         if (restart != null)
         {
             // An agent waits to restart the HUD: what it waits for, or the countdown, with Restart now / Not now. Under the
             // live card, above the queue: it is the one thing here the user may want to answer right away.
-            DrawRestartCard(restart, th, now, utc);
+            DrawRestartCard(restart, ag, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
         if (q.Next != null)
@@ -480,13 +496,22 @@ public partial class WhatsAnAiBridge
             else DrawQueueCard(q, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
-        // Several agents share this HUD: one quiet line says who is connected and what each is doing, while the panel is
-        // up anyway (never a reason to show it on its own).
-        if (connected >= 2 && (hasCard || restart != null || q.Next != null))
+        // Two or more agents ask the user for something at once: one quiet line says who, so their requests never read as
+        // one voice. Only then (one asker is obvious; idle or disconnected sessions are nobody's business here), and only
+        // while the panel is up anyway (never a reason to show it on its own).
+        if (GuideAskers(ag) >= 2 && (hasCard || restart != null || q.Next != null))
         {
-            DrawSessionsStrip(sessions, th, utc);
+            DrawSessionsStrip(ag, th);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
+    }
+
+    /// <summary>How many active agents ask the user for something right now (a step, a question, a flow, a recording step).</summary>
+    private static int GuideAskers(AgentsView ag)
+    {
+        var n = 0;
+        foreach (var x in ag.Active) if (x.Asks.Length > 0) n++;
+        return n;
     }
     /// <summary>
     /// The live card: the persistent member of the toast family. The look follows syrairc's ExileImGui2 (ExileMaps:
@@ -499,14 +524,21 @@ public partial class WhatsAnAiBridge
     /// act): the message at 1.3 f on up to two lines, a 5 px stripe, a bigger glyph, the title in the tone, and the
     /// tone's wash, frame and halos throbbing when attention says Urgent. Calm: f, a 3 px stripe, the hairline. A
     /// third small line carries the status subline, the detail or the plan.
+    /// A step that offers Done (GuideAskView.OfferDone: await_change and the queue runner) puts a Done pill (accent,
+    /// the one thing to press) left of the x or Stop; that x is then Cancel (the agent stops). Done pressed: the card
+    /// goes calm as CHECKING with "Got it - I'm looking for that change" and a Not done yet pill to take it back.
+    /// Waiting with no Done for a while (Unseen): the third line says, in the agent's own voice, "I can't see that
+    /// change yet - if you already did it, press Done"; the card stays loud (the user may still have to act).
     /// </summary>
-    private void DrawGuideCard(in GuideSnap g, QueuedStep? running, in FlowView fv, in GuideAttention at, PanelTheme th, double now, DateTime utc)
+    private void DrawGuideCard(in GuideSnap g, in GuideAskView a, QueuedStep? running, in FlowView fv, in GuideAttention at, AgentsView ag,
+        PanelTheme th, double now, DateTime utc)
     {
         var dl = ImGui.GetWindowDrawList();
         var font = ImGui.GetFont();
         var f = ImGui.GetFontSize();
         var small = f * 0.85f;
-        var look = GuideLookFor(g.status);
+        var checking = GuideChecking(a, g.status);
+        var look = GuideLookFor(checking ? "checking" : g.status);
         var sinceStatus = now - _guideUi.StatusAt;
 
         // Captured shouts for a few seconds, then shrinks to a one-line receipt until the next step arrives.
@@ -532,6 +564,11 @@ public partial class WhatsAnAiBridge
         if (!compact)
         {
             if (sub != null) { line3 = sub; line3Tone = look.Tone; }
+            // Done pressed: the agent is checking (a short state: it captures or ends unseen within seconds).
+            else if (checking) { line3 = GuideCheckingLine(now); line3Tone = look.Tone; }
+            // Waiting for a while with no Done: the agent says plainly that it sees nothing yet. Near-white, not a tone:
+            // it is the agent talking, not an error. Done stays the way to answer it.
+            else if (a.Unseen) { line3 = GuideUnseenLine; line3Tone = GuideToastText; }
             else if (g.detail != null) line3 = g.detail;
             else if (fv.Show && !fv.Running) { line3 = fv.StepCount == 1 ? "Done" : $"All {fv.StepCount} steps done"; line3Done = true; }
             else if (fv.Show && at.ShowPlan && fv.Plan.Length > 1)
@@ -584,7 +621,7 @@ public partial class WhatsAnAiBridge
         if (fv.Show && fv.Running && g.step is int now1 && !compact)
             DrawFlowBadge(dl, iconC, icon * 0.42f, 0, now1.ToString(), 1f, th);
         else
-            DrawGuideCardGlyph(dl, g.status, iconC, look.Tone, now, pulse, icon / GuideToastIcon);
+            DrawGuideCardGlyph(dl, checking ? "checking" : g.status, iconC, look.Tone, now, pulse, icon / GuideToastIcon);
         if (look.Label.Length > 0)
         {
             var tcol = U(loud ? look.Tone : GuideToastText);
@@ -594,28 +631,15 @@ public partial class WhatsAnAiBridge
             x += GuideTrackedWidth(font, f, look.Label, GuideToastTitleTrack) + 14;
         }
 
-        // Right side, laid out from the edge inwards. While a queued step records, the dismiss x gives way to Stop:
-        // hiding the card would leave the recorder running with nothing to stop it from.
+        // Right side, laid out from the edge inwards: the way out first (x, or Stop while a queued step records: hiding
+        // the card would leave the recorder running with nothing to stop it from), then the step's answer (Done, or
+        // Not done yet once pressed), then elapsed, the step pill and the title.
         var rx = max.X - GuideToastPadX;
         var showDismiss = g.instruction != null || g.status != "idle";
         if (running != null)
         {
-            const string label = "Stop";
-            var tw = ImGui.CalcTextSize(label).X * (small / f);
-            var pillW = tw + 27;
-            var pillH = small + 8;
-            var pmin = new Vector2(rx - pillW, hy - pillH * 0.5f);
-            ImGui.SetCursorScreenPos(pmin);
-            ImGui.InvisibleButton("##guide_stop", new Vector2(pillW, pillH));
-            var hov = ImGui.IsItemHovered();
-            if (ImGui.IsItemClicked()) QueueCancel(running.Id);
-            if (hov) ImGui.SetTooltip("Stop recording this step. It is marked cancelled; an agent can queue it again.");
-            var sc = hov ? ToneBad : GuideToastMuted;
-            dl.AddRectFilled(pmin, pmin + new Vector2(pillW, pillH), hov ? U(ToneBad, 0.22f) : U(GuideToastLine, 0.7f), 0f);
-            dl.AddRect(pmin, pmin + new Vector2(pillW, pillH), U(hov ? ToneBad : GuideToastLine), 0f);
-            dl.AddRectFilled(new Vector2(pmin.X + 8, hy - 3.5f), new Vector2(pmin.X + 15, hy + 3.5f), U(sc), 1f);
-            dl.AddText(font, small, new Vector2(pmin.X + 19, hy - small * 0.5f), U(sc), label);
-            rx -= pillW + 8;
+            rx -= GuideCardPill(dl, "##guide_stop", rx, hy, "Stop", GuidePill.Stop, "Stop recording this step. It is marked cancelled; an agent can queue it again.", out var stop) + 8;
+            if (stop) QueueCancel(running.Id);
         }
         else if (showDismiss)
         {
@@ -624,10 +648,25 @@ public partial class WhatsAnAiBridge
             ImGui.InvisibleButton("##guide_dismiss", new Vector2(16, 16));
             var hov = ImGui.IsItemHovered();
             if (ImGui.IsItemClicked()) GuideDismiss();
-            if (hov) ImGui.SetTooltip("Dismiss this instruction");
+            // On a step that offers Done the x is Cancel: the asker reads the mark and stops instead of waiting out its timeout.
+            if (hov) GuideTooltip(a.OfferDone ? "Cancel this step. The agent stops waiting for it." : "Dismiss this instruction");
             if (hov) dl.AddRectFilled(bx, bx + new Vector2(16, 16), U(GuideToastLine), 0f);
             DrawCloseGlyph(dl, new Vector2(rx - 8, hy), 3.5f, U(hov ? GuideToastText : GuideToastMuted, hov ? 1f : 0.8f));
             rx -= 16 + 8;
+        }
+        if (a.OfferDone && a.Mark == null)
+        {
+            // Done: the one thing to press. On a waiting card it tells the agent to check now; on detected / settling it
+            // ends the settle wait and captures right away.
+            rx -= GuideCardPill(dl, "##guide_done", rx, hy, "Done", GuidePill.Primary,
+                "You did it: the agent checks what it watches now instead of waiting.", out var done) + 8;
+            if (done) GuideMarkDone();
+        }
+        else if (checking)
+        {
+            rx -= GuideCardPill(dl, "##guide_undone", rx, hy, "Not done yet", GuidePill.Secondary,
+                "Takes Done back: the step waits for you again.", out var undo) + 8;
+            if (undo) GuideUnmarkDone();
         }
         if (g.status is "waiting" or "failed" && g.instructionSince is DateTime since)
         {
@@ -648,16 +687,18 @@ public partial class WhatsAnAiBridge
             dl.AddText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(GuideToastMuted), t);
             rx -= pillW + 10;
         }
-        // The guide's title (the experiment), dimmed caps in the space left on the title row (cached caps). With several
-        // agents connected it starts with who asked, so two agents' instructions never read as one voice.
+        // The guide's title (the experiment), dimmed caps in the space left on the title row (cached caps). With two or
+        // more agents active it starts with who asked, by its readable name (never a folder or a branch), so two agents'
+        // instructions never read as one voice. Recomposed only when that name or the title change.
         var titleShown = g.title;
         if (_guideUi.ShowWho && g.who != null)
         {
             var u0 = _guideUi;
-            if (!ReferenceEquals(u0.WhoTitleWho, g.who) || !ReferenceEquals(u0.WhoTitleTitle, g.title))
+            var name = ag.NameOf(g.who);
+            if (!string.Equals(u0.WhoTitleName, name, StringComparison.Ordinal) || !ReferenceEquals(u0.WhoTitleTitle, g.title))
             {
-                u0.WhoTitleWho = g.who; u0.WhoTitleTitle = g.title;
-                u0.WhoTitle = g.title == null ? g.who : $"{g.who} - {g.title}";
+                u0.WhoTitleName = name; u0.WhoTitleTitle = g.title;
+                u0.WhoTitle = g.title == null ? name : $"{name} - {g.title}";
             }
             titleShown = u0.WhoTitle;
         }
@@ -688,18 +729,14 @@ public partial class WhatsAnAiBridge
             else
             {
                 var clipped = GuideClipText(text, textMax * (f / msgSize));
-                var col = compact ? U(GuideToastMuted) : U(GuideToastText, g.status is "captured" or "detected" or "settling" ? 0.85f : 0.95f);
+                var col = compact ? U(GuideToastMuted) : U(GuideToastText, checking || g.status is "captured" or "detected" or "settling" or "unseen" ? 0.85f : 0.95f);
                 dl.AddText(font, msgSize, new Vector2(textX, my), col, clipped);
                 if (!ReferenceEquals(clipped, text) || (g.title != null && g.instruction != null && !compact))
                 {
                     ImGui.SetCursorScreenPos(new Vector2(textX, my));
                     ImGui.InvisibleButton("##guide_text", new Vector2(textMax, msgSize));
                     if (ImGui.IsItemHovered())
-                    {
-                        ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 1f);
-                        ImGui.SetTooltip(g.title != null && g.instruction != null && !compact ? $"{g.title}\n{g.instruction}" : text);
-                        ImGui.PopStyleVar();
-                    }
+                        GuideTooltip(g.title != null && g.instruction != null && !compact ? $"{g.title}\n{g.instruction}" : text);
                 }
             }
         }
@@ -721,6 +758,74 @@ public partial class WhatsAnAiBridge
 
         ImGui.SetCursorScreenPos(p);
         ImGui.Dummy(new Vector2(GuideWidth, h + GuideEdge * 2));
+    }
+
+    /// <summary>A tooltip at full opacity, whatever the card's eased alpha is (the card may be ghosted; its tooltip never is).</summary>
+    private static void GuideTooltip(string text)
+    {
+        ImGui.PushStyleVar(ImGuiStyleVar.Alpha, 1f);
+        ImGui.SetTooltip(text);
+        ImGui.PopStyleVar();
+    }
+
+    /// <summary>
+    /// The card's title-row pills: Primary = the one thing to press (accent fill, a check, ink text, faux bold),
+    /// Secondary = a quiet alternative (hairline on the ink, muted text), Stop = the quiet one that turns red on hover
+    /// with a stop square. All in the toast family's fixed colours.
+    /// </summary>
+    private enum GuidePill { Primary, Secondary, Stop }
+
+    /// <summary>
+    /// A pill on the card's title row, its right edge at <paramref name="rx"/>, centred on <paramref name="cy"/>, drawn on
+    /// the draw list over an InvisibleButton (takes the mouse only over itself). Returns its width, so the caller lays the
+    /// row out from the right edge inwards. Allocation-free: the label is a literal.
+    /// </summary>
+    private static float GuideCardPill(ImDrawListPtr dl, string id, float rx, float cy, string label, GuidePill kind, string tooltip, out bool clicked)
+    {
+        var font = ImGui.GetFont();
+        var f = ImGui.GetFontSize();
+        var small = f * 0.85f;
+        var glyphW = kind == GuidePill.Secondary ? 0f : 11f;
+        var tw = ImGui.CalcTextSize(label).X * (small / f);
+        var pillW = tw + glyphW + 20;
+        var pillH = small + 8;
+        var pmin = new Vector2(rx - pillW, cy - pillH * 0.5f);
+        var pmax = pmin + new Vector2(pillW, pillH);
+        ImGui.SetCursorScreenPos(pmin);
+        ImGui.InvisibleButton(id, new Vector2(pillW, pillH));
+        var hov = ImGui.IsItemHovered();
+        clicked = ImGui.IsItemClicked();
+        if (hov) GuideTooltip(tooltip);
+        var tx = pmin.X + 10;
+        switch (kind)
+        {
+            case GuidePill.Primary:
+            {
+                // Dark ink on the bright accent, like the check on a captured dot: the one control that asks to be pressed.
+                var ink = U(new Vector4(0.05f, 0.08f, 0.06f, 1f));
+                dl.AddRectFilled(pmin, pmax, U(ToneAccent, hov ? 1f : 0.85f), 0f);
+                dl.AddLine(new Vector2(tx, cy + 0.2f), new Vector2(tx + 2.6f, cy + 2.8f), ink, 1.8f);
+                dl.AddLine(new Vector2(tx + 2.6f, cy + 2.8f), new Vector2(tx + 7.4f, cy - 2.8f), ink, 1.8f);
+                dl.AddText(font, small, new Vector2(tx + glyphW, cy - small * 0.5f), ink, label);
+                dl.AddText(font, small, new Vector2(tx + glyphW + 0.6f, cy - small * 0.5f), ink, label);
+                break;
+            }
+            case GuidePill.Stop:
+            {
+                var sc = U(hov ? ToneBad : GuideToastMuted);
+                dl.AddRectFilled(pmin, pmax, hov ? U(ToneBad, 0.22f) : U(GuideToastLine, 0.7f), 0f);
+                dl.AddRect(pmin, pmax, U(hov ? ToneBad : GuideToastLine), 0f);
+                dl.AddRectFilled(new Vector2(tx, cy - 3.5f), new Vector2(tx + 7, cy + 3.5f), sc, 1f);
+                dl.AddText(font, small, new Vector2(tx + glyphW, cy - small * 0.5f), sc, label);
+                break;
+            }
+            default:
+                dl.AddRectFilled(pmin, pmax, U(GuideToastLine, hov ? 1f : 0.7f), 0f);
+                dl.AddRect(pmin, pmax, U(hov ? GuideToastMuted : GuideToastLine), 0f);
+                dl.AddText(font, small, new Vector2(tx, cy - small * 0.5f), U(hov ? GuideToastText : GuideToastMuted), label);
+                break;
+        }
+        return pillW;
     }
 
     /// <summary>
@@ -773,6 +878,7 @@ public partial class WhatsAnAiBridge
                 break;
             case "detected":
             case "settling":
+            case "checking":
             {
                 var a0 = (float)(now * 4.5 % (Math.PI * 2));
                 dl.PathArcTo(c, r, a0, a0 + 4.2f, 18);
@@ -780,6 +886,13 @@ public partial class WhatsAnAiBridge
                 if (status == "settling") dl.AddCircleFilled(c, 2f * s, col, 10);
                 break;
             }
+            case "unseen":
+                // An eye (two arcs, a pupil) with a slash through it: looked, saw nothing.
+                dl.AddBezierCubic(new Vector2(c.X - 8f * s, c.Y), new Vector2(c.X - 3.5f * s, c.Y - 6.5f * s), new Vector2(c.X + 3.5f * s, c.Y - 6.5f * s), new Vector2(c.X + 8f * s, c.Y), col, t, 12);
+                dl.AddBezierCubic(new Vector2(c.X - 8f * s, c.Y), new Vector2(c.X - 3.5f * s, c.Y + 6.5f * s), new Vector2(c.X + 3.5f * s, c.Y + 6.5f * s), new Vector2(c.X + 8f * s, c.Y), col, t, 12);
+                dl.AddCircleFilled(c, 2.2f * s, col, 10);
+                dl.AddLine(new Vector2(c.X - 6.5f * s, c.Y + 6.5f * s), new Vector2(c.X + 6.5f * s, c.Y - 6.5f * s), col, t);
+                break;
             case "captured":
                 dl.AddCircle(c, r, col, 24, t);
                 dl.AddLine(new Vector2(c.X - 3.6f * s, c.Y + 0.2f * s), new Vector2(c.X - 1f * s, c.Y + 2.8f * s), col, t);
@@ -808,9 +921,15 @@ public partial class WhatsAnAiBridge
             "settling" => "Still changing" + dots + " keep holding still",
             "captured" => g.detail ?? "Recorded.",
             "failed" => g.detail ?? "Nothing lasting changed. Do it once more.",
+            "unseen" => g.detail ?? "You said done, but nothing I watch changed. I'll look for another way to see it.",
             _ => null,
         };
     }
+
+    // Done pressed, no verdict yet: the agent's own voice, dots animated like the progress sublines.
+    private static string GuideCheckingLine(double now) => "Got it - I'm looking for that change" + new string('.', 1 + (int)(now * 2.5) % 3);
+    // Waiting for a while with nothing seen: the agent says so and points at the way to answer. A literal: nothing allocates.
+    private const string GuideUnseenLine = "I can't see that change yet - if you already did it, press Done";
 
     // ── Flow glyphs ──────────────────────────────────────────────────
 
