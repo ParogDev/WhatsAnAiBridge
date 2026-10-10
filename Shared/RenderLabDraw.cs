@@ -141,7 +141,7 @@ public partial class WhatsAnAiBridge
         foreach (var run in f.Walls)
         {
             var d = run.Distance;
-            for (var i = 0; i < d.Length; i++) if (d[i] > far && float.IsFinite(d[i])) far = d[i];
+            for (var i = 0; i < run.Count; i++) if (d[i] > far && float.IsFinite(d[i])) far = d[i];
         }
         u.Far = u.Far < 0 ? far : u.Far + (far - u.Far) * (1f - MathF.Exp(-dt * 5f));
         var inv = 1f / (u.Far - RlWallFull);
@@ -150,7 +150,7 @@ public partial class WhatsAnAiBridge
         foreach (var run in f.Walls)
         {
             var pts = run.Points;
-            var n = pts.Length;
+            var n = run.Count;
             if (n < 2 || run.Distance.Length < n || run.Height.Length < n) continue;
             RlEnsure(ref u.Alpha, n);
             var a = u.Alpha;
@@ -215,7 +215,7 @@ public partial class WhatsAnAiBridge
     {
         var u = _rl;
         var p = f.Path;
-        if (p == null || p.Points.Length < 2 || p.Along.Length < p.Points.Length)
+        if (p == null || p.Count < 2 || p.Points.Length < p.Count || p.Along.Length < p.Count)
         {
             RlForgetPath();
             return;
@@ -227,7 +227,7 @@ public partial class WhatsAnAiBridge
         u.LastChanged = p.Changed;
         var k = RlSmooth(p.Changed / RlReplanSec);
 
-        var target = p.Points[^1];
+        var target = p.Points[p.Count - 1];
         var tOk = float.IsFinite(target.X) && float.IsFinite(target.Y);
         var cur = u.Cur;
         RlBuildRibbon(p, cur, tOk ? target : null);
@@ -262,7 +262,7 @@ public partial class WhatsAnAiBridge
     {
         var src = p.Points;
         var along = p.Along;
-        var n = src.Length;
+        var n = p.Count;
         RlEnsure(ref b.Pts, 2 * n + 1);
         RlEnsure(ref b.Along, 2 * n + 1);
         RlEnsure(ref b.Alpha, 2 * n + 1);

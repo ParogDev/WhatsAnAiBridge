@@ -22,7 +22,8 @@ namespace WhatsAnAiBridge;
 /// - Path: A* to a target (waypoint, area transition, or an entity path substring) on a worker thread when the player
 ///   changes cell (at most every 150 ms), simplified by line of sight, smoothed (Chaikin, heights too), and trimmed to
 ///   start at the player's live position so re-plans never draw backwards from the feet.
-/// lab.set {walls?, path?, target?, delayMs?}, lab.state.
+/// - Bars: a marker at HealthBars' own anchor for each nearby monster and player (RenderLabBars.cs).
+/// lab.set {walls?, path?, bars?, target?, delayMs?}, lab.state.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
@@ -30,7 +31,7 @@ public partial class WhatsAnAiBridge
 
     private sealed class LabState
     {
-        public bool Walls, Path;
+        public bool Walls, Path, Bars;
         public string Target = "waypoint";
         public double DelayMs = 5;
         // area cache
@@ -44,11 +45,19 @@ public partial class WhatsAnAiBridge
         // path (world space)
         public volatile Vector3[]? PathWorld; public string TargetLabel = ""; public long PathChangedAt;
         public (int x, int y) PathCell = (int.MinValue, 0); public long PathPlannedAt; public Task? Planning;
+        public string? NoTargetFor;   // the target the "no target" label was built for (built once, not every retry)
         public string? LastError;
         public readonly LabFrame Frame = new();
     }
 
     private readonly LabState _lab = new();
+    private readonly List<LabWallRun> _labWallBuf = new();
+    private readonly List<Vector2> _labPathPts = new();
+    private readonly List<float> _labPathAlong = new();
+    private readonly LabPath _labPath = new();
+    // Wall cast scratch: run lists recycled between casts, one array for the smoothing passes.
+    private readonly Stack<List<(Vector3 ground, float dist)>> _labRunPool = new();
+    private (Vector3 ground, float dist)[] _labSmooth = [];
 
     partial void DrawRenderLabImpl(LabFrame f);
 
@@ -58,6 +67,7 @@ public partial class WhatsAnAiBridge
         {
             if (p?["walls"] is { } w) _lab.Walls = w.Value<bool>();
             if (p?["path"] is { } pa) _lab.Path = pa.Value<bool>();
+            if (p?["bars"] is { } ba) _lab.Bars = ba.Value<bool>();
             if (p?["target"]?.Value<string>() is { Length: > 0 } t) { _lab.Target = t; _lab.PathWorld = null; _lab.PathCell = (int.MinValue, 0); }
             if (p?["delayMs"] is { } d) _lab.DelayMs = Math.Clamp(d.Value<double>(), 0, 100);
             return LabStateJson();
@@ -69,7 +79,7 @@ public partial class WhatsAnAiBridge
 
     private JObject LabStateJson() => new()
     {
-        ["walls"] = _lab.Walls, ["path"] = _lab.Path, ["target"] = _lab.Target, ["delayMs"] = _lab.DelayMs,
+        ["walls"] = _lab.Walls, ["path"] = _lab.Path, ["bars"] = _lab.Bars, ["target"] = _lab.Target, ["delayMs"] = _lab.DelayMs,
         ["wallRuns"] = _lab.WallRuns.Count, ["pathPoints"] = _lab.PathWorld?.Length ?? 0, ["targetLabel"] = _lab.TargetLabel,
         ["calibrated"] = _lab.CamOffset >= 0 && _lab.PosOffset >= 0, ["error"] = _lab.LastError,
     };
@@ -77,7 +87,7 @@ public partial class WhatsAnAiBridge
     /// <summary>Called from Render, after the other drawers.</summary>
     private void RenderLabFrame()
     {
-        if (!_lab.Walls && !_lab.Path) return;
+        if (!_lab.Walls && !_lab.Path && !_lab.Bars) return;
         if (!GameController.InGame || GameController.Player == null) return;
         try
         {
@@ -92,6 +102,7 @@ public partial class WhatsAnAiBridge
             if (_lab.Walls) { LabCastWalls(cell, player); LabProjectWalls(f, m, half, player); }
             if (_lab.Path) { LabPlanPath(cell); LabProjectPath(f, m, half, player); }
             DrawRenderLabImpl(f);
+            if (_lab.Bars) LabDrawBars(m, half);
             _lab.LastError = null;
         }
         catch (Exception ex)
@@ -135,11 +146,11 @@ public partial class WhatsAnAiBridge
             }
         }
         if (_lab.CamOffset < 0 || _lab.PosOffset < 0) return true;
-        byte[] mb, pb;
-        using (mem.DisableCaching()) { mb = mem.ReadBytes(_lab.CamAddress + _lab.CamOffset, 64); pb = mem.ReadBytes(r.Address + _lab.PosOffset, 12); }
-        if (mb is not { Length: 64 } || pb is not { Length: 12 }) return true;
+        // Fresh and allocation-free: straight from the leaf backend (no page cache, no arrays).
+        var freshM = RawRead<Matrix4x4>(_lab.CamAddress + _lab.CamOffset);
+        var freshP = RawRead<Vector3>(r.Address + _lab.PosOffset);
         var now = Stopwatch.GetTimestamp();
-        _lab.History.Add((now, MemoryMarshal.Read<Matrix4x4>(mb), new Vector3(BitConverter.ToSingle(pb, 0), BitConverter.ToSingle(pb, 4), BitConverter.ToSingle(pb, 8))));
+        _lab.History.Add((now, freshM, freshP));
         while (_lab.History.Count > 2 && _lab.History[0].t < now - Stopwatch.Frequency / 4) _lab.History.RemoveAt(0);
         var t = now - (long)(_lab.DelayMs * Stopwatch.Frequency / 1000);
         (m, player) = LabStateAt(t);
@@ -175,6 +186,7 @@ public partial class WhatsAnAiBridge
     {
         if (cell == _lab.RayCell) return;
         _lab.RayCell = cell;
+        foreach (var old in _lab.WallRuns) LabRecycleRun(old);
         _lab.WallRuns.Clear();
         float px = player.X / GridToWorld, py = player.Y / GridToWorld;
         List<(Vector3, float)>? run = null;
@@ -209,18 +221,25 @@ public partial class WhatsAnAiBridge
                 run.Add((new Vector3(h.X * GridToWorld, h.Y * GridToWorld, GroundZ(h.X, h.Y)), Vector2.Distance(h, new Vector2(px, py)) * GridToWorld));
             else
             {
-                if (run is { Count: >= 2 }) _lab.WallRuns.Add(run);
-                run = hit is { } h2 ? [(new Vector3(h2.X * GridToWorld, h2.Y * GridToWorld, GroundZ(h2.X, h2.Y)), Vector2.Distance(h2, new Vector2(px, py)) * GridToWorld)] : null;
+                if (run is { Count: >= 2 }) _lab.WallRuns.Add(run); else if (run != null) LabRecycleRun(run);
+                run = null;
+                if (hit is { } h2)
+                {
+                    run = _labRunPool.Count > 0 ? _labRunPool.Pop() : new List<(Vector3 ground, float dist)>();
+                    run.Add((new Vector3(h2.X * GridToWorld, h2.Y * GridToWorld, GroundZ(h2.X, h2.Y)), Vector2.Distance(h2, new Vector2(px, py)) * GridToWorld));
+                }
             }
             last = hit;
         }
-        if (run is { Count: >= 2 }) _lab.WallRuns.Add(run);
+        if (run is { Count: >= 2 }) _lab.WallRuns.Add(run); else if (run != null) LabRecycleRun(run);
         // Grid steps show as zigzags: smooth each run (two passes of a 3-point average, ends kept), heights re-read.
         foreach (var r in _lab.WallRuns)
             for (var pass = 0; pass < 2; pass++)
             {
-                var src = r.ToArray();
-                for (var i = 1; i < src.Length - 1; i++)
+                LabGrow(ref _labSmooth, r.Count);
+                var src = _labSmooth;
+                r.CopyTo(src);
+                for (var i = 1; i < r.Count - 1; i++)
                 {
                     var a = (src[i - 1].ground + src[i].ground * 2 + src[i + 1].ground) / 4;
                     r[i] = (a with { Z = GroundZ(a.X / GridToWorld, a.Y / GridToWorld) }, src[i].dist);
@@ -228,12 +247,20 @@ public partial class WhatsAnAiBridge
             }
     }
 
+    private void LabRecycleRun(List<(Vector3 ground, float dist)> run) { run.Clear(); _labRunPool.Push(run); }
+
     private void LabProjectWalls(LabFrame f, Matrix4x4 m, Vector2 half, Vector3 player)
     {
         const float wallHeight = 60f;   // world units drawn as the wall face (up is -Z)
-        foreach (var run in _lab.WallRuns)
+        for (var k = 0; k < _lab.WallRuns.Count; k++)
         {
-            var pts = new Vector2[run.Count]; var dist = new float[run.Count]; var hgt = new float[run.Count];
+            var run = _lab.WallRuns[k];
+            // Reuse last frame's run objects and arrays (they only grow): no garbage per frame, even while re-casting.
+            if (k >= _labWallBuf.Count) _labWallBuf.Add(new LabWallRun());
+            var buf = _labWallBuf[k];
+            LabGrow(ref buf.Points, run.Count); LabGrow(ref buf.Distance, run.Count); LabGrow(ref buf.Height, run.Count);
+            buf.Count = run.Count;
+            var (pts, dist, hgt) = (buf.Points, buf.Distance, buf.Height);
             for (var i = 0; i < run.Count; i++)
             {
                 var (g, _) = run[i];
@@ -241,8 +268,14 @@ public partial class WhatsAnAiBridge
                 hgt[i] = Vector2.Distance(pts[i], Project(m, half, g with { Z = g.Z - wallHeight }));
                 dist[i] = Vector2.Distance(new Vector2(g.X, g.Y), new Vector2(player.X, player.Y));
             }
-            f.Walls.Add(new LabWallRun(pts, dist, hgt));
+            f.Walls.Add(buf);
         }
+    }
+
+    /// <summary>Grows a reused buffer to at least n (doubling), keeping it otherwise.</summary>
+    private static void LabGrow<T>(ref T[] arr, int n)
+    {
+        if (arr.Length < n) arr = new T[Math.Max(n, Math.Max(16, arr.Length * 2))];
     }
 
     // ── Path ──
@@ -253,7 +286,13 @@ public partial class WhatsAnAiBridge
         if (cell == _lab.PathCell && _lab.PathWorld != null) return;
         if (now - _lab.PathPlannedAt < Stopwatch.Frequency * 150 / 1000) return;
         var target = LabFindTarget(out var label);
-        if (target == null) { _lab.TargetLabel = $"no target '{_lab.Target}' loaded"; _lab.PathWorld = null; return; }
+        if (target == null)
+        {
+            _lab.PathPlannedAt = now;   // retry at the same 150 ms pace
+            if (_lab.NoTargetFor != _lab.Target) { _lab.NoTargetFor = _lab.Target; _lab.TargetLabel = $"no target '{_lab.Target}' loaded"; }
+            _lab.PathWorld = null; return;
+        }
+        _lab.NoTargetFor = null;
         _lab.PathCell = cell; _lab.PathPlannedAt = now;
         var grid = _lab.Grid!; var goal = ((int)(target.Value.X / GridToWorld), (int)(target.Value.Y / GridToWorld));
         _lab.Planning = Task.Run(() =>
@@ -270,17 +309,26 @@ public partial class WhatsAnAiBridge
     private Vector3? LabFindTarget(out string label)
     {
         var t = _lab.Target;
-        var es = GameController.Entities.Where(e => e.IsValid);
-        es = t switch
+        // A plain loop, nearest by squared distance from the player's Render: no LINQ, no sort, no DistancePlayer.
+        // It runs every 150 ms while no target is loaded, so it must not allocate.
+        var me = GameController.Player.GetComponent<Render>() is { } pr ? RenderPosNum(pr) : default;
+        Entity? best = null; Vector3 bestPos = default; var bestD = float.MaxValue;
+        foreach (var e in GameController.Entities)
         {
-            "waypoint" => es.Where(e => e.Path?.Contains("Waypoint", StringComparison.OrdinalIgnoreCase) == true),
-            "transition" => es.Where(e => e.Type == EntityType.AreaTransition),
-            _ => es.Where(e => e.Path?.Contains(t, StringComparison.OrdinalIgnoreCase) == true),
-        };
-        var best = es.OrderBy(e => e.DistancePlayer).FirstOrDefault();
+            if (e == null || !e.IsValid) continue;
+            var match = t switch
+            {
+                "waypoint" => e.Path?.Contains("Waypoint", StringComparison.OrdinalIgnoreCase) == true,
+                "transition" => e.Type == EntityType.AreaTransition,
+                _ => e.Path?.Contains(t, StringComparison.OrdinalIgnoreCase) == true,
+            };
+            if (!match || e.GetComponent<Render>() is not { } r) continue;
+            var p = RenderPosNum(r);
+            var d = Vector2.DistanceSquared(new Vector2(p.X, p.Y), new Vector2(me.X, me.Y));
+            if (d < bestD) { bestD = d; best = e; bestPos = p; }
+        }
         label = best == null ? "" : t == "transition" ? $"Area transition: {best.RenderName}" : best.RenderName is { Length: > 0 } n ? n : t;
-        var r = best?.GetComponent<Render>();
-        return r == null ? null : RenderPosNum(r);
+        return best == null ? null : bestPos;
     }
 
     private void LabProjectPath(LabFrame f, Matrix4x4 m, Vector2 half, Vector3 player)
@@ -296,7 +344,7 @@ public partial class WhatsAnAiBridge
             if (d < bestD) { bestD = d; seg = i; start = c; }
             if (i > 40 && d > bestD * 4) break;   // well past the nearby part
         }
-        var pts = new List<Vector2>(); var along = new List<float>();
+        var pts = _labPathPts; var along = _labPathAlong; pts.Clear(); along.Clear();   // reused every frame
         float acc = 0; var prev = player with { Z = start.Z };
         void Add(Vector3 p)
         {
@@ -313,8 +361,12 @@ public partial class WhatsAnAiBridge
         pts.Add(Project(m, half, prev)); along.Add(0);
         Add(start);
         for (var i = seg + 1; i < w.Length; i++) Add(w[i]);
-        f.Path = new LabPath(pts.ToArray(), along.ToArray(), acc, _lab.TargetLabel,
-            (float)((Stopwatch.GetTimestamp() - _lab.PathChangedAt) / (double)Stopwatch.Frequency));
+        var lp = _labPath;   // one instance, arrays only grow
+        LabGrow(ref lp.Points, pts.Count); LabGrow(ref lp.Along, pts.Count);
+        pts.CopyTo(lp.Points); along.CopyTo(lp.Along);
+        lp.Count = pts.Count; lp.Total = acc; lp.TargetLabel = _lab.TargetLabel;
+        lp.Changed = (float)((Stopwatch.GetTimestamp() - _lab.PathChangedAt) / (double)Stopwatch.Frequency);
+        f.Path = lp;
     }
 
     private static Vector3 ClosestOnSegment(Vector3 a, Vector3 b, Vector3 p)
