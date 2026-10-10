@@ -91,6 +91,7 @@ public partial class WhatsAnAiBridge
         if (!GameController.InGame || GameController.Player == null) return;
         try
         {
+            if (LabBigPanelOpen()) return;   // never draw over the passive tree, a vendor, the atlas...
             if (!LabEnsureArea() || !LabSample(out var m, out var player, out var half)) return;
             var f = _lab.Frame;
             f.Walls.Clear(); f.Path = null;
@@ -108,6 +109,27 @@ public partial class WhatsAnAiBridge
         catch (Exception ex)
         {
             if (_lab.LastError != ex.Message) { _lab.LastError = ex.Message; LogError($"[RenderLab] {ex}"); }
+        }
+    }
+
+    private long _labPanelsAt; private bool _labPanelsOpen;
+
+    /// <summary>Whether a fullscreen panel (passive tree, atlas...) or a large one (vendor, trade, stash...) is open,
+    /// sampled every 50 ms (IsVisible walks the parent chain, ~8 us per panel) and cached between samples.</summary>
+    private bool LabBigPanelOpen()
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (now - _labPanelsAt < Stopwatch.Frequency / 20) return _labPanelsOpen;
+        _labPanelsAt = now;
+        var ui = GameController.IngameState.IngameUi;
+        _labPanelsOpen = AnyVisible(ui.FullscreenPanels) || AnyVisible(ui.LargePanels);
+        return _labPanelsOpen;
+
+        static bool AnyVisible(List<UiElement>? panels)
+        {
+            if (panels == null) return false;
+            for (var i = 0; i < panels.Count; i++) if (panels[i] is { IsVisible: true }) return true;
+            return false;
         }
     }
 
