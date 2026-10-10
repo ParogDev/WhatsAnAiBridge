@@ -548,8 +548,8 @@ public partial class WhatsAnAiBridge
                 if (moved.Count == 0) Why = $"rel [{string.Join(",", t.Rel)}] from {elements.Count} match(es): a step does not exist (UI tree changed?)";
                 elements = moved;
             }
-            if (elements.Count > 0 && elements.All(e => !e.IsVisible)) Why ??= $"{elements.Count} match(es), none visible";
-            if (t.Rel != null) elements = elements.Select(e => Navigate(e, t.Rel)).Where(e => e != null).Select(e => e!).ToList();
+            if (elements.Count > 0 && elements.All(e => !e.IsVisible))
+                Why ??= t.Rel != null ? $"{elements.Count} element(s) after rel [{string.Join(",", t.Rel)}], none visible" : $"{elements.Count} match(es), none visible";
             var pan = elements.Count > 0 ? WorldMapPan() : default;
             foreach (var e in elements)
             {
