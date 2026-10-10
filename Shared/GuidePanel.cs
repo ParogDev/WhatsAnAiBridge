@@ -213,7 +213,7 @@ public partial class WhatsAnAiBridge
         var mustAct = g.status is "waiting" or "failed" && g.instruction != null;
         var bridgeDown = _tcpServer?.IsRunning != true;
         var at = GuideAttentionFor(boxes.Count > 0, hovered, now - u.HoverAt, needsUser, mustAct, avoid,
-            CombatNear(now), quiet, hasCard || q.Next != null, g.rev > 0 || bridgeDown, bridgeDown);
+            CombatNear(now), quiet, hasCard || q.Next != null, g.rev > 0 || bridgeDown, bridgeDown, toastsH > 0);
         FeedGuideToasts(g, at, hl, utc);
         PublishAttention(at);
         var hide = at.CardHidden;
@@ -311,7 +311,7 @@ public partial class WhatsAnAiBridge
         bool ToastHold, bool DropEchoes, bool CardHidden, bool ShowDot);
 
     private static GuideAttention GuideAttentionFor(bool highlights, bool hovered, double hoverAgo, bool needsUser, bool mustAct, Vector2 avoid,
-        bool combat, bool quiet, bool peekable, bool dotWanted, bool bridgeDown)
+        bool combat, bool quiet, bool peekable, bool dotWanted, bool bridgeDown, bool toastsUp)
     {
         var explicitly = hovered || hoverAgo < GuideHoverKeepSec;   // rule 7: a hovered surface shows until 5 s after
         // rule 8: a card that asks the user to act is never ghosted - it is the thing to look at, highlight or not.
@@ -321,6 +321,7 @@ public partial class WhatsAnAiBridge
         // rule 5 (quiet dot): after the quiet hide the card leaves a dot where it was; hovering the dot brings the card
         // back (rule 7 keeps it 5 s after the mouse leaves). Only quiet states: a card asking for the user is never quiet.
         var hidden = quiet && !mustAct && !(explicitly && peekable);
+        // With the card hidden its toasts anchor at its home, right where the dot sits: the dot waits until they are gone.
         // rule 1 (combat): while a hostile is near, the non-actionable toasts (agent, result) wait. Cards, warnings,
         // errors and steps are untouched: what asks the user to act always wins (rule 8).
         // rule 6 (repeats): equal lines merge into one toast with a count (always on, in the feed); a line that a visible
@@ -329,7 +330,7 @@ public partial class WhatsAnAiBridge
         return new GuideAttention(highlights, hovered, hoverAgo, needsUser, mustAct, avoid != Vector2.Zero,
             combat, quiet, peekable, bridgeDown,
             alpha, !ghost, mustAct, !ghost, !ghost, true, avoid,
-            combat, highlights, hidden, hidden && dotWanted);
+            combat, highlights, hidden, hidden && dotWanted && !toastsUp);
     }
 
     /// <summary>
