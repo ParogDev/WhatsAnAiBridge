@@ -26,6 +26,15 @@ namespace WhatsAnAiBridge;
 /// caller's own targets and clear=true clears only them (clear + force clears every layer), so another session's call
 /// never removes a question it asked. The overlay draws every layer together; each keeps its own title, sequence and
 /// current step. Reads report the caller's layer at the top level plus `layers`, the combined view.
+/// Nothing lingers (the user: "this here is obnoxious and shouldn't stick around at all"), whatever the agent asked for:
+///   - Lifetime: an unanswered ask and a context target last durationSec, else HlDefaultLifeSec (25 s), then fade out
+///     and expire (state: expired; an expired ask no longer counts as pending). Primary and secondary targets stay until
+///     cleared, replaced or durationSec.
+///   - Step: a session's highlight set while its own guide step is active (waiting / detected / settling) goes with that
+///     step: when the card moves to another step, finishes (captured, done, failed...), is cleared or dismissed.
+///   - Big panels: while an NPC dialogue or a large / fullscreen panel is open, a box that is not inside it is "about
+///     something else": context and secondary ones overlapping it are hidden (covered), and every unanswered ask about
+///     something else shrinks to a small pill at the screen edge (docked). Boxes inside the panel are untouched.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
@@ -49,11 +58,18 @@ public partial class WhatsAnAiBridge
         public string? Key;           // caller's correlation key for the verdict (e.g. "worldmap.stop.10=G2_4_1"); default id: hl<rev>.<index>
         public string? Answer;        // yes | no | skip once the user clicked
         public DateTime? AnsweredAt;
+        public DateTime? EndsAt;      // default lifetime (an unanswered ask, a context target): expires then unless durationSec was given
+        public bool Expired;          // its lifetime ran out: no longer resolved, drawn or asked
     }
 
     /// <summary>One drawable box (an item target can resolve to several).</summary>
+    /// <remarks><c>EndTicks</c>: UTC ticks when it is gone (its lifetime or the layer's durationSec; 0 = no end), so the
+    /// overlay fades it out over the last <see cref="HlFadeSec"/>. <c>Covered</c>: a context / secondary box over an open
+    /// big panel it is not part of - not drawn. <c>Docked</c>: an unanswered ask while a big panel it is not part of is open -
+    /// drawn as a small pill at the screen edge instead of the question strip.</remarks>
     internal readonly record struct HighlightBox(float X, float Y, float W, float H, string? Label, string Tier, int? Order, int TargetIndex,
-        string? Action = null, string? Ask = null, string? Answer = null, bool Panned = false, float PanX = 0, float PanY = 0);
+        string? Action = null, string? Ask = null, string? Answer = null, bool Panned = false, float PanX = 0, float PanY = 0,
+        long EndTicks = 0, bool Covered = false, bool Docked = false);
 
     /// <summary>The user's answer to an asked target, as stored (verdicts.jsonl, guide.verdicts, the observer's agent lane).</summary>
     internal sealed class HighlightVerdict
@@ -97,10 +113,13 @@ public partial class WhatsAnAiBridge
         public bool Auto = true;            // sequences follow the user: a later step appearing, a met condition or the current target leaving moves on
         public Dictionary<int, bool> WasFound = new();   // order -> found at the last resolution
         public string? Session, Who;        // the session that set it (Sessions.cs), or the one a flow / queued step belongs to
-        public int Pending => Targets.Count(t => t.Ask != null && t.Answer == null);
+        public int? StepGen;                // the guide step it goes with (GuideState.StepGen), null = none
+        public int Pending => Targets.Count(t => t.Ask != null && t.Answer == null && !t.Expired);
     }
 
     private const string HlAnon = "anon", HlFlow = "flow", HlQueue = "queue";
+    /// <summary>How long an unanswered ask or a context target stays without durationSec; the overlay fades it over the last HlFadeSec.</summary>
+    internal const double HlDefaultLifeSec = 25, HlFadeSec = 1.5;
     private readonly object _hlLock = new();
     private readonly List<HighlightState> _hlLayers = new();   // drawing order: oldest layer first
     private int _hlRevSeq;                                        // revs are unique across layers (verdict ids hl<rev>.<index>)
@@ -177,7 +196,7 @@ public partial class WhatsAnAiBridge
         {
             if (HlLayerLocked(owner) is not { } hl || targetIndex < 0 || targetIndex >= hl.Targets.Count) return;
             var t = hl.Targets[targetIndex];
-            if (t.Ask == null || t.Answer != null) return;
+            if (t.Ask == null || t.Answer != null || t.Expired) return;
             t.Answer = answer;
             t.AnsweredAt = DateTime.UtcNow;
             for (var i = 0; i < hl.Boxes.Count; i++)
@@ -247,7 +266,7 @@ public partial class WhatsAnAiBridge
                     asked.Add(new JObject
                     {
                         ["index"] = i, ["id"] = t.Key ?? $"hl{l.Rev}.{i}", ["key"] = t.Key, ["ask"] = t.Ask, ["label"] = t.Label,
-                        ["answer"] = t.Answer, ["onScreen"] = l.Boxes.Any(b => b.TargetIndex == i), ["layer"] = l.Owner, ["highlightRev"] = l.Rev,
+                        ["answer"] = t.Answer, ["expired"] = t.Expired, ["onScreen"] = l.Boxes.Any(b => b.TargetIndex == i), ["layer"] = l.Owner, ["highlightRev"] = l.Rev,
                     });
                 }
             }
@@ -270,7 +289,8 @@ public partial class WhatsAnAiBridge
         ["layer"] = l.Owner, ["session"] = l.Session, ["who"] = l.Who, ["mine"] = HlMine(l, owner, label),
         ["rev"] = l.Rev, ["title"] = l.Title, ["current"] = l.Current, ["targets"] = l.Targets.Count,
         ["found"] = l.Boxes.Count, ["asked"] = l.Targets.Count(t => t.Ask != null), ["pending"] = l.Pending,
-        ["until"] = l.Until?.ToString("O"),
+        ["until"] = l.Until?.ToString("O"), ["withStep"] = l.StepGen != null,
+        ["expired"] = l.Targets.Count(t => t.Expired),
     }));
 
     /// <summary>guide.highlight from a request: the caller's own layer (its session, else anon).</summary>
@@ -322,10 +342,18 @@ public partial class WhatsAnAiBridge
                 return Err("bad_target", $"Target {n - 1}: needs item (name), text (element label), path (UI element), panel (+ child) or rect [x,y,w,h].");
             targets.Add(ht);
         }
+        // A session's highlight goes with its own active guide step, if any (read before the lock: never nest the two).
+        var step = session != null ? GuideStepNow() : default;
+        var dur = p?["durationSec"]?.Value<double>();
+        var now = DateTime.UtcNow;
+        if (dur is not > 0 && owner is not (HlFlow or HlQueue))   // the HUD's own layers clear themselves with their step
+            foreach (var t in targets)
+                if (t.Ask != null || t.Tier == "context") t.EndsAt = now.AddSeconds(HlDefaultLifeSec);
         lock (_hlLock)
         {
             var hl = HlLayerOrNewLocked(owner);
             hl.Session = session; hl.Who = who;
+            hl.StepGen = step.Active && step.Session == session ? step.Gen : null;
             hl.Targets = targets;
             hl.Boxes = new(); hl.Missing = new();
             hl.Auto = p?["auto"]?.Value<bool>() != false;
@@ -333,9 +361,8 @@ public partial class WhatsAnAiBridge
             hl.Title = Clip(p?["title"]?.ToString(), 80);
             var orders = targets.Where(t => t.Order != null).Select(t => t.Order!.Value).OrderBy(o => o).ToList();
             hl.Current = p?["current"]?.Type == JTokenType.Integer ? p["current"]!.Value<int>() : orders.Count > 0 ? orders[0] : null;
-            hl.Since = DateTime.UtcNow;
-            var dur = p?["durationSec"]?.Value<double>();
-            hl.Until = dur is > 0 ? DateTime.UtcNow.AddSeconds(Math.Min(dur.Value, 3600)) : null;
+            hl.Since = now;
+            hl.Until = dur is > 0 ? now.AddSeconds(Math.Min(dur.Value, 3600)) : null;
             hl.Rev = ++_hlRevSeq;
             _hlLastResolve = DateTime.MinValue;
         }
@@ -375,21 +402,29 @@ public partial class WhatsAnAiBridge
             return new JObject
             {
                 ["ok"] = true, ["layer"] = owner, ["rev"] = hl?.Rev ?? 0, ["title"] = hl?.Title, ["current"] = hl?.Current, ["who"] = hl?.Who,
-                ["until"] = hl?.Until?.ToString("O"),
+                ["until"] = hl?.Until?.ToString("O"), ["withStep"] = hl?.StepGen != null,
+                ["bigPanels"] = _hlPanels.Count,   // open NPC dialogue / large / fullscreen panels: boxes not inside them are covered or docked
                 ["verdictSeq"] = verdictSeq,   // await_verdicts since=: answers after this call
                 ["targets"] = new JArray((hl?.Targets ?? []).Select((t, i) => new JObject
                 {
                     ["index"] = i, ["item"] = t.Item, ["path"] = t.Path, ["text"] = t.Text, ["within"] = t.Within, ["action"] = t.Action, ["panel"] = t.Panel, ["child"] = t.Child == null ? null : new JArray(t.Child), ["rect"] = t.Rect == null ? null : new JArray(t.Rect),
                     ["label"] = t.Label, ["tier"] = t.Tier, ["order"] = t.Order,
                     ["ask"] = t.Ask, ["key"] = t.Key, ["answer"] = t.Answer, ["answeredAt"] = t.AnsweredAt?.ToString("O"),
+                    ["endsAt"] = t.Answer == null || t.Tier == "context" ? t.EndsAt?.ToString("O") : null, ["expired"] = t.Expired,
                     ["found"] = boxes.Count(b => b.TargetIndex == i),
                 })),
-                ["boxes"] = new JArray(boxes.Select(b => new JObject { ["target"] = b.TargetIndex, ["rect"] = new JArray(b.X, b.Y, b.W, b.H) })),
+                ["boxes"] = new JArray(boxes.Select(b =>
+                {
+                    var o = new JObject { ["target"] = b.TargetIndex, ["rect"] = new JArray(b.X, b.Y, b.W, b.H) };
+                    if (b.Covered) o["covered"] = true;
+                    if (b.Docked) o["docked"] = true;
+                    return o;
+                })),
                 ["worldMapPan"] = boxes.Any(b => b.Panned) ? _wmPanSource : null,
                 ["layers"] = HlLayersJsonLocked(owner, label),
                 ["note"] = hl == null
                     ? others > 0 ? $"You have no highlight; {others} other layer(s) are on screen (layers)." : null
-                    : hl.Missing.Count > 0 ? $"{hl.Missing.Count} target(s) not on screen right now (panel closed, item not visible); they appear when visible." : null,
+                    : hl.Missing.Count > 0 ? $"{hl.Missing.Count} target(s) not on screen right now (panel closed, item not visible, or expired); they appear when visible." : null,
             };
         }
     }
@@ -421,31 +456,41 @@ public partial class WhatsAnAiBridge
         return views;
     }
 
-    /// <summary>Every layer's boxes in one list (no copy for a single layer; never mutate the result).</summary>
+    /// <summary>Every layer's drawn boxes in one list (covered ones are not drawn; no copy for a single layer with none
+    /// covered; never mutate the result).</summary>
     internal static List<HighlightBox> HighlightBoxesOf(List<HighlightLayerView> views)
     {
         if (views.Count == 0) return HlNoBoxes;
-        if (views.Count == 1) return views[0].Boxes;
+        if (views.Count == 1 && !views[0].Boxes.Exists(b => b.Covered)) return views[0].Boxes;
         var all = new List<HighlightBox>();
-        foreach (var v in views) all.AddRange(v.Boxes);
+        foreach (var v in views) foreach (var b in v.Boxes) if (!b.Covered) all.Add(b);
         return all;
     }
 
     /// <summary>Main thread, from Render: re-resolve every layer's targets to screen rects every 100 ms (they follow the UI).</summary>
     private void ResolveHighlights(bool force = false)
     {
-        List<(HighlightState layer, int rev, List<HighlightTarget> targets)> work;
+        List<(HighlightState layer, int rev, List<HighlightTarget> targets, long until)> work;
+        var step = GuideStepNow();   // before the lock: never nest the guide and highlight locks
         lock (_hlLock)
         {
             var utc = DateTime.UtcNow;
-            _hlLayers.RemoveAll(l => l.Until is { } u && utc > u);   // durationSec ran out
+            if (_hlLayers.Count == 0) return;
+            // An unanswered ask's lifetime ends once answered (the answer and its mark stay); a context target's never does.
+            foreach (var l in _hlLayers)
+                foreach (var t in l.Targets)
+                    if (!t.Expired && t.EndsAt is { } e && utc > e && (t.Answer == null || t.Tier == "context")) t.Expired = true;
+            _hlLayers.RemoveAll(l => (l.Until is { } u && utc > u)                                         // durationSec ran out
+                                     || (l.StepGen is { } g && (g != step.Gen || !step.Active))           // its guide step is over
+                                     || (l.Targets.Count > 0 && l.Targets.TrueForAll(t => t.Expired)));   // everything in it expired
             if (_hlLayers.Count == 0) return;
             if (!force && (utc - _hlLastResolve).TotalMilliseconds < 100) return;
             _hlLastResolve = utc;
             work = new(_hlLayers.Count);
-            foreach (var l in _hlLayers) if (l.Targets.Count > 0) work.Add((l, l.Rev, l.Targets.ToList()));
+            foreach (var l in _hlLayers) if (l.Targets.Count > 0) work.Add((l, l.Rev, l.Targets.ToList(), l.Until?.Ticks ?? 0));
         }
-        foreach (var (layer, rev, targets) in work)
+        var panels = HlBigPanels();
+        foreach (var (layer, rev, targets, until) in work)
         {
             var boxes = new List<HighlightBox>();
             var missing = new List<int>();
@@ -454,12 +499,18 @@ public partial class WhatsAnAiBridge
             {
                 var t = targets[i];
                 int before = boxes.Count;
+                if (t.Expired) { missing.Add(i); continue; }
+                var end = t.EndsAt is { } e && (t.Answer == null || t.Tier == "context") ? e.Ticks : 0;
+                if (until != 0 && (end == 0 || until < end)) end = until;
                 try
                 {
                     var found = ResolveTarget(t);
                     var pan = _wmLastPan;   // the pan these boxes were placed with (HighlightSnapshot moves them by the change since)
                     foreach (var (_, x, y, w, h, panned) in found)
-                        boxes.Add(new(x, y, w, h, t.Label, t.Tier, t.Order, i, t.Action, t.Ask, t.Answer, panned, pan.PanX, pan.PanY));
+                    {
+                        var (covered, docked) = HlPanelRule(panels, x, y, w, h, t);
+                        boxes.Add(new(x, y, w, h, t.Label, t.Tier, t.Order, i, t.Action, t.Ask, t.Answer, panned, pan.PanX, pan.PanY, end, covered, docked));
+                    }
                     // Checkbox state (PoE2: byte at +0x60A of the checkbox element, see finding ui.poe2.checkbox-checked).
                     if (t.UntilCond is "checked" or "unchecked" && found.FirstOrDefault(f => f.e != null).e is { } cb)
                         conditionMet[i] = IsChecked(cb) == (t.UntilCond == "checked");
@@ -476,6 +527,53 @@ public partial class WhatsAnAiBridge
                 if (layer.Auto) AutoAdvanceLocked(layer, targets, boxes, conditionMet);
             }
         }
+    }
+
+    // Open NPC dialogue / large / fullscreen panels as screen rects, refreshed with each resolve (main thread).
+    private List<(float x, float y, float w, float h)> _hlPanels = new();
+
+    /// <summary>The open big panels now: the NPC dialogue, IngameUi.LargePanels and FullscreenPanels (main thread, at the
+    /// 100 ms resolve; IsVisible walks the parent chain, ~8 us per panel).</summary>
+    private List<(float x, float y, float w, float h)> HlBigPanels()
+    {
+        var list = new List<(float, float, float, float)>();
+        try
+        {
+            var ui = GameController.IngameState?.IngameUi;
+            if (ui != null)
+            {
+                Add(ui.NpcDialog);
+                if (ui.LargePanels is { } large) foreach (var e in large) Add(e);
+                if (ui.FullscreenPanels is { } full) foreach (var e in full) Add(e);
+            }
+        }
+        catch { }
+        return _hlPanels = list;
+
+        void Add(UiElement? e)
+        {
+            if (e == null || e.Address == 0 || !e.IsVisible) return;
+            var r = e.GetClientRect();
+            if (r.Width > 0 && r.Height > 0) list.Add((r.X, r.Y, r.Width, r.Height));
+        }
+    }
+
+    /// <summary>
+    /// A box against the open big panels: inside one (4 px slack) it is part of what the user is looking at and stays
+    /// as it is. Otherwise, while one is open, a context / secondary box overlapping one is covered (hidden) and an
+    /// unanswered ask is docked (a small pill at the screen edge).
+    /// </summary>
+    private static (bool covered, bool docked) HlPanelRule(List<(float x, float y, float w, float h)> panels, float x, float y, float w, float h, HighlightTarget t)
+    {
+        if (panels.Count == 0) return (false, false);
+        const float slack = 4f;
+        var overlaps = false;
+        foreach (var p in panels)
+        {
+            if (x >= p.x - slack && y >= p.y - slack && x + w <= p.x + p.w + slack && y + h <= p.y + p.h + slack) return (false, false);
+            if (x < p.x + p.w && x + w > p.x && y < p.y + p.h && y + h > p.y) overlaps = true;
+        }
+        return (overlaps && t.Tier is "context" or "secondary", t.Ask != null && t.Answer == null);
     }
 
     /// <summary>A string field, or null when missing, JSON null or empty (empty must never mean "match anything").</summary>
