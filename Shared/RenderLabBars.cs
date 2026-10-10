@@ -31,7 +31,8 @@ public partial class WhatsAnAiBridge
         var now = Stopwatch.GetTimestamp();
         if (now - _hbAnchor.readAt > Stopwatch.Frequency) _hbAnchor = (HealthBarsSetting<bool>("PlaceBarRelativeToGroundLevel"), HealthBarsSetting<float>("GlobalZOffset"), now);
         var t = now - (long)(_lab.DelayMs * Stopwatch.Frequency / 1000);
-        var dl = ImGui.GetBackgroundDrawList();
+        // Foreground: over HealthBars' own bar, or the bracket hides under the very bar it marks (they overlap when aligned).
+        var dl = ImGui.GetForegroundDrawList();
         var gold = ImGui.ColorConvertFloat4ToU32(new Vector4(1f, 0.82f, 0.35f, 0.95f));
         var ink = ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.55f));
         var seen = _labBarSeen; seen.Clear();
