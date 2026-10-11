@@ -162,12 +162,23 @@ public partial class WhatsAnAiBridge
 
     // ── PluginBridge registry ────────────────────────────────────────
 
-    private JObject BridgeMethods()
+    /// <summary>PluginBridge's private registry, or null when this HUD build has no _methods dictionary.</summary>
+    private IDictionary? BridgeRegistry()
     {
         var bridge = GameController.PluginBridge;
         var field = bridge?.GetType().GetField("_methods", BindingFlags.NonPublic | BindingFlags.Instance);
-        if (field?.GetValue(bridge) is not IDictionary dict)
-            return new JObject { ["error"] = "unavailable", ["message"] = "PluginBridge._methods not found in this HUD build (check with hud_type)." };
+        return field?.GetValue(bridge) as IDictionary;
+    }
+
+    private static JObject BridgeUnavailable() =>
+        new() { ["error"] = "unavailable", ["message"] = "PluginBridge._methods not found in this HUD build (check with hud_type)." };
+
+    private static string DelegateSignature(MethodInfo m) =>
+        $"{TypeName(m.ReturnType)} ({string.Join(", ", m.GetParameters().Select(p => $"{TypeName(p.ParameterType)} {p.Name}"))})";
+
+    private JObject BridgeMethods()
+    {
+        if (BridgeRegistry() is not { } dict) return BridgeUnavailable();
         var rows = new List<JObject>();
         foreach (DictionaryEntry e in dict)
         {
@@ -175,7 +186,7 @@ public partial class WhatsAnAiBridge
             if (e.Value is Delegate d)
             {
                 var m = d.Method;
-                row["signature"] = $"{TypeName(m.ReturnType)} ({string.Join(", ", m.GetParameters().Select(p => $"{TypeName(p.ParameterType)} {p.Name}"))})";
+                row["signature"] = DelegateSignature(m);
                 row["delegateType"] = TypeName(d.GetType());
                 row["declaredIn"] = m.DeclaringType?.FullName;
             }
@@ -204,19 +215,9 @@ public partial class WhatsAnAiBridge
         var name = p?["name"]?.Value<string>();
         if (string.IsNullOrWhiteSpace(name))
             return new JObject { ["error"] = "missing_name", ["message"] = "Pass name: a PluginBridge method as hud.bridge_methods lists it, e.g. WhatsARoute.GetState." };
-        var bridge = GameController.PluginBridge;
-        var field = bridge?.GetType().GetField("_methods", BindingFlags.NonPublic | BindingFlags.Instance);
-        if (field?.GetValue(bridge) is not IDictionary dict)
-            return new JObject { ["error"] = "unavailable", ["message"] = "PluginBridge._methods not found in this HUD build (check with hud_type)." };
+        if (BridgeRegistry() is not { } dict) return BridgeUnavailable();
 
-        object? value = null;
-        var found = false;
-        foreach (DictionaryEntry e in dict)
-        {
-            if (!string.Equals(e.Key?.ToString(), name, StringComparison.Ordinal)) continue;
-            value = e.Value; found = true; break;
-        }
-        if (!found)
+        if (!dict.Contains(name))
         {
             var registered = dict.Keys.Cast<object?>().Select(k => k?.ToString() ?? "").OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
             var prefix = name.Contains('.') ? name[..name.IndexOf('.')] : name;
@@ -230,12 +231,16 @@ public partial class WhatsAnAiBridge
                 ["registered"] = new JArray(registered),
             };
         }
+        var value = dict[name];
         if (value is not Delegate d)
             return new JObject { ["error"] = "not_a_delegate", ["message"] = $"'{name}' is registered as {value?.GetType().FullName ?? "null"}, not a delegate: it cannot be called." };
 
         var ps = d.Method.GetParameters();
-        var signature = $"{TypeName(d.Method.ReturnType)} ({string.Join(", ", ps.Select(x => $"{TypeName(x.ParameterType)} {x.Name}"))})";
-        var argTokens = p?["args"] as JArray ?? new JArray();
+        var signature = DelegateSignature(d.Method);
+        var argsToken = p?["args"];
+        if (argsToken != null && argsToken.Type != JTokenType.Null && argsToken is not JArray)
+            return new JObject { ["error"] = "bad_argument", ["message"] = $"args must be an array of scalars ({signature}); got a {argsToken.Type}.", ["signature"] = signature };
+        var argTokens = argsToken as JArray ?? new JArray();
         if (argTokens.Count != ps.Length)
             return new JObject { ["error"] = "arity_mismatch", ["message"] = $"'{name}' takes {ps.Length} argument(s) ({signature}); {argTokens.Count} given.", ["signature"] = signature };
         var args = new object?[ps.Length];
@@ -245,6 +250,8 @@ public partial class WhatsAnAiBridge
             var scalar = t.IsPrimitive || t.IsEnum || t == typeof(string) || t == typeof(decimal);
             if (!scalar)
                 return new JObject { ["error"] = "unsupported_parameter", ["message"] = $"'{name}' parameter {i} ({ps[i].Name}) is a {TypeName(t)}: hud.bridge_call passes scalars only (numbers, strings, bools, enums). Call it from run_csharp instead.", ["signature"] = signature };
+            if (argTokens[i].Type == JTokenType.Null && t.IsValueType)
+                return new JObject { ["error"] = "bad_argument", ["message"] = $"'{name}' parameter {i} ({ps[i].Name}) is a {TypeName(t)}: null is not a value for it.", ["signature"] = signature };
             try { args[i] = argTokens[i].Type == JTokenType.Null ? null : argTokens[i].ToObject(t); }
             catch (Exception ex) { return new JObject { ["error"] = "bad_argument", ["message"] = $"'{name}' parameter {i} ({ps[i].Name}, {TypeName(t)}): {ex.Message}", ["signature"] = signature }; }
         }
