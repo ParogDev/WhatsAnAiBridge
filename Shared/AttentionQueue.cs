@@ -205,7 +205,13 @@ public partial class WhatsAnAiBridge
             var now = DateTime.UtcNow;
             AttnLoadLocked();
             item.Id = AttnNextIdLocked(); item.SessionId = me.Id; item.Who = me.Label; item.CreatedAt = item.QueuedAt = now;
-            if (item.Kind == "ask" && AttnDedupLeaderLocked(item, now) is { } leader) item.MergedInto = leader.Id;
+            if (item.Kind == "ask" && AttnDedupLeaderLocked(item, now) is { } leader)
+            {
+                item.MergedInto = leader.Id;
+                // The card is up already: this asker joins it (its name on the card, the one answer), as the followers
+                // granted with the leader do. Left queued it would get an answer to a card that never named it.
+                if (leader.Status == "showing") { item.Status = "showing"; item.ShownAt = leader.ShownAt; item.VisibleSince = leader.VisibleSince; }
+            }
             _attn.Add(item);
             _attnSeq++;
             // A step or flow turn asked for while this session holds the floor with an implicit turn (a plain guide.set it
@@ -552,11 +558,11 @@ public partial class WhatsAnAiBridge
             if (item.Answer != null) item.Answer.SharedWith = followers.Select(f => f.Who).ToList();
             return;
         }
-        // The leader went away for its own reasons (withdrawn, expired in line): the first follower carries the card on.
+        // The leader went away for its own reasons (withdrawn, released, its session gone, expired in line): the first
+        // follower carries the card on. On screen it keeps the floor (the same question stays up for the others).
         var lead = followers[0];
         lead.MergedInto = null;
-        if (lead.Status == "showing") { lead.Status = "queued"; lead.ShownAt = null; }
-        foreach (var f in followers.Skip(1)) { f.MergedInto = lead.Id; if (f.Status == "showing") { f.Status = "queued"; f.ShownAt = null; } }
+        foreach (var f in followers.Skip(1)) f.MergedInto = lead.Id;
     }
 
     /// <summary>Replay a queued call now that its turn came (Render or the request thread, outside the sessions lock).</summary>

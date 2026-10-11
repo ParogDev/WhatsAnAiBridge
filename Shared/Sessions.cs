@@ -760,11 +760,16 @@ public partial class WhatsAnAiBridge
         AttnPublishLocked();   // and the attention queue's copies (the ask card, the next strip, the dot), when they changed
     }
 
-    /// <summary>The panel's copy of a request, with the requester's who-dot hue and how many later requests merged into it.</summary>
+    /// <summary>
+    /// The panel's copy of a request, with the requester's who-dot hue and how many other agents wait for the same restart:
+    /// for the waiting one the card shows (the oldest), the other waiting requests (its grant merges them into it); for a
+    /// granted one, those merged into it.
+    /// </summary>
     private RestartRequest? RestartCopyLocked(RestartRequest? req) => req == null ? null : new RestartRequest
     {
         Id = req.Id, Session = req.Session, Who = req.Who, Reason = req.Reason, At = req.At, Status = req.Status, By = req.By,
         HoldUntil = req.HoldUntil, DecidedAt = req.DecidedAt, Blockers = req.Blockers.ToList(),
-        Hue = AttnHueLocked(req.Session, req.Who), MergedCount = _restarts.Count(r => r.Status == "merged" && r.Into == req.Id),
+        Hue = AttnHueLocked(req.Session, req.Who),
+        MergedCount = req.Status == "waiting" ? _restarts.Count(r => r != req && r.Status == "waiting") : _restarts.Count(r => r.Status == "merged" && r.Into == req.Id),
     };
 }
