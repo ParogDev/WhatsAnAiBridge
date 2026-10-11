@@ -22,8 +22,9 @@ namespace WhatsAnAiBridge;
 ///                      keep it cheap and thread-safe (queue it). The same subscriber replaces (a reloaded plugin); a null
 ///                      handler unsubscribes (call it from OnClose); a handler that throws is dropped.
 /// TCP:
-///   pubsub.events {since?, kinds?, limit?, subscriber?}   events after since, each with its claims; subscriber marks the
-///                                                         caller as listening to kinds (none = every kind)
+///   pubsub.events {since?, kinds?, limit?, subscriber?}   events after since, each with its claims; next = the since for
+///                                                         the next page; subscriber marks the caller as listening to kinds
+///                                                         (Publish reports listeners of the kind by name only)
 ///   pubsub.claim {seq, stage?: handle, by?, ttlSec?}      exactly once per (event, stage): the second caller gets claimed.
 ///                                                         ttlSec: the claim lapses then (a claimer that died), else forever
 ///   pubsub.release {seq, stage?, by?, reason?, force?}    hands a claim back; only its holder (by), unless force
@@ -49,7 +50,7 @@ public partial class WhatsAnAiBridge
     private readonly Dictionary<long, Dictionary<string, JObject>> _pubClaims = new();   // event seq -> stage -> {by, at, stage, claimSeq, until?}
     private readonly Dictionary<string, (HashSet<string> kinds, Action<string> handler)> _pubLocal = new();
     private readonly Dictionary<string, (HashSet<string> kinds, DateTime seen, string? who)> _pubRemote = new();
-    private long _pubSeq;
+    private long _pubSeq, _pubAppends;
     private bool _pubLoaded, _pubClosed;
     private string? _pubWhy;
 
@@ -87,8 +88,13 @@ public partial class WhatsAnAiBridge
         _pubLoaded = true;
         try
         {
-            if (!File.Exists(PubFile)) return;
-            foreach (var line in JournalTail(PubFile, PubTailBytes))
+            // The rotated log fills what the current one lacks (right after a rotation the current one is near empty).
+            var currentBytes = File.Exists(PubFile) ? new FileInfo(PubFile).Length : 0;
+            var rotated = Path.ChangeExtension(PubFile, ".1.jsonl");
+            var lines = Enumerable.Empty<string>();
+            if (currentBytes < PubTailBytes && File.Exists(rotated)) lines = lines.Concat(JournalTail(rotated, PubTailBytes - currentBytes));
+            if (currentBytes > 0) lines = lines.Concat(JournalTail(PubFile, PubTailBytes));
+            foreach (var line in lines)
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 JObject e;
@@ -156,6 +162,8 @@ public partial class WhatsAnAiBridge
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(PubFile)!);
+            if (++_pubAppends % 200 == 0 && File.Exists(PubFile) && new FileInfo(PubFile).Length > PubTailBytes)
+                File.Move(PubFile, Path.ChangeExtension(PubFile, ".1.jsonl"), overwrite: true);   // one generation kept, like the observer journal
             File.AppendAllText(PubFile, e.ToString(Formatting.None) + "\n");   // rare events (a few a minute): a synchronous append keeps the order
             _pubWhy = null;
         }
@@ -203,7 +211,7 @@ public partial class WhatsAnAiBridge
     {
         var now = DateTime.UtcNow;
         return new JArray(_pubRemote
-            .Where(kv => (now - kv.Value.seen).TotalSeconds <= PubListenerFreshSec && (kv.Value.kinds.Contains(kind) || kv.Value.kinds.Contains("*")))
+            .Where(kv => (now - kv.Value.seen).TotalSeconds <= PubListenerFreshSec && kv.Value.kinds.Contains(kind))   // by name: a watcher of every kind handles nothing
             .Select(kv => new JObject { ["subscriber"] = kv.Key, ["who"] = kv.Value.who, ["seenAgoSec"] = Math.Round((now - kv.Value.seen).TotalSeconds, 1) }));
     }
 
@@ -268,15 +276,16 @@ public partial class WhatsAnAiBridge
             PubLoadLocked();
             if (!string.IsNullOrWhiteSpace(subscriber)) _pubRemote[subscriber] = (PubKinds(kinds), DateTime.UtcNow, CurrentWho());
             var list = new JArray();
+            var next = _pubSeq;   // every event up to here was looked at, unless the page filled up
             foreach (var e in _pubEvents)
             {
                 if (e["seq"]!.Value<long>() <= since || (kinds != null && !kinds.Contains(e["kind"]!.ToString()))) continue;
                 list.Add(PubWithClaimsLocked(e));
-                if (list.Count >= limit) break;
+                if (list.Count >= limit) { next = e["seq"]!.Value<long>(); break; }
             }
             return new JObject
             {
-                ["ok"] = true, ["seq"] = _pubSeq, ["events"] = list,
+                ["ok"] = true, ["seq"] = _pubSeq, ["next"] = next, ["events"] = list,
                 ["oldest"] = _pubEvents.Count > 0 ? _pubEvents[0]["seq"] : null, ["file"] = PubFile, ["fileError"] = _pubWhy,
             };
         }
