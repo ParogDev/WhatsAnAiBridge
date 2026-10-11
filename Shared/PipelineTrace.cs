@@ -286,9 +286,10 @@ public partial class WhatsAnAiBridge
                 TrTickIdx[tick] = TrPluginNames.Count - 1;
                 Patch(tick, $"{t.Name}.Tick", nameof(PreTick), nameof(PostTick), pluginName);
             }
-        }
-        // Each plugin is its own assembly: a binding to another load of one is refused per assembly (nothing of it measured).
-        foreach (var asm in pluginTypes.Select(x => x.type.Assembly).Distinct())
+            // Each plugin is its own assembly: a binding to another load of one is refused per assembly (nothing of it
+            // measured). Checked right after patching it: InstrBindTo clears MonoMod's caches when patching moves to the
+            // next assembly, so a check after the loop would only see the last plugin's resolutions.
+            var asm = t.Assembly;
             if (InstrBindingCheck(asm) is { } bad)
             {
                 List<MethodBase> ofAsm;
@@ -296,6 +297,7 @@ public partial class WhatsAnAiBridge
                 foreach (var m in ofAsm) InstrRelease(set, m);
                 ((JArray)report["refused"]!).Add($"{asm.GetName().Name}: patches removed again: {bad}");
             }
+        }
         unwrap = WrapMemoryBackends(report, out var whyNoReads);
         if (whyNoReads != null) ((JArray)report["refused"]!).Add(whyNoReads);
 
@@ -317,24 +319,29 @@ public partial class WhatsAnAiBridge
         System.Threading.Tasks.Task.Run(async () =>
         {
             JObject? foreground = null, ended = null;
+            var ranMs = (double)duration;
             try { await System.Threading.Tasks.Task.Delay(duration, set.Cts.Token); }
             catch (OperationCanceledException) { }
             finally
             {
                 // Whatever ended it (done, instrument.cancel, a plugin reload, expiry): hooks off, patches out, backends back.
                 _trOn = false;
+                ranMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
                 try { foreground = MeasureEnd(); } catch { }
                 ended = InstrEnd(set, "done");
                 try { unwrap?.Invoke(); } catch { }
             }
-            report["unpatch"] = ended;
+            // A copy: the running job (which pipeline.trace_result may be serializing right now) holds report itself.
+            var patches = (JObject)report.DeepClone();
+            patches["unpatch"] = ended;
             try
             {
             var endedBy = ended["endedBy"]?.ToString() ?? "done";
             var result = AnalyzeTrace(Math.Min(_trIdx, TraceCap), started);
             if (endedBy != "done") { result["endedBy"] = endedBy; result["note"] = $"The trace ended early ({endedBy}): the numbers cover only the time it ran."; }
             result["foreground"] = foreground;
-            var secs = duration / 1000.0;
+            // Rates over the time it actually ran: a cancelled or cut trace is shorter than its duration.
+            var secs = Math.Max(0.001, (endedBy == "done" ? duration : ranMs) / 1000.0);
             var frames = Math.Max(1, result["frames"]?.Value<int>() ?? 1);
             result["gc"] = new JObject
             {
@@ -351,12 +358,12 @@ public partial class WhatsAnAiBridge
             JObject Alloc(long[] a) => new(Enumerable.Range(0, Math.Min(a.Length, TrPluginNames.Count)).Where(k => a[k] > 0).OrderByDescending(k => a[k]).Take(12)
                 .Select(k => new JProperty(TrPluginNames[k], Math.Round(a[k] / 1024.0 / frames, 1))));
             result["pluginAllocKBPerFrame"] = new JObject { ["render"] = Alloc(TrRenderAlloc), ["tick"] = Alloc(TrTickAlloc) };
-            result["id"] = id; result["status"] = "done"; result["durationMs"] = duration; result["patches"] = report; result["watch"] = job["watch"];
+            result["id"] = id; result["status"] = "done"; result["durationMs"] = duration; result["patches"] = patches; result["watch"] = job["watch"];
             lock (TraceJobs) TraceJobs[id] = result;
             }
             catch (Exception ex)
             {
-                lock (TraceJobs) TraceJobs[id] = new JObject { ["id"] = id, ["status"] = "done", ["error"] = "analysis_failed", ["message"] = $"{ex.GetType().Name}: {ex.Message}", ["patches"] = report };
+                lock (TraceJobs) TraceJobs[id] = new JObject { ["id"] = id, ["status"] = "done", ["error"] = "analysis_failed", ["message"] = $"{ex.GetType().Name}: {ex.Message}", ["patches"] = patches };
             }
         });
         return job;

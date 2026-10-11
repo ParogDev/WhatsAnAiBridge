@@ -60,6 +60,8 @@ public partial class WhatsAnAiBridge
     private static DateTime _instrLastOrphanSweep;
     private static Assembly? _instrResolvedFor;
     private static string? _instrCacheBroken, _instrRestoreBroken;
+    /// <summary>Leftovers the orphan sweep could not restore (under InstrLock): reported once, then skipped by the sweep.</summary>
+    private static readonly HashSet<MethodBase> InstrUnrestorable = new();
 
     private string? ProcessInstrumentMethod(string method, JToken? p) => method switch
     {
@@ -105,6 +107,7 @@ public partial class WhatsAnAiBridge
             var asm = m.DeclaringType?.Assembly;
             if (asm != null && InstrBindTo(asm) is { } why) return why;
             InstrOwners[m] = s;
+            InstrUnrestorable.Remove(m);   // a set owns it again: if it is left over after this one, the sweep retries it
             s.Methods.Add(m);
             if (asm != null) { s.Assemblies.Add(asm); if (plugin != null) s.Plugins[asm] = plugin; }
             try
@@ -140,19 +143,23 @@ public partial class WhatsAnAiBridge
     /// </summary>
     private JObject InstrEnd(InstrSet s, string endedBy)
     {
+        JObject report;
         lock (InstrLock)
         {
             if (s.EndReport != null) return s.EndReport;
             s.EndedBy = endedBy;
-            try { s.Cts.Cancel(); } catch { }
-            var report = s.Methods.Count == 0 ? InstrEmptyReport(endedBy) : InstrRemoveAllLocked(s, endedBy);
+            report = s.Methods.Count == 0 ? InstrEmptyReport(endedBy) : InstrRemoveAllLocked(s, endedBy);
             InstrSets.Remove(s.Id);
             s.EndReport = report;
             if (endedBy != "done")
                 InstrEvent(endedBy.StartsWith("cancel", StringComparison.Ordinal) ? "cancelled" : endedBy.StartsWith("expired", StringComparison.Ordinal) ? "expired" : "cut",
                     $"{s.Kind} {s.Id} ({s.Label}) ended: {endedBy}; {report["restored"]} of {s.Methods.Count} methods restored", s);
-            return report;
         }
+        // Cancel only after the report is set and outside InstrLock: the measurement's await continuation runs inline on
+        // this thread, calls InstrEnd(s, "done") (which must get this report, not overwrite endedBy) and then MeasureEnd,
+        // whose guide card takes _sessionLock (BlockersLocked takes InstrLock under _sessionLock: a lock inversion).
+        try { s.Cts.Cancel(); } catch { }
+        return report;
     }
 
     private static JObject InstrEmptyReport(string endedBy) => new()
@@ -428,15 +435,19 @@ public partial class WhatsAnAiBridge
             foreach (var m in Harmony.GetAllPatchedMethods().ToList())
             {
                 if (InstrOwners.ContainsKey(m)) continue;
+                // Tried and failed before: reported once (still counted in leftover), not a new event every 5 s.
+                if (InstrUnrestorable.Contains(m)) continue;
                 var info = Harmony.GetPatchInfo(m);
                 var o = info?.Owners ?? (IReadOnlyCollection<string>)[];
                 if (o.Any(x => !x.StartsWith(InstrOwnerPrefix, StringComparison.Ordinal))) continue;   // someone else's
+                string? fail = null;
                 try
                 {
                     InstrRestoreLocked(m);
-                    if (InstrStillDetoured(m)) failed.Add(MethodName(m));
+                    if (InstrStillDetoured(m)) fail = MethodName(m);
                 }
-                catch (Exception ex) { failed.Add($"{MethodName(m)} ({ex.GetType().Name})"); }
+                catch (Exception ex) { fail = $"{MethodName(m)} ({ex.GetType().Name})"; }
+                if (fail != null) { failed.Add(fail); InstrUnrestorable.Add(m); continue; }
                 if (o.Count > 0) { orphans.Add(MethodName(m)); owners.UnionWith(o); }
                 else residue.Add(MethodName(m));
             }

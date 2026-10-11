@@ -168,6 +168,8 @@ public partial class WhatsAnAiBridge
                 patchMs = sw.ElapsedMilliseconds;
                 // The copies must call this load's types: a plugin reloaded since the first load shares its assembly name.
                 if (InstrBindingCheck(asm) is { } bad) throw new InvalidOperationException($"binding check failed, patches removed: {bad}");
+                // Ended while patching (cancel, cut, expiry): no calibration and no "profiling" card for a profile that is over.
+                set.Cts.Token.ThrowIfCancellationRequested();
                 (ohTicks, ohBytes) = ProfCalibrate(set, pre, post);
                 ProfStats.Clear();
                 MeasureBegin($"profiling {label}", duration);
@@ -192,6 +194,8 @@ public partial class WhatsAnAiBridge
                 lock (ProfJobs) ProfJobs[id] = new JObject { ["id"] = id, ["status"] = "done", ["error"] = "profile_failed", ["message"] = failure, ["plugin"] = label, ["refused"] = refused, ["unpatch"] = ended };
                 return;
             }
+            try
+            {
             // Remove the hooks' own cost (measured on an empty method) from every call's self numbers.
             foreach (var st in ProfStats.Values)
             {
@@ -236,6 +240,12 @@ public partial class WhatsAnAiBridge
                 })),
             };
             lock (ProfJobs) ProfJobs[id] = result;
+            }
+            catch (Exception ex)
+            {
+                // Never leave the job at "patching": the MCP would wait it out and then cancel a profile that already ended.
+                lock (ProfJobs) ProfJobs[id] = new JObject { ["id"] = id, ["status"] = "done", ["error"] = "analysis_failed", ["message"] = $"{ex.GetType().Name}: {ex.Message}", ["plugin"] = label, ["refused"] = refused, ["unpatch"] = ended };
+            }
         });
         return job;
     }
