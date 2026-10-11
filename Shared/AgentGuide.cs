@@ -328,7 +328,7 @@ public partial class WhatsAnAiBridge
     /// user to act is cleared. Only a card stamped with that session id: HUD-run cards (queue runner, flow) carry none.
     /// A finished card (captured, failed...) stays as a receipt.
     /// </summary>
-    private void GuideOwnerGone(string sessionId)
+    private void GuideOwnerGone(string sessionId, string why = "left")
     {
         string? who, what;
         lock (_guideLock)
@@ -337,7 +337,7 @@ public partial class WhatsAnAiBridge
             who = _guide.Who; what = _guide.Instruction;
             GuideClearStepLocked();
         }
-        GuideLog(new JObject { ["text"] = $"{GuideWhoText(who)} left - no need for: {what ?? "the step"}", ["kind"] = "warn", ["title"] = "Step ended" });
+        GuideLog(new JObject { ["text"] = $"{GuideWhoText(who)} {why} - no need for: {what ?? "the step"}", ["kind"] = "warn", ["title"] = "Step ended" });
     }
 
     private void GuideClearStepLocked()

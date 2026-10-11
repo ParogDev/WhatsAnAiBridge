@@ -65,6 +65,7 @@ public partial class WhatsAnAiBridge
         public string? Pending;             // the call to replay when granted: guide.set | guide.flow | experiment.start
         public JToken? PendingParams;
         [JsonIgnore] public bool ReplayDue; // granted, the replay waits for the hand-over gap (the previous card's receipt and fade)
+        [JsonIgnore] public DateTime? IdleSince; // an explicit step / flow turn whose card or flow is not up (AttnTickLocked: turn_idle)
         public string? StepId;              // the queued experiment step it covers
         public string? HlOwner;             // the highlight layer whose question strips it holds (asked highlight)
         public string? Reason;              // why it ended, as a code: later_x3 | unanswered | disconnected | ...
@@ -111,7 +112,12 @@ public partial class WhatsAnAiBridge
     private const double AttnCalmNoCombatSec = 8, AttnCalmIdleSec = 5, AttnHandoverGapSec = 0.6, AttnDedupWindowSec = 60;
     private static readonly int[] AttnLaterHoldSec = [180, 600];                            // the third Later dismisses
     private static readonly TimeSpan AttnKeepEnded = TimeSpan.FromMinutes(30), AttnDisconnectGrace = TimeSpan.FromSeconds(10),
-        AttnImplicitGrace = TimeSpan.FromSeconds(1);
+        AttnImplicitGrace = TimeSpan.FromSeconds(1),
+        // A turn that shows nothing (an explicit step or flow turn with no card or flow of its own up) or whose agent went
+        // silent ends after these while someone else waits (an item, a restart): one agent never holds the player.
+        AttnTurnIdle = TimeSpan.FromSeconds(30), AttnOwnerQuiet = TimeSpan.FromMinutes(5),
+        // Asks restored from queue.json whose session never says hello again on this HUD are cancelled after this.
+        AttnRestoreGrace = TimeSpan.FromSeconds(60);
     internal const int AttnHues = 6, AttnHueFallback = 5;                                   // violet rose sky orange sand slate
 
     private readonly List<AttentionItem> _attn = new();            // under _sessionLock; ended items kept AttnKeepEnded
@@ -131,6 +137,7 @@ public partial class WhatsAnAiBridge
     // for max(granted, slot free) + the gap, so the player sees one card leave before the next arrives.
     private DateTime _attnSlotFreeAt = DateTime.MinValue;
     private bool _attnLoaded;
+    private DateTime _attnLoadedAt;
     private string _attnSavedKey = "";
 
     private string? ProcessAttentionMethod(string method, JToken? p) => method switch
@@ -201,6 +208,15 @@ public partial class WhatsAnAiBridge
             if (item.Kind == "ask" && AttnDedupLeaderLocked(item, now) is { } leader) item.MergedInto = leader.Id;
             _attn.Add(item);
             _attnSeq++;
+            // A step or flow turn asked for while this session holds the floor with an implicit turn (a plain guide.set it
+            // made earlier): the new turn takes over at once. Waiting behind its own old card would hold it until that card
+            // rests, which may be never. Same owner: no hand-over, no card cleared.
+            if (item.Kind is "step" or "flow" && AttnHolderLocked() is { Implicit: true, Detached: false, StepId: null, ReplayDue: false, HlOwner: null } own
+                && own.SessionId == me.Id && own.Kind == "step")
+            {
+                AttnEndLocked(own, "done", now, "superseded", "a new turn of the same agent took over", effects);
+                item.Status = "showing"; item.ShownAt = now; item.VisibleSince = own.VisibleSince;
+            }
             AttnArbitrateLocked(now, effects);
             reply = AttnItemJsonLocked(item, me.Id, now);
             // Queued behind someone (attention-queue-ui.md 6.6): an agent-kind line (off as a toast by default), so the
@@ -673,6 +689,34 @@ public partial class WhatsAnAiBridge
             AttnEndLocked(h, "done", now, "card_quiet", "the card went quiet", effects);
         if (h is { Implicit: true, Kind: "flow", ReplayDue: false } && now - h.ShownAt!.Value > AttnImplicitGrace && !(flowRunning && flowWho == h.Who))
             AttnEndLocked(h, "done", now, "flow_ended", "the flow ended", effects);
+        h = AttnHolderLocked();
+        // A turn must not hold the player for nothing while someone else waits (an item in line, a restart: the holder is
+        // a restart blocker). An explicit step or flow turn (attention.request) whose card or flow is not up for
+        // AttnTurnIdle - its MCP call was cancelled, crashed or never got to it - ends as turn_idle; a step turn whose
+        // agent sent nothing for AttnOwnerQuiet ends as owner_quiet and its waiting card goes with it (GuideOwnerGone).
+        // HUD-run work (a queued experiment step, a Detached item) ends on its own terms.
+        if (h is { Kind: "step" or "flow", Detached: false, StepId: null, ReplayDue: false })
+        {
+            var active = h.Kind == "flow"
+                ? flowRunning && flowWho == h.Who
+                : (guide.session != null ? guide.session == h.SessionId : guide.who == h.Who) && guide.instruction != null && guide.status is "waiting" or "detected" or "settling" or "failed";
+            if (active || h.Implicit) h.IdleSince = null;
+            else h.IdleSince ??= now;
+            var othersWait = AttnRestartWaitingLocked() || _attn.Any(i => i.Status == "queued" && i.MergedInto == null && i.SessionId != h.SessionId);
+            if (othersWait && h.IdleSince is { } idle && now - idle > AttnTurnIdle)
+                AttnEndLocked(h, "done", now, "turn_idle", $"nothing of its own on screen for {AttnTurnIdle.TotalSeconds:0} s while others waited", effects);
+            else if (othersWait && h.Kind == "step" && _sessions.TryGetValue(h.SessionId, out var hs) && hs.Connected && now - hs.LastSeen > AttnOwnerQuiet)
+            {
+                var sid = h.SessionId;
+                AttnEndLocked(h, "done", now, "owner_quiet", $"its agent sent nothing for {AttnOwnerQuiet.TotalMinutes:0} min while others waited", effects);
+                effects.Add(() => GuideOwnerGone(sid, "went quiet"));
+            }
+        }
+        // Asks restored from queue.json belong to sessions of the previous HUD: one that does not say hello again within
+        // AttnRestoreGrace will never read the answer, so its asks leave the line instead of being shown to nobody.
+        if (now - _attnLoadedAt > AttnRestoreGrace)
+            foreach (var i in _attn.Where(i => i.Status == "queued" && !i.Detached && !i.SessionId.StartsWith("queue:", StringComparison.Ordinal) && !_sessions.ContainsKey(i.SessionId)).ToList())
+                AttnEndLocked(i, "cancelled", now, "owner_gone", "its agent did not come back after the HUD restart", effects);
         // Asked highlights: every question answered ends the turn; a layer that went (cleared, timed out) takes its item with it.
         foreach (var i in _attn.Where(i => i.HlOwner != null && i.Status is "queued" or "showing" && now - i.CreatedAt > AttnImplicitGrace).ToList())
         {
@@ -698,6 +742,10 @@ public partial class WhatsAnAiBridge
         foreach (var i in _attn.Where(i => i.SessionId == s.Id && !i.Detached && !AttnEnded.Contains(i.Status)).ToList())
         {
             if (i is { Status: "showing", Kind: "flow" } && flowRunning && flowWho == i.Who) { i.Implicit = true; continue; }   // ends with the flow (AttnTickLocked)
+            // An experiment step it started that is recording now runs in the HUD (the runner's card has no session): its
+            // turn ends with the step (FinishQueued, QueueCancel), not with the agent. Cancelling it would hand the floor
+            // to someone else mid-recording and clear the runner's card.
+            if (i is { Status: "showing", StepId: { } step } && _queueRun?.Id == step) { i.Detached = true; continue; }
             AttnEndLocked(i, "cancelled", now, "disconnected", $"{s.Label} disconnected", effects);
         }
         var sid = s.Id;
@@ -929,6 +977,7 @@ public partial class WhatsAnAiBridge
     {
         if (_attnLoaded) return;
         _attnLoaded = true;
+        _attnLoadedAt = DateTime.UtcNow;
         try
         {
             if (string.IsNullOrEmpty(_bridgeDir) || !File.Exists(AttnFile)) return;
