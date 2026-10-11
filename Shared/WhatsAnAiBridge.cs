@@ -94,6 +94,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         if (Settings.EnableTcp.Value)
             StartTcpServer();
         InstrStartup();   // patches a previous load of the bridge left in this HUD process (Instrumentation.cs)
+        try { PubRegister(); } catch (Exception ex) { LogError($"[PubSub] registering {PublishMethodName} / {SubscribeMethodName} on PluginBridge failed: {ex.Message}"); }
 
         return true;
     }
@@ -288,7 +289,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessLabMethod(method, parameters) ?? ProcessProfileMethod(method, parameters)
                          ?? ProcessSelfPerfMethod(method, parameters) ?? ProcessGcPoolMethod(method, parameters)
                          ?? ProcessSettingsMethod(method, parameters) ?? ProcessFocusMethod(method, parameters)
-                         ?? ProcessSessionMethod(method, parameters) ?? ProcessInstrumentMethod(method, parameters);
+                         ?? ProcessSessionMethod(method, parameters) ?? ProcessInstrumentMethod(method, parameters)
+                         ?? ProcessPubSubMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
