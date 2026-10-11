@@ -302,30 +302,57 @@ public partial class WhatsAnAiBridge
         // Asked targets are questions for the player: their strips wait for this session's turn (AttentionQueue.cs, C7).
         // Decided before the layer is set, so a held strip never shows for a frame.
         var asked = p?["clear"]?.Value<bool>() == true ? 0 : (p?["targets"] as JArray)?.OfType<JObject>().Count(t => !string.IsNullOrWhiteSpace(t["ask"]?.ToString())) ?? 0;
-        var (hold, note) = asked > 0 ? AttnHighlightAsks(me, owner, asked, Clip(p?["title"]?.ToString(), 40)) : (false, null);
+        var (hold, note, item) = asked > 0 ? AttnHighlightAsks(me, owner, asked, Clip(p?["title"]?.ToString(), 40)) : (false, null, null);
         var r = HighlightSetLayer(owner, me?.Id, me?.Label, p, hold);
+        // The turn may have come between the decision and the layer (the tick granted it and released a layer that was
+        // not set yet): then the strips would stay held under a showing turn until they expire. Release them now.
+        if (hold && item != null && AttnItemShowing(item)) { HighlightHoldAsks(owner, false); hold = false; }
         if (hold && r["error"] == null) { r["asksHeld"] = true; r["attentionNote"] = note; }
         return r;
     }
 
-    /// <summary>Hold or release a layer's question strips (the attention queue decides; boxes are never held).</summary>
+    /// <summary>
+    /// Hold or release a layer's question strips (the attention queue decides; boxes are never held). A released question
+    /// gets its whole default lifetime from now: its strip was not on screen while it waited, so the player gets the same
+    /// HlDefaultLifeSec to answer it as a question asked on its turn (its box was, and kept fading by the same clock).
+    /// </summary>
     internal void HighlightHoldAsks(string owner, bool hold)
     {
         lock (_hlLock)
         {
             if (HlLayerLocked(owner) is not { } l || l.AsksHeld == hold) return;
             l.AsksHeld = hold;
+            if (!hold)
+            {
+                var life = DateTime.UtcNow.AddSeconds(HlDefaultLifeSec);
+                foreach (var t in l.Targets)
+                    if (t is { Ask: not null, Answer: null, Expired: false, EndsAt: { } e } && e < life) t.EndsAt = life;
+            }
             _hlLastResolve = DateTime.MinValue;   // the next resolution rebuilds the boxes with or without their questions
         }
     }
 
-    /// <summary>Unanswered questions per layer (layers without questions included as 0), for the attention tick.</summary>
-    internal Dictionary<string, int> HighlightPendingByLayer()
+    /// <summary>
+    /// Per layer (layers without questions included): its unanswered questions still on (Pending), the answered ones, and
+    /// those whose lifetime ran out unanswered, for the attention tick (how an asked highlight's turn ends).
+    /// </summary>
+    internal Dictionary<string, (int Pending, int Answered, int Expired)> HighlightPendingByLayer()
     {
         lock (_hlLock)
         {
-            var d = new Dictionary<string, int>(StringComparer.Ordinal);
-            foreach (var l in _hlLayers) d[l.Owner] = l.Pending;
+            var d = new Dictionary<string, (int, int, int)>(StringComparer.Ordinal);
+            foreach (var l in _hlLayers)
+            {
+                int pending = 0, answered = 0, expired = 0;
+                foreach (var t in l.Targets)
+                {
+                    if (t.Ask == null) continue;
+                    if (t.Answer != null) answered++;
+                    else if (t.Expired) expired++;
+                    else pending++;
+                }
+                d[l.Owner] = (pending, answered, expired);
+            }
             return d;
         }
     }
@@ -546,6 +573,7 @@ public partial class WhatsAnAiBridge
                     foreach (var (_, x, y, w, h, panned) in found)
                     {
                         var (covered, docked) = HlPanelRule(panels, x, y, w, h, t);
+                        if (layer.AsksHeld) docked = false;   // a held question has no strip to dock
                         boxes.Add(new(x, y, w, h, t.Label, t.Tier, t.Order, i, t.Action, layer.AsksHeld ? null : t.Ask, t.Answer, panned, pan.PanX, pan.PanY, end, covered, docked));
                     }
                     // Checkbox state (PoE2: byte at +0x60A of the checkbox element, see finding ui.poe2.checkbox-checked).

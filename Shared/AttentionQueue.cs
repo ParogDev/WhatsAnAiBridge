@@ -372,12 +372,12 @@ public partial class WhatsAnAiBridge
     /// and it ends when every question is answered or the layer goes. Returns whether the strips are held now, and a
     /// note for the reply. The caller sets the layer with that hold (so a held strip never shows for a frame).
     /// </summary>
-    private (bool hold, string? note) AttnHighlightAsks(SessionInfo? me, string layer, int questions, string? title)
+    private (bool hold, string? note, string? item) AttnHighlightAsks(SessionInfo? me, string layer, int questions, string? title)
     {
-        if (me == null) return (false, null);
+        if (me == null) return (false, null, null);
         var effects = new List<Action>();
         bool hold;
-        string? note = null;
+        string? note = null, itemId = null;
         lock (_sessionLock)
         {
             var now = DateTime.UtcNow;
@@ -399,11 +399,18 @@ public partial class WhatsAnAiBridge
                 _attnSeq++;
                 AttnArbitrateLocked(now, effects);
                 hold = item.Status != "showing";
+                itemId = item.Id;
                 if (hold) note = $"Boxes are on screen; the question strips wait for your turn: {AttnLineText(AttnItemJsonLocked(item, me.Id, now))} (attention item {item.Id}).";
             }
         }
         AttnRun(effects);
-        return (hold, note);
+        return (hold, note, itemId);
+    }
+
+    /// <summary>Whether an item holds the floor (or shows with the card that carries it) now.</summary>
+    private bool AttnItemShowing(string id)
+    {
+        lock (_sessionLock) return _attn.FirstOrDefault(i => i.Id == id) is { Status: "showing" };
     }
 
     /// <summary>"2nd in line, after whats-a-route" / "waiting for a calm moment" for a queued item's JSON.</summary>
@@ -658,7 +665,7 @@ public partial class WhatsAnAiBridge
     /// arbitration.
     /// </summary>
     private void AttnTickLocked(DateTime now, AttnPlayer player, (string status, string? instruction, string? who, string? session) guide, bool flowRunning, string? flowWho,
-        Dictionary<string, int> hlPending, List<Action> effects)
+        Dictionary<string, (int Pending, int Answered, int Expired)> hlPending, List<Action> effects)
     {
         AttnLoadLocked();
         if (player.State != _attnPlayer.State || player.Calm != _attnPlayer.Calm || player.Town != _attnPlayer.Town || player.Broken != _attnPlayer.Broken) _attnSeq++;
@@ -718,12 +725,16 @@ public partial class WhatsAnAiBridge
         if (now - _attnLoadedAt > AttnRestoreGrace)
             foreach (var i in _attn.Where(i => i.Status == "queued" && !i.Detached && !i.SessionId.StartsWith("queue:", StringComparison.Ordinal) && !_sessions.ContainsKey(i.SessionId)).ToList())
                 AttnEndLocked(i, "cancelled", now, "owner_gone", "its agent did not come back after the HUD restart", effects);
-        // Asked highlights: every question answered ends the turn; a layer that went (cleared, timed out) takes its item with it.
+        // Asked highlights: nothing left to ask ends the item. A layer that went (cleared, timed out, its step over) takes its
+        // item with it; otherwise answered when the player answered on its turn, expired when the questions ran out of
+        // lifetime unanswered (#76: a question never lingers, held or not), cancelled when a newer highlight asks nothing.
         foreach (var i in _attn.Where(i => i.HlOwner != null && i.Status is "queued" or "showing" && now - i.CreatedAt > AttnImplicitGrace).ToList())
         {
-            var pending = hlPending.TryGetValue(i.HlOwner!, out var n) ? n : 0;
-            if (pending == 0) AttnEndLocked(i, i.Status == "showing" && hlPending.ContainsKey(i.HlOwner!) ? "answered" : "cancelled", now,
-                hlPending.ContainsKey(i.HlOwner!) ? null : "highlight_gone", hlPending.ContainsKey(i.HlOwner!) ? "every question answered" : "the highlight was cleared", effects);
+            if (!hlPending.TryGetValue(i.HlOwner!, out var c)) { AttnEndLocked(i, "cancelled", now, "highlight_gone", "the highlight was cleared", effects); continue; }
+            if (c.Pending > 0) continue;
+            if (i.Status == "showing" && c.Answered > 0) AttnEndLocked(i, "answered", now, null, "every question answered", effects);
+            else if (c.Expired > 0) AttnEndLocked(i, "expired", now, "asks_expired", $"its questions ran out of time ({HlDefaultLifeSec:0} s) unanswered", effects);
+            else AttnEndLocked(i, "cancelled", now, "no_questions", "the highlight no longer asks anything", effects);
         }
 
         AttnArbitrateLocked(now, effects);
