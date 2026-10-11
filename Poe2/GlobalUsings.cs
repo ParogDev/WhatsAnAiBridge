@@ -13,3 +13,4 @@ global using RectangleF = ExileCore2.Shared.RectangleF;
 global using Vector2N = System.Numerics.Vector2;
 global using FileInMemory = ExileCore2.PoEMemory.FileInMemory;
 global using UiElement = ExileCore2.PoEMemory.Element;
+global using NextFrameTask = ExileCore2.Shared.NextFrameTask;
