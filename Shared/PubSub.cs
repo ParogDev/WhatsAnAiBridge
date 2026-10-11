@@ -14,22 +14,25 @@ namespace WhatsAnAiBridge;
 /// as "feedback.reply" and shows above the route card.
 ///
 /// In-process (PluginBridge, no compile-linking; the delegates use BCL types only):
-///   AIBridge.Publish   Func&lt;string kind, string json, string&gt;  -> {ok, seq, subscribers: [{who, kinds, seenAgoSec}]}
-///                      (the TCP subscribers that read this kind in the last 20 s: none means nobody will handle it now)
-///   AIBridge.Subscribe Func&lt;string subscriber, string kindsCsv, Action&lt;string&gt;, string&gt;: the handler gets each matching
+///   AIBridge.Publish   Func&lt;string kind, string json, string&gt;  -> {ok, seq, subscribers: [{subscriber, who, seenAgoSec}]}
+///                      (the TCP subscribers that read this kind in the last 20 s: none means nobody will handle it now).
+///                      After the bridge reloads, the old delegate answers bridge_reloaded: look the method up again.
+///   AIBridge.Subscribe Func&lt;string subscriber, string kindsCsv, Action&lt;string&gt;?, string&gt;: the handler gets each matching
 ///                      event as JSON, on the thread that published it (a bridge request thread or the publisher's):
-///                      keep it cheap and thread-safe (queue it). Calling again with the same subscriber replaces it
-///                      (a reloaded plugin); a handler that throws is dropped.
+///                      keep it cheap and thread-safe (queue it). The same subscriber replaces (a reloaded plugin); a null
+///                      handler unsubscribes (call it from OnClose); a handler that throws is dropped.
 /// TCP:
 ///   pubsub.events {since?, kinds?, limit?, subscriber?}   events after since, each with its claims; subscriber marks the
-///                                                         caller as listening to kinds (what Publish reports)
-///   pubsub.claim {seq, stage?: handle, by?}               exactly once per (event, stage): the second caller gets claimed
-///   pubsub.release {seq, stage?, reason?}                 hands a claim back (e.g. the handler could not start)
+///                                                         caller as listening to kinds (none = every kind)
+///   pubsub.claim {seq, stage?: handle, by?, ttlSec?}      exactly once per (event, stage): the second caller gets claimed.
+///                                                         ttlSec: the claim lapses then (a claimer that died), else forever
+///   pubsub.release {seq, stage?, by?, reason?, force?}    hands a claim back; only its holder (by), unless force
 ///   pubsub.publish {kind, data, source?}                  an agent's event (a reply), delivered to the plugins' subscriptions
 ///   pubsub.status {}
 /// Every event {seq, kind, at, t, source, data} is appended to &lt;BridgeDirectory&gt;\pubsub\events.jsonl (the sequence and
 /// the claims continue from it after a restart: a press made just before a HUD restart is still claimable) and, while
-/// observing, copied onto the observer timeline as kind = the event's kind with pubSeq (same clock as hud / agent).
+/// observing, copied onto the observer timeline as kind = the event's kind with pubSeq (same clock as hud / agent). The
+/// observer's own kinds and pubsub.* are reserved.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
@@ -38,23 +41,33 @@ public partial class WhatsAnAiBridge
     private const long PubTailBytes = 8L * 1024 * 1024;
     private const double PubListenerFreshSec = 20;
     private const int PubObserverDataMax = 4000;
+    private static readonly HashSet<string> PubReservedKinds = new(StringComparer.Ordinal)
+        { "layer", "layer.noisy", "ui", "area", "level", "entity", "hud", "agent", "server", "server.noisy" };
 
     private readonly object _pubLock = new();
     private readonly List<JObject> _pubEvents = new();
-    private readonly Dictionary<string, JObject> _pubClaims = new();   // "<seq>:<stage>" -> {by, at, stage}
+    private readonly Dictionary<long, Dictionary<string, JObject>> _pubClaims = new();   // event seq -> stage -> {by, at, stage, claimSeq, until?}
     private readonly Dictionary<string, (HashSet<string> kinds, Action<string> handler)> _pubLocal = new();
     private readonly Dictionary<string, (HashSet<string> kinds, DateTime seen, string? who)> _pubRemote = new();
     private long _pubSeq;
-    private bool _pubLoaded;
+    private bool _pubLoaded, _pubClosed;
     private string? _pubWhy;
 
     private string PubFile => Path.Combine(_bridgeDir, "pubsub", "events.jsonl");
 
-    /// <summary>From Initialise: the two PluginBridge methods other plugins call.</summary>
+    /// <summary>From Initialise: the two PluginBridge methods other plugins call, and the log read off the main thread.</summary>
     private void PubRegister()
     {
         GameController.PluginBridge.SaveMethod(PublishMethodName, (Func<string, string, string>)PubPublishFromPlugin);
-        GameController.PluginBridge.SaveMethod(SubscribeMethodName, (Func<string, string, Action<string>, string>)PubSubscribeLocal);
+        GameController.PluginBridge.SaveMethod(SubscribeMethodName, (Func<string, string, Action<string>?, string>)PubSubscribeLocal);
+        System.Threading.ThreadPool.QueueUserWorkItem(_ => { lock (_pubLock) PubLoadLocked(); });
+    }
+
+    /// <summary>From OnClose / hot reload: delegates other plugins still hold answer bridge_reloaded instead of writing a log
+    /// with a sequence the next load also hands out.</summary>
+    private void PubClose()
+    {
+        lock (_pubLock) { _pubClosed = true; _pubLocal.Clear(); }
     }
 
     private string? ProcessPubSubMethod(string method, JToken? p) => method switch
@@ -86,9 +99,18 @@ public partial class WhatsAnAiBridge
                 _pubEvents.Add(e);
                 if (_pubEvents.Count > PubRing * 2) _pubEvents.RemoveRange(0, PubRing);
             }
-            if (_pubEvents.Count > PubRing) _pubEvents.RemoveRange(0, _pubEvents.Count - PubRing);
+            PubTrimLocked();
         }
         catch (Exception ex) { _pubWhy = $"reading {PubFile}: {ex.Message}"; LogError($"[PubSub] {_pubWhy}"); }
+    }
+
+    /// <summary>The ring keeps the newest events; claims of events that left it go with them.</summary>
+    private void PubTrimLocked()
+    {
+        if (_pubEvents.Count > PubRing) _pubEvents.RemoveRange(0, _pubEvents.Count - PubRing);
+        if (_pubEvents.Count == 0) return;
+        var oldest = _pubEvents[0]["seq"]!.Value<long>();
+        foreach (var seq in _pubClaims.Keys.Where(s => s < oldest).ToList()) _pubClaims.Remove(seq);
     }
 
     private void PubApplyClaimLocked(JObject e)
@@ -96,12 +118,30 @@ public partial class WhatsAnAiBridge
         var kind = e["kind"]?.ToString();
         if (kind is not ("pubsub.claim" or "pubsub.release")) return;
         var d = e["data"] as JObject;
-        var key = $"{d?["ref"]}:{d?["stage"] ?? "handle"}";
-        if (kind == "pubsub.claim") _pubClaims[key] = new JObject { ["by"] = d?["by"], ["at"] = e["at"], ["stage"] = d?["stage"] ?? "handle", ["claimSeq"] = e["seq"] };
-        else _pubClaims.Remove(key);
+        if (d?["ref"]?.Type != JTokenType.Integer) return;
+        var seq = d["ref"]!.Value<long>();
+        var stage = d["stage"]?.ToString() ?? "handle";
+        if (kind == "pubsub.claim")
+        {
+            if (!_pubClaims.TryGetValue(seq, out var stages)) _pubClaims[seq] = stages = new Dictionary<string, JObject>();
+            stages[stage] = new JObject { ["by"] = d["by"], ["at"] = e["at"], ["stage"] = stage, ["claimSeq"] = e["seq"], ["until"] = d["until"] };
+        }
+        else if (_pubClaims.TryGetValue(seq, out var stages))
+        {
+            stages.Remove(stage);
+            if (stages.Count == 0) _pubClaims.Remove(seq);
+        }
     }
 
-    /// <summary>Adds an event (seq, time, file, observer copy) and returns it with the local handlers to call after the lock.</summary>
+    /// <summary>A live claim of (seq, stage): null when there is none or its ttl ran out.</summary>
+    private JObject? PubHeldLocked(long seq, string stage) =>
+        _pubClaims.TryGetValue(seq, out var stages) && stages.TryGetValue(stage, out var c) && !PubLapsed(c) ? c : null;
+
+    private static bool PubLapsed(JObject claim) =>
+        claim["until"]?.Type == JTokenType.String && DateTime.TryParse(claim["until"]!.ToString(), null, System.Globalization.DateTimeStyles.RoundtripKind, out var u)
+        && u.ToUniversalTime() < DateTime.UtcNow;
+
+    /// <summary>Adds an event (seq, time, file) and returns it with the local handlers to call after the lock.</summary>
     private (JObject e, List<(string name, Action<string> handler)> handlers) PubAddLocked(string kind, JObject data, string? source)
     {
         PubLoadLocked();
@@ -111,12 +151,12 @@ public partial class WhatsAnAiBridge
             ["t"] = Math.Round(ObsClock.Elapsed.TotalMilliseconds, 1), ["source"] = source, ["data"] = data,
         };
         _pubEvents.Add(e);
-        if (_pubEvents.Count > PubRing) _pubEvents.RemoveRange(0, _pubEvents.Count - PubRing);
         PubApplyClaimLocked(e);
+        PubTrimLocked();
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(PubFile)!);
-            File.AppendAllText(PubFile, e.ToString(Formatting.None) + "\n");   // rare events: a synchronous append keeps the order
+            File.AppendAllText(PubFile, e.ToString(Formatting.None) + "\n");   // rare events (a few a minute): a synchronous append keeps the order
             _pubWhy = null;
         }
         catch (Exception ex) { _pubWhy = $"writing {PubFile}: {ex.Message}"; }
@@ -124,7 +164,7 @@ public partial class WhatsAnAiBridge
         return (e, handlers);
     }
 
-    /// <summary>Publish outside the lock's side effects: the observer copy and the local handlers.</summary>
+    /// <summary>Publish, then outside the lock the observer copy and the local handlers.</summary>
     private JObject PubPublish(string kind, JObject data, string? source)
     {
         JObject e; List<(string name, Action<string> handler)> handlers; JArray listeners;
@@ -167,8 +207,18 @@ public partial class WhatsAnAiBridge
             .Select(kv => new JObject { ["subscriber"] = kv.Key, ["who"] = kv.Value.who, ["seenAgoSec"] = Math.Round((now - kv.Value.seen).TotalSeconds, 1) }));
     }
 
-    private static HashSet<string> PubKinds(IEnumerable<string>? kinds) =>
-        new((kinds ?? []).Select(k => k.Trim()).Where(k => k.Length > 0), StringComparer.Ordinal);
+    private static HashSet<string> PubKinds(IEnumerable<string>? kinds)
+    {
+        var set = new HashSet<string>((kinds ?? []).Select(k => k.Trim()).Where(k => k.Length > 0), StringComparer.Ordinal);
+        if (set.Count == 0) set.Add("*");
+        return set;
+    }
+
+    private static string? PubKindRefused(string? kind) =>
+        string.IsNullOrWhiteSpace(kind) ? "kind is empty"
+        : kind.StartsWith("pubsub.", StringComparison.Ordinal) ? $"'{kind}': pubsub.* kinds are the bridge's own"
+        : PubReservedKinds.Contains(kind) ? $"'{kind}' is one of the observer's own kinds ({string.Join(", ", PubReservedKinds)})"
+        : null;
 
     // ── PluginBridge ─────────────────────────────────────────────────
 
@@ -176,24 +226,29 @@ public partial class WhatsAnAiBridge
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(kind)) return Err("missing_kind", "AIBridge.Publish(kind, json): kind is empty.").ToString(Formatting.None);
-            if (kind.StartsWith("pubsub.", StringComparison.Ordinal)) return Err("reserved_kind", $"'{kind}': pubsub.* kinds are the bridge's own.").ToString(Formatting.None);
+            if (_pubClosed) return Err("bridge_reloaded", $"This {PublishMethodName} belongs to a bridge load that has ended: look the method up again.").ToString(Formatting.None);
+            if (PubKindRefused(kind) is { } refused) return Err("bad_kind", $"{PublishMethodName}: {refused}.").ToString(Formatting.None);
             JObject data;
             try { data = string.IsNullOrWhiteSpace(json) ? new JObject() : JToken.Parse(json) is JObject o ? o : new JObject { ["value"] = JToken.Parse(json) }; }
-            catch (JsonException ex) { return Err("bad_json", $"AIBridge.Publish({kind}): json does not parse: {ex.Message}").ToString(Formatting.None); }
+            catch (JsonException ex) { return Err("bad_json", $"{PublishMethodName}({kind}): json does not parse: {ex.Message}").ToString(Formatting.None); }
             return PubPublish(kind, data, data["source"]?.ToString() ?? "plugin").ToString(Formatting.None);
         }
         catch (Exception ex) { return Err("publish_failed", ex.Message).ToString(Formatting.None); }
     }
 
-    private string PubSubscribeLocal(string subscriber, string kindsCsv, Action<string> handler)
+    private string PubSubscribeLocal(string subscriber, string kindsCsv, Action<string>? handler)
     {
-        if (string.IsNullOrWhiteSpace(subscriber) || handler == null)
-            return Err("bad_subscription", "AIBridge.Subscribe(subscriber, kindsCsv, handler): subscriber and handler are required.").ToString(Formatting.None);
-        var kinds = PubKinds(kindsCsv?.Split(','));
+        if (string.IsNullOrWhiteSpace(subscriber))
+            return Err("bad_subscription", $"{SubscribeMethodName}(subscriber, kindsCsv, handler): subscriber is required.").ToString(Formatting.None);
         lock (_pubLock)
         {
-            PubLoadLocked();
+            if (_pubClosed) return Err("bridge_reloaded", $"This {SubscribeMethodName} belongs to a bridge load that has ended: look the method up again.").ToString(Formatting.None);
+            if (handler == null)
+            {
+                var removed = _pubLocal.Remove(subscriber);
+                return new JObject { ["ok"] = true, ["subscriber"] = subscriber, ["unsubscribed"] = removed }.ToString(Formatting.None);
+            }
+            var kinds = PubKinds(kindsCsv?.Split(','));
             _pubLocal[subscriber] = (kinds, handler);
             return new JObject { ["ok"] = true, ["subscriber"] = subscriber, ["kinds"] = new JArray(kinds), ["seq"] = _pubSeq }.ToString(Formatting.None);
         }
@@ -205,6 +260,7 @@ public partial class WhatsAnAiBridge
     {
         var since = p?["since"]?.Value<long>() ?? 0;
         var kinds = (p?["kinds"] as JArray)?.Select(k => k.ToString()).ToHashSet();
+        if (kinds != null && (kinds.Count == 0 || kinds.Contains("*"))) kinds = null;
         var limit = Math.Clamp(p?["limit"]?.Value<int>() ?? 100, 1, 500);
         var subscriber = p?["subscriber"]?.ToString();
         lock (_pubLock)
@@ -229,11 +285,17 @@ public partial class WhatsAnAiBridge
     private JObject PubWithClaimsLocked(JObject e)
     {
         var copy = (JObject)e.DeepClone();
-        var prefix = e["seq"] + ":";
-        var claims = new JObject();
-        foreach (var (key, c) in _pubClaims)
-            if (key.StartsWith(prefix, StringComparison.Ordinal)) claims[key[prefix.Length..]] = c.DeepClone();
-        if (claims.Count > 0) copy["claims"] = claims;
+        if (_pubClaims.TryGetValue(e["seq"]!.Value<long>(), out var stages))
+        {
+            var claims = new JObject();
+            foreach (var (stage, c) in stages)
+            {
+                var cc = (JObject)c.DeepClone();
+                if (PubLapsed(c)) cc["lapsed"] = true;
+                claims[stage] = cc;
+            }
+            if (claims.Count > 0) copy["claims"] = claims;
+        }
         return copy;
     }
 
@@ -243,19 +305,20 @@ public partial class WhatsAnAiBridge
         if (seq is null or <= 0) return Err("missing_seq", "Pass seq: the event to claim (pubsub.events lists them).");
         var stage = p?["stage"]?.ToString() is { Length: > 0 } s ? s : "handle";
         var by = p?["by"]?.ToString() is { Length: > 0 } b ? b : CurrentWho() ?? "anon";
-        JObject result;
+        var ttl = p?["ttlSec"]?.Value<double?>();
         lock (_pubLock)
         {
             PubLoadLocked();
             var ev = _pubEvents.FirstOrDefault(e => e["seq"]!.Value<long>() == seq);
             if (ev == null)
                 return Err("unknown_event", $"No event {seq} in memory (kept: {(_pubEvents.Count > 0 ? $"{_pubEvents[0]["seq"]}..{_pubSeq}" : "none")}).");
-            if (_pubClaims.TryGetValue($"{seq}:{stage}", out var held))
+            if (PubHeldLocked(seq.Value, stage) is { } held)
                 return new JObject { ["ok"] = false, ["error"] = "claimed", ["message"] = $"Event {seq} ({stage}) was claimed by {held["by"]} at {held["at"]}.", ["claim"] = held.DeepClone() };
-            var (claim, _) = PubAddLocked("pubsub.claim", new JObject { ["ref"] = seq, ["stage"] = stage, ["by"] = by }, by);
-            result = new JObject { ["ok"] = true, ["claimSeq"] = claim["seq"], ["stage"] = stage, ["by"] = by, ["event"] = PubWithClaimsLocked(ev) };
+            var data = new JObject { ["ref"] = seq, ["stage"] = stage, ["by"] = by };
+            if (ttl is > 0) data["until"] = DateTime.UtcNow.AddSeconds(ttl.Value).ToString("O");
+            var (claim, _) = PubAddLocked("pubsub.claim", data, by);
+            return new JObject { ["ok"] = true, ["claimSeq"] = claim["seq"], ["stage"] = stage, ["by"] = by, ["until"] = data["until"], ["event"] = PubWithClaimsLocked(ev) };
         }
-        return result;
     }
 
     private JObject PubRelease(JToken? p)
@@ -263,12 +326,16 @@ public partial class WhatsAnAiBridge
         var seq = p?["seq"]?.Value<long>();
         if (seq is null or <= 0) return Err("missing_seq", "Pass seq: the claimed event.");
         var stage = p?["stage"]?.ToString() is { Length: > 0 } s ? s : "handle";
-        var by = CurrentWho() ?? "anon";
+        var by = p?["by"]?.ToString() is { Length: > 0 } b ? b : CurrentWho() ?? "anon";
+        var force = p?["force"]?.Value<bool>() == true;
         lock (_pubLock)
         {
             PubLoadLocked();
-            if (!_pubClaims.ContainsKey($"{seq}:{stage}")) return Err("not_claimed", $"Event {seq} ({stage}) is not claimed.");
-            PubAddLocked("pubsub.release", new JObject { ["ref"] = seq, ["stage"] = stage, ["by"] = by, ["reason"] = p?["reason"] }, by);
+            if (!_pubClaims.TryGetValue(seq.Value, out var stages) || !stages.TryGetValue(stage, out var held))
+                return Err("not_claimed", $"Event {seq} ({stage}) is not claimed.");
+            if (!force && held["by"]?.ToString() != by && !PubLapsed(held))
+                return Err("not_yours", $"Event {seq} ({stage}) is held by {held["by"]}, not {by}: only its holder releases it (or force).");
+            PubAddLocked("pubsub.release", new JObject { ["ref"] = seq, ["stage"] = stage, ["by"] = by, ["reason"] = p?["reason"], ["force"] = force ? true : null }, by);
         }
         return new JObject { ["ok"] = true, ["seq"] = seq, ["stage"] = stage };
     }
@@ -276,10 +343,9 @@ public partial class WhatsAnAiBridge
     private JObject PubPublishRemote(JToken? p)
     {
         var kind = p?["kind"]?.ToString();
-        if (string.IsNullOrWhiteSpace(kind)) return Err("missing_kind", "Pass kind, e.g. feedback.reply.");
-        if (kind.StartsWith("pubsub.", StringComparison.Ordinal)) return Err("reserved_kind", $"'{kind}': pubsub.* kinds are the bridge's own (use pubsub.claim / pubsub.release).");
+        if (PubKindRefused(kind) is { } refused) return Err("bad_kind", $"{refused} (claims go through pubsub.claim / pubsub.release).");
         var data = p?["data"] switch { JObject o => (JObject)o.DeepClone(), null or { Type: JTokenType.Null } => new JObject(), var v => new JObject { ["value"] = v.DeepClone() } };
-        return PubPublish(kind, data, p?["source"]?.ToString() ?? CurrentWho() ?? "anon");
+        return PubPublish(kind!, data, p?["source"]?.ToString() ?? CurrentWho() ?? "anon");
     }
 
     private JObject PubStatus()
@@ -290,7 +356,7 @@ public partial class WhatsAnAiBridge
             var now = DateTime.UtcNow;
             return new JObject
             {
-                ["ok"] = true, ["seq"] = _pubSeq, ["kept"] = _pubEvents.Count, ["claims"] = _pubClaims.Count,
+                ["ok"] = true, ["seq"] = _pubSeq, ["kept"] = _pubEvents.Count, ["claims"] = _pubClaims.Sum(kv => kv.Value.Count),
                 ["counts"] = JObject.FromObject(_pubEvents.GroupBy(e => e["kind"]!.ToString()).ToDictionary(g => g.Key, g => g.Count())),
                 ["plugins"] = new JArray(_pubLocal.Select(kv => new JObject { ["subscriber"] = kv.Key, ["kinds"] = new JArray(kv.Value.kinds) })),
                 ["listeners"] = new JArray(_pubRemote.Select(kv => new JObject
