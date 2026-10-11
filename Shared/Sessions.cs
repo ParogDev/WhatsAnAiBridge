@@ -157,6 +157,7 @@ public partial class WhatsAnAiBridge
     private volatile AgentsView _agentsView = AgentsView.Empty;
     private long _reqClientId;                         // the connection of the request being served (set in DrainRequests)
     private DateTime _sessionsTickAt = DateTime.MinValue;
+    private string? _attnTickError;                   // the last attention tick fault logged (SessionsTick): a repeat is not logged again
     private string? _mcpDeployedSha, _mcpDeployedVersion;   // the deployed MCP build, from the newest hello that carried one
     private volatile SessionsView _sessionsView = SessionsView.Empty;   // written under the lock, read by the panel every frame
     private static readonly TimeSpan SessionForget = TimeSpan.FromMinutes(30), RestartGoExpiry = TimeSpan.FromMinutes(3), RestartKeep = TimeSpan.FromMinutes(20);
@@ -733,7 +734,14 @@ public partial class WhatsAnAiBridge
                     GuideLog(new JObject { ["text"] = $"{DisplayNameOfLocked(r.Who)} was granted a HUD restart but didn't restart it", ["kind"] = "warn", ["title"] = "HUD restart" });
                 }
             }
-            AttnTickLocked(now, player, guide, flowRunning, flowWho, hlPending, effects);
+            // A fault in the attention queue must not take the sessions down with it (restarts, the chip, the agents view):
+            // it is logged once per distinct message and the tick goes on.
+            try { AttnTickLocked(now, player, guide, flowRunning, flowWho, hlPending, effects); }
+            catch (Exception ex)
+            {
+                var msg = $"[Attention] tick: {ex.GetType().Name}: {ex.Message}";
+                if (msg != _attnTickError) { _attnTickError = msg; LogError(msg + " " + ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim()); }
+            }
             AgentsViewRebuildLocked();   // after the queue moved: the floor holder is one of the asks
             SessionsPublishLocked();
         }

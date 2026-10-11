@@ -1004,19 +1004,55 @@ public partial class WhatsAnAiBridge
         try
         {
             if (string.IsNullOrEmpty(_bridgeDir) || !File.Exists(AttnFile)) return;
-            var items = JsonConvert.DeserializeObject<List<AttentionItem>>(File.ReadAllText(AttnFile)) ?? new();
-            foreach (var i in items.Where(i => i.Kind == "ask" && i.Question != null && !string.IsNullOrEmpty(i.Id)))
+            var items = JsonConvert.DeserializeObject<List<AttentionItem?>>(File.ReadAllText(AttnFile)) ?? new();
+            var loaded = new List<AttentionItem>();
+            var dropped = 0;
+            foreach (var i in items)
             {
-                // On screen when the HUD went down: back in line (it will be seen again), keeping its place and its Laters.
-                if (i.Status == "showing") { i.Status = "queued"; i.ShownAt = i.VisibleSince = null; }
-                if (i.Status != "queued" || _attn.Any(x => x.Id == i.Id)) continue;
+                if (AttnRestoredOk(i) is not { } ok) { dropped++; continue; }
+                if (loaded.Any(x => x.Id == ok.Id)) { dropped++; continue; }
+                loaded.Add(ok);
+            }
+            // A follower whose leader did not come back would wait for a card that never shows: it stands on its own.
+            foreach (var i in loaded)
+                if (i.MergedInto != null && !loaded.Any(x => x.Id == i.MergedInto && x.MergedInto == null)) i.MergedInto = null;
+            foreach (var i in loaded)
+            {
                 _attn.Add(i);
                 if (int.TryParse(i.Id.TrimStart('A'), out var n) && n > _attnIds) _attnIds = n;
             }
+            if (dropped > 0) LogError($"[Attention] {AttnFile}: {dropped} entr{(dropped == 1 ? "y" : "ies")} unreadable or incomplete, skipped (the rest restored)");
             _attnSavedKey = AttnSaveKeyLocked();
             if (_attn.Count > 0) _attnSeq++;
         }
-        catch (Exception ex) { LogError($"[Attention] {AttnFile} unreadable, starting empty: {ex.Message}"); }
+        catch (Exception ex) { LogError($"[Attention] {AttnFile} unreadable, starting empty: {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// One entry of queue.json, checked before it joins the line (a hand-edited or half-written file must never break
+    /// the HUD: everything the arbiter and the card read is there and in range), or null to skip it. Only a queued ask is
+    /// restored, back in line if it was on screen when the HUD went down (it will be seen again), keeping its place and
+    /// its Laters; what belongs to a live turn (replays, held strips, steps) is never persisted and is cleared.
+    /// </summary>
+    private static AttentionItem? AttnRestoredOk(AttentionItem? i)
+    {
+        if (i == null || i.Kind != "ask" || string.IsNullOrWhiteSpace(i.Question) || string.IsNullOrEmpty(i.Id) || string.IsNullOrEmpty(i.SessionId)) return null;
+        if (i.Options is not { Count: >= 2 and <= 4 } || i.Options.Any(o => o == null || string.IsNullOrEmpty(o.Id) || string.IsNullOrWhiteSpace(o.Label))) return null;
+        if (i.Status == "showing") { i.Status = "queued"; i.ShownAt = i.VisibleSince = null; }
+        if (i.Status != "queued") return null;
+        i.Who ??= "";
+        i.Title = string.IsNullOrWhiteSpace(i.Title) ? "Question" : i.Title;
+        i.Urgency = i.Urgency == "calm" ? "calm" : "now";
+        i.TtlSec = Math.Clamp(i.TtlSec, AttnTtlMin, AttnTtlMax);
+        i.ShowTtlSec = Math.Clamp(i.ShowTtlSec, 30, AttnTtlMax);
+        i.LaterCount = Math.Clamp(i.LaterCount, 0, AttnLaterHoldSec.Length);
+        if (i.QueuedAt == default) i.QueuedAt = i.CreatedAt == default ? DateTime.UtcNow : i.CreatedAt;
+        if (i.CreatedAt == default) i.CreatedAt = i.QueuedAt;
+        i.Implicit = i.Detached = i.Priority = false;
+        i.Pending = null; i.PendingParams = null; i.StepId = null; i.HlOwner = null;
+        i.Answer = null; i.EndedAt = null; i.Reason = i.Why = null;
+        if (i.MergedInto == i.Id) i.MergedInto = null;
+        return i;
     }
 
     private string AttnSaveKeyLocked() =>
