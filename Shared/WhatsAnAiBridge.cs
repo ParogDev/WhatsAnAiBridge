@@ -94,6 +94,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         if (Settings.EnableTcp.Value)
             StartTcpServer();
         InstrStartup();   // patches a previous load of the bridge left in this HUD process (Instrumentation.cs)
+        try { PubRegister(); } catch (Exception ex) { LogError($"[PubSub] registering {PublishMethodName} / {SubscribeMethodName} on PluginBridge failed: {ex.Message}"); }
 
         return true;
     }
@@ -122,6 +123,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         InstrEndWhere(_ => true, "cut: the HUD is closing");
         InstrStopTimer();
         StopWatchdog();
+        PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
         _tcpServer?.Dispose();
         _tcpServer = null;
         RecordingCut("hud_closing");
@@ -135,6 +137,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         InstrEndWhere(_ => true, "cut: the bridge is reloading");
         InstrStopTimer();
         StopWatchdog();
+        PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
         _tcpServer?.Dispose();
         _tcpServer = null;
         RecordingCut("bridge_reload");
@@ -288,7 +291,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessLabMethod(method, parameters) ?? ProcessProfileMethod(method, parameters)
                          ?? ProcessSelfPerfMethod(method, parameters) ?? ProcessGcPoolMethod(method, parameters)
                          ?? ProcessSettingsMethod(method, parameters) ?? ProcessFocusMethod(method, parameters)
-                         ?? ProcessSessionMethod(method, parameters) ?? ProcessInstrumentMethod(method, parameters);
+                         ?? ProcessSessionMethod(method, parameters) ?? ProcessInstrumentMethod(method, parameters)
+                         ?? ProcessPubSubMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string
