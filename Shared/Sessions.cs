@@ -213,7 +213,8 @@ public partial class WhatsAnAiBridge
             s.Connected = true;
             s.LastSeen = DateTime.UtcNow;
             s.DisconnectedAt = null; s.AttnCleaned = false;   // back within the grace: its turn and requests stay
-            s.Hue = AttnPickHueLocked(s);
+            var hue = AttnPickHueLocked(s);
+            if (hue != s.Hue) { s.Hue = hue; _attnSeq++; }   // the cards' who-dots are in the attention queue's published copies
             // Another entry still bound to this connection (a client that re-identified) is no longer on it.
             foreach (var o in _sessions.Values)
                 if (o != s && (o.ClientId == _reqClientId || o.PrevClientId == _reqClientId))
@@ -756,6 +757,7 @@ public partial class WhatsAnAiBridge
         var waiting = _restarts.Where(r => r.Status == "waiting").OrderBy(r => r.At).FirstOrDefault();
         var granted = _restarts.FirstOrDefault(r => r.Status == "go");
         _sessionsView = new SessionsView(sessions, connected, RestartCopyLocked(waiting), RestartCopyLocked(granted), McpRolloutLocked());
+        AttnPublishLocked();   // and the attention queue's copies (the ask card, the next strip, the dot), when they changed
     }
 
     /// <summary>The panel's copy of a request, with the requester's who-dot hue and how many later requests merged into it.</summary>

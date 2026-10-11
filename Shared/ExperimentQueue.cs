@@ -420,7 +420,7 @@ public partial class WhatsAnAiBridge
         if (next is { Chain: true } && next.Experiment == step.Experiment && step.AttnItem != null)
         {
             lock (_sessionLock)
-                if (_attn.FirstOrDefault(i => i.Id == step.AttnItem) is { Status: "showing" } turn) { turn.StepId = next.Id; turn.Title = next.Title ?? $"{next.Experiment}: {next.Label}"; _attnSeq++; }
+                if (_attn.FirstOrDefault(i => i.Id == step.AttnItem) is { Status: "showing" } turn) { turn.StepId = next.Id; turn.Title = next.Title ?? $"{next.Experiment}: {next.Label}"; _attnSeq++; AttnPublishLocked(); }
             var r = QueueStartCore(next.Id, "chain", step.AttnItem);
             if (r["error"] == null) return;
         }

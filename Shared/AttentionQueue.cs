@@ -121,10 +121,11 @@ public partial class WhatsAnAiBridge
     private AttnPlayer _attnPlayer = new("loading", false, false, false, 0, 0, false, null);
     private string _attnRestartKey = "";                            // waiting/go restarts last tick (a change bumps seq)
     private double _attnLastCombatAt = -1e9;
-    private AskView? _askView;
-    private long _askViewSeq = -1;
-    private AttnQueueView _queueView = AttnQueueView.Empty;
-    private long _queueViewSeq = -1;
+    // The panel's copies (AttnPublishLocked): rebuilt under the lock when the queue changed, read by Render without it.
+    private volatile AskView? _askPub;
+    private volatile AttnQueueView _queuePub = AttnQueueView.Empty;
+    private long _attnPubSeq = -1;
+    private bool _attnPubRestart;
     // The panel's card slot: when the card that is leaving (answer receipt, fade) is gone. The hand-over gap counts from
     // here (attention-queue-ui.md 5): the next card's visibleSince, a queued call's replay and a restart's countdown wait
     // for max(granted, slot free) + the gap, so the player sees one card leave before the next arrives.
@@ -706,42 +707,48 @@ public partial class WhatsAnAiBridge
 
     // ── The card (GuidePanelAsk.cs draws it) ─────────────────────────
 
-    /// <summary>The ask that holds the floor, for the card (null when the floor holder is not a card question).</summary>
-    internal AskView? AttnAskSnapshot()
+    /// <summary>The ask that holds the floor, for the card (null when the floor holder is not a card question): the copy published last, no lock.</summary>
+    internal AskView? AttnAskSnapshot() => _askPub;
+
+    /// <summary>The waiting items, holder and player state for the next strip and the dot (GuidePanelQueue.cs): the copy published last, no lock.</summary>
+    internal AttnQueueView AttnQueueSnapshot() => _queuePub;
+
+    /// <summary>
+    /// Publish the panel's copies of the queue (the ask on the floor, the waiting items) when it changed since the last
+    /// publish (seq, or a restart starting or ending to wait). Under the sessions lock: from AttnRun after every change
+    /// (outside the arbiter's lock, in its own short one) and from SessionsPublishLocked (the 4 Hz tick, a hello, a
+    /// connection closing, a restart request). The panel reads them by reference every frame and never takes the lock.
+    /// </summary>
+    private void AttnPublishLocked()
     {
-        lock (_sessionLock)
-        {
-            if (_askViewSeq == _attnSeq) return _askView;
-            _askViewSeq = _attnSeq;
-            var h = AttnHolderLocked();
-            if (h is not { Kind: "ask", Question: not null }) return _askView = null;
-            var now = DateTime.UtcNow;
-            var whos = new[] { h }.Concat(_attn.Where(f => f.MergedInto == h.Id && f.Status == "showing")).ToList();
-            // Re-asked after the player's x within the de-dup window: the card may stay, it may not shout (4.5).
-            var softened = _attn.Any(d => d != h && d.SessionId == h.SessionId && d is { Status: "dismissed", Reason: "user_dismissed", Question: not null, EndedAt: { } e }
-                && (now - e).TotalSeconds <= AttnDedupWindowSec && string.Equals(d.Question, h.Question, StringComparison.OrdinalIgnoreCase));
-            return _askView = new AskView(h.Id, whos.Select(x => x.Who).ToArray(), whos.Select(x => x.SessionId).ToArray(), whos.Select(x => AttnHueLocked(x.SessionId, x.Who)).ToArray(), h.Title, h.Question,
-                h.Detail, h.Options.ToArray(), h.Urgency, h.CreatedAt, h.ShownAt ?? now, h.VisibleSince, h.LaterCount, h.LaterCount > 0 ? h.QueuedAt : null,
-                softened, h.VisibleSince == null);
-        }
+        var restart = AttnRestartWaitingLocked();
+        if (_attnPubSeq == _attnSeq && _attnPubRestart == restart) return;
+        _attnPubSeq = _attnSeq; _attnPubRestart = restart;
+        var now = DateTime.UtcNow;
+        _askPub = AttnAskViewLocked(now);
+        _queuePub = AttnQueueViewLocked(now, restart);
     }
 
-    /// <summary>The waiting items, holder and player state for the next strip and the dot (GuidePanelQueue.cs); rebuilt only when the queue changes.</summary>
-    internal AttnQueueView AttnQueueSnapshot()
+    private AskView? AttnAskViewLocked(DateTime now)
     {
-        lock (_sessionLock)
-        {
-            if (_queueViewSeq == _attnSeq) return _queueView;
-            _queueViewSeq = _attnSeq;
-            AttnLoadLocked();
-            var now = DateTime.UtcNow;
-            var holder = AttnHolderLocked();
-            var order = AttnOrderLocked(now);
-            if (order.Count == 0 && holder == null && !AttnRestartWaitingLocked()) return _queueView = AttnQueueView.Empty;
-            var rows = order.Select(i => new AttnQueueRow(i.Who, i.SessionId, AttnHueLocked(i.SessionId, i.Who), i.Kind, i.Question ?? i.Title, i.Urgency, i.QueuedAt, i.EligibleAt)).ToArray();
-            return _queueView = new AttnQueueView(rows, holder?.Who, holder?.SessionId, holder?.Kind, holder?.Urgency, AttnRestartWaitingLocked(),
-                _attnPlayer.Calm, _attnPlayer.Combat, _attnPlayer.Paused);
-        }
+        var h = AttnHolderLocked();
+        if (h is not { Kind: "ask", Question: not null }) return null;
+        var whos = new[] { h }.Concat(_attn.Where(f => f.MergedInto == h.Id && f.Status == "showing")).ToList();
+        // Re-asked after the player's x within the de-dup window: the card may stay, it may not shout (4.5).
+        var softened = _attn.Any(d => d != h && d.SessionId == h.SessionId && d is { Status: "dismissed", Reason: "user_dismissed", Question: not null, EndedAt: { } e }
+            && (now - e).TotalSeconds <= AttnDedupWindowSec && string.Equals(d.Question, h.Question, StringComparison.OrdinalIgnoreCase));
+        return new AskView(h.Id, whos.Select(x => x.Who).ToArray(), whos.Select(x => x.SessionId).ToArray(), whos.Select(x => AttnHueLocked(x.SessionId, x.Who)).ToArray(), h.Title, h.Question,
+            h.Detail, h.Options.ToArray(), h.Urgency, h.CreatedAt, h.ShownAt ?? now, h.VisibleSince, h.LaterCount, h.LaterCount > 0 ? h.QueuedAt : null,
+            softened, h.VisibleSince == null);
+    }
+
+    private AttnQueueView AttnQueueViewLocked(DateTime now, bool restart)
+    {
+        var holder = AttnHolderLocked();
+        var order = AttnOrderLocked(now);
+        if (order.Count == 0 && holder == null && !restart) return AttnQueueView.Empty;
+        var rows = order.Select(i => new AttnQueueRow(i.Who, i.SessionId, AttnHueLocked(i.SessionId, i.Who), i.Kind, i.Question ?? i.Title, i.Urgency, i.QueuedAt, i.EligibleAt)).ToArray();
+        return new AttnQueueView(rows, holder?.Who, holder?.SessionId, holder?.Kind, holder?.Urgency, restart, _attnPlayer.Calm, _attnPlayer.Combat, _attnPlayer.Paused);
     }
 
     /// <summary>The panel's card slot stays busy until <paramref name="until"/> (a card's answer receipt and fade): the hand-over gap counts from then.</summary>
@@ -948,6 +955,7 @@ public partial class WhatsAnAiBridge
         string? json = null;
         lock (_sessionLock)
         {
+            AttnPublishLocked();   // the panel's copies, after every change (AttnRun runs once per change, outside the arbiter's lock)
             if (!_attnLoaded) return;
             var key = AttnSaveKeyLocked();
             if (key == _attnSavedKey) return;
