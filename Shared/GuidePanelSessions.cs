@@ -7,13 +7,14 @@ using ImGuiNET;
 namespace WhatsAnAiBridge;
 
 /// <summary>
-/// The guide panel's "who is asking what" surfaces (state in Sessions.cs; drawn from GuidePanel.DrawGuideBody):
-///   - the restart card: an agent waits to restart the HUD. Blocked, it lists what it waits for (whose test, how long
-///     left) in the warn tone; free, it counts down the hold in the accent tone. Restart now grants it over the
-///     blockers; Not now denies it. Calm like the queue card: a restart is routine, the user only needs the choice.
-///   - the "who is asking" strip: one line naming the agents that ask the user for something right now, shown only
-///     while two or more do (and the panel is up anyway), so two requests never read as one voice. Hover for what each
-///     asks. Idle and disconnected sessions, branches and folders never appear: they are nothing the player can act on.
+/// The guide panel's sessions surfaces (state in Sessions.cs):
+///   - the restart card (drawn from GuidePanel.DrawGuideBody): an agent waits to restart the HUD. Blocked, it lists what
+///     it waits for (whose test, how long left; the attention queue's floor holder as "Claude: your answer to: ...") in
+///     the warn tone under the floor card; free, it takes the top slot with a flash in the requester's hue and counts
+///     down the hold in the accent tone - the countdown starts only then (Sessions.cs RestartEvaluateLocked), so the
+///     player sees all of it. Restart now grants it over the blockers; Not now denies it. Calm like the queue card: a
+///     restart is routine, the user only needs the choice. The "who is asking" line is the next strip's second form
+///     (GuidePanelQueue.cs).
 ///   - the sessions chip (DrawSessionsChip): the always-there, quiet member of the family. A small ink pill in the
 ///     toast look beside the card's strip, at title-row height, card or no card (background draw list, no window; the
 ///     hover is a hit-test like the quiet dot's): the two-rings glyph and how many agents share the HUD, at half
@@ -23,7 +24,8 @@ namespace WhatsAnAiBridge;
 ///     act), and an MCP rollout in progress (supervised servers not swapped yet, which cuts nothing) is a 2 px accent
 ///     hairline along its bottom edge, filled by how many are on the deployed build. It ghosts with the card while a
 ///     highlight carries the words. Hover: the panel's hover sheet (GuideHover) with who does what, each MCP's build
-///     and mode, the restart and the rollout, its texts rebuilt once a second.
+///     and mode, the restart and the rollout, its texts rebuilt once a second. The chip never names who is next in
+///     line: that is the next strip's (the two never say the same thing).
 /// Agents are named by their readable name (AgentsView.NameOf: never a system folder, no worktree hash tail, unique).
 /// Same rules as the rest of the panel: ASCII only, glyphs on the draw list, colours from PanelTheme plus the fixed tones.
 /// </summary>
@@ -37,14 +39,25 @@ public partial class WhatsAnAiBridge
     private const float ChipAlphaCalm = 0.5f, ChipAlphaWaiting = 0.85f, ChipAlphaGranted = 0.95f;
     private const string ChipRestartingText = "RESTARTING";
 
-    private void DrawRestartCard(RestartRequest rr, AgentsView ag, PanelTheme th, double now, DateTime utc)
+    /// <param name="floorUp">A floor card (or its leaving receipt, or the hand-over gap) is drawn above this card.</param>
+    private void DrawRestartCard(RestartRequest rr, bool floorUp, AgentsView ag, PanelTheme th, double now, DateTime utc)
     {
         var dl = ImGui.GetWindowDrawList();
         var font = ImGui.GetFont();
         var f = ImGui.GetFontSize();
         var small = f * 0.85f;
-        var blocked = rr.Blockers.Count > 0;
+        var a = _askUi;
+        // During a hand-over the answered ask has left the bridge's blockers but is still leaving the slot (its receipt,
+        // its fade, the gap): the card keeps its waiting form and names it, and flips to the countdown with the reflow.
+        var handover = floorUp && rr.Blockers.Count == 0 && a.LeaveWho != null && (a.LeaveAt > -1e8 || now < a.GapUntil);
+        var blocked = rr.Blockers.Count > 0 || handover;
         var tone = blocked ? ToneWarn : ToneAccent;
+        // The top slot: nothing above it and nothing blocking. Taking it flashes the card in the requester's hue and guards
+        // its buttons for the click guard, like any card changing owner.
+        var onTop = !floorUp && !blocked;
+        if (onTop) { if (a.RestartTop != rr.Id) { a.RestartTop = rr.Id; a.RestartTopAt = now; } }
+        else a.RestartTop = null;
+        var guard = onTop && now - a.RestartTopAt < AskClickGuardSec;
         var p = ImGui.GetCursorScreenPos();
         var x0 = p.X + GuideEdge;
         var w = GuideWidth - GuideEdge * 2;
@@ -55,15 +68,12 @@ public partial class WhatsAnAiBridge
         const float bulletIndent = 14f;
 
         // Text first, then measure: the background needs the full height.
-        var shown = Math.Min(rr.Blockers.Count, RestartBlockersShown);
-        var secondsToGo = rr.HoldUntil is DateTime h ? Math.Max(0, (int)Math.Ceiling((h - utc).TotalSeconds)) : 0;
-        var lead = blocked
-            ? (rr.Blockers.Count == 1 ? "Waits for:" : $"Waits for {rr.Blockers.Count} things:")
-            : secondsToGo > 0 ? $"Restarts in {secondsToGo} s - nothing running would be lost." : "Restarting now.";
-        var who = ag.NameOf(rr.Who);
-        var meta = $"{who} asked {GuideElapsed(utc - rr.At)} ago" + (rr.Reason != null ? $" - {rr.Reason}" : "");
+        var bullets = handover ? 1 : rr.Blockers.Count;
+        var shown = Math.Min(bullets, RestartBlockersShown);
+        var rt = RestartTextsFor(rr, handover, blocked, bullets, shown, ag, utc, innerW, innerW - bulletIndent);
+        var who = rt.Who;
         var bodyH = f + 4                                   // lead line
-                    + (blocked ? shown * (small + 3) + (rr.Blockers.Count > shown ? small + 3 : 0) : 0)
+                    + (blocked ? shown * (small + 3) + (bullets > shown ? small + 3 : 0) : 0)
                     + small + 8                             // meta
                     + btnH;
         var hgt = headH + bodyH + 10;
@@ -73,9 +83,11 @@ public partial class WhatsAnAiBridge
         dl.AddRectFilled(min, max, U(th.Card, 0.94f), 6f);
         var flashT = (now - _guideUi.RestartArrivedAt) / GuideFlashSec;
         if (flashT < 1) dl.AddRectFilled(min, max, U(tone, 0.28f * (float)(1 - flashT)), 6f);
+        var topT = a.RestartTop == rr.Id ? (now - a.RestartTopAt) / GuideFlashSec : 1;
+        if (topT < 1) dl.AddRectFilled(min, max, U(AttnHueColor(rr.Hue), 0.35f * (float)(1 - topT)), 6f);
         dl.AddRect(min, max, U(tone, 0.55f), 6f, ImDrawFlags.None, 1f);
 
-        // Header: restart glyph + label in the tone; right: who asked, dimmed.
+        // Header: restart glyph + label in the tone; right: who asked, with its who-dot, dimmed.
         var hy = min.Y + headH * 0.5f;
         var x = min.X + pad;
         DrawRestartGlyph(dl, new Vector2(x + 6, hy), U(tone), blocked ? 0 : now);
@@ -84,48 +96,104 @@ public partial class WhatsAnAiBridge
         dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(tone), label);
         x += ImGui.CalcTextSize(label).X * (small / f) + 10;
         var rx = max.X - pad;
-        var whoW = ImGui.CalcTextSize(who).X * (small / f);
-        if (rx - whoW > x) { dl.AddText(font, small, new Vector2(rx - whoW, hy - small * 0.5f), U(th.TextDim), who); rx -= whoW + 10; }
+        var whoW = ImGui.CalcTextSize(who).X * (small / f) + WhoDotW;
+        if (rx - whoW > x)
+        {
+            DrawWhoDot(dl, new Vector2(rx - whoW + GuideDotR, hy), rr.Hue);
+            dl.AddText(font, small, new Vector2(rx - whoW + WhoDotW, hy - small * 0.5f), U(th.TextDim), who);
+            rx -= whoW + 10;
+        }
 
         // Body: the lead line, then the blockers as bullets (whose, what, how long left).
         var y = min.Y + headH + 2;
         var bx = min.X + pad;
-        dl.AddText(font, f, new Vector2(bx, y), U(blocked ? th.Text : tone), GuideClipText(lead, innerW));
+        dl.AddText(font, f, new Vector2(bx, y), U(blocked ? th.Text : tone), rt.Lead);
         y += f + 4;
         if (blocked)
         {
+            foreach (var line in rt.Lines)
+            {
+                dl.AddCircleFilled(new Vector2(bx + 4, y + small * 0.5f), 2f, U(th.TextDim), 8);
+                dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim), line);
+                y += small + 3;
+            }
+            if (rt.More != null)
+            {
+                dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim, 0.8f), rt.More);
+                y += small + 3;
+            }
+        }
+        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim, 0.85f), rt.Meta);
+        y += small + 8;
+
+        // Buttons: Restart now (primary) and Not now. The tooltip says what Restart now would interrupt. Both ignore clicks
+        // for the click guard right after the card took the top slot.
+        QueuePillButton(dl, "##restart_now", new Vector2(bx, y), btnH, "Restart now", true, th, out var nowClick, rt.Interrupt);
+        if (nowClick && !guard) RestartAllow(rr.Id);
+        var notW = ImGui.CalcTextSize("Not now").X + 24;
+        QueuePillButton(dl, "##restart_deny", new Vector2(max.X - pad - notW, y), btnH, "Not now", false, th, out var denyClick,
+            "Decline this restart. The agent is told to ask you in chat or try later.");
+        if (denyClick && !guard) RestartDeny(rr.Id);
+
+        ImGui.SetCursorScreenPos(p);
+        ImGui.Dummy(new Vector2(GuideWidth, hgt + GuideEdge * 2));
+    }
+
+    /// <summary>The restart card's texts, already clipped to its width (RestartTextsFor).</summary>
+    private sealed class RestartTexts
+    {
+        public RestartRequest? For; public long Second = -1; public int ToGo = -1; public bool Handover; public AgentsView? Ag; public float W;
+        public string? LeaveWho, LeaveSession;
+        public string Who = "", Lead = "", Meta = "", Interrupt = "";
+        public string[] Lines = [];
+        public string? More;
+    }
+
+    private readonly RestartTexts _restartTexts = new();
+
+    /// <summary>
+    /// The restart card's lead, bullets, meta line and Restart now tooltip, composed and clipped only when something they
+    /// show changes: the request copy (Sessions.cs republishes it at most 4 Hz), the second (elapsed and time-left
+    /// counts), the countdown, the names (the AgentsView instance), the hand-over or the width. Not per frame: the card can
+    /// stay up for minutes while a test blocks the restart.
+    /// </summary>
+    private RestartTexts RestartTextsFor(RestartRequest rr, bool handover, bool blocked, int bullets, int shown, AgentsView ag, DateTime utc, float w, float bulletW)
+    {
+        var c = _restartTexts;
+        var a = _askUi;
+        var second = utc.Ticks / TimeSpan.TicksPerSecond;
+        var toGo = rr.HoldUntil is DateTime h ? Math.Max(0, (int)Math.Ceiling((h - utc).TotalSeconds)) : 0;
+        if (ReferenceEquals(c.For, rr) && c.Second == second && c.ToGo == toGo && c.Handover == handover && ReferenceEquals(c.Ag, ag) && c.W == w
+            && (!handover || (c.LeaveWho == a.LeaveWho && c.LeaveSession == a.LeaveSession))) return c;
+        c.For = rr; c.Second = second; c.ToGo = toGo; c.Handover = handover; c.Ag = ag; c.W = w; c.LeaveWho = a.LeaveWho; c.LeaveSession = a.LeaveSession;
+        c.Who = ag.NameOf(rr.Session, rr.Who);
+        var leaveWho = handover ? ag.NameOf(a.LeaveSession, a.LeaveWho) : null;
+        c.Lead = GuideClipText(blocked
+            ? (bullets == 1 ? "Waits for:" : $"Waits for {bullets} things:")
+            : toGo > 0 ? $"Restarts in {toGo} s - nothing running would be lost." : "Restarting now.", w);
+        c.Meta = GuideClipText($"{c.Who} asked {GuideElapsed(utc - rr.At)} ago" + (rr.Reason != null ? $" - {rr.Reason}" : "")
+                               + (rr.MergedCount > 0 ? $" - +{rr.MergedCount} more agent{(rr.MergedCount == 1 ? " waits" : "s wait")} for it" : ""), w);
+        if (handover) { c.Lines = [GuideClipText($"{leaveWho}: your answer", bulletW)]; c.More = null; }
+        else if (blocked)
+        {
+            var lines = new string[shown];
             for (var i = 0; i < shown; i++)
             {
                 var b = rr.Blockers[i];
                 var line = (b.Who != null ? $"{ag.NameOf(b.Who)}: " : "") + b.Label;
                 if (b.Until is DateTime u && u > utc) line += $" ({GuideElapsed(u - utc)} left)";
                 if (b.Yours) line += " (its own)";
-                dl.AddCircleFilled(new Vector2(bx + 4, y + small * 0.5f), 2f, U(th.TextDim), 8);
-                dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim), GuideClipText(line, innerW - bulletIndent));
-                y += small + 3;
+                lines[i] = GuideClipText(line, bulletW);
             }
-            if (rr.Blockers.Count > shown)
-            {
-                dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim, 0.8f), $"+{rr.Blockers.Count - shown} more");
-                y += small + 3;
-            }
+            c.Lines = lines;
+            c.More = rr.Blockers.Count > shown ? $"+{rr.Blockers.Count - shown} more" : null;
         }
-        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim, 0.85f), GuideClipText(meta, innerW));
-        y += small + 8;
-
-        // Buttons: Restart now (primary) and Not now. The tooltip says what Restart now would interrupt.
-        var interrupt = blocked
+        else { c.Lines = []; c.More = null; }
+        c.Interrupt = rr.Blockers.Count > 0
             ? "Restart now anyway. It interrupts " + string.Join(", ", rr.Blockers.Take(3).Select(b => b.Who != null ? $"{ag.NameOf(b.Who)}'s {b.Label}" : b.Label)) + "; they are told why in the log."
+            : handover ? $"Restart now anyway. It interrupts {leaveWho}'s hand-over; they are told why in the log."
             : "Don't wait the countdown.";
-        QueuePillButton(dl, "##restart_now", new Vector2(bx, y), btnH, "Restart now", true, th, out var nowClick, interrupt);
-        if (nowClick) RestartAllow(rr.Id);
-        var notW = ImGui.CalcTextSize("Not now").X + 24;
-        QueuePillButton(dl, "##restart_deny", new Vector2(max.X - pad - notW, y), btnH, "Not now", false, th, out var denyClick,
-            "Decline this restart. The agent is told to ask you in chat or try later.");
-        if (denyClick) RestartDeny(rr.Id);
-
-        ImGui.SetCursorScreenPos(p);
-        ImGui.Dummy(new Vector2(GuideWidth, hgt + GuideEdge * 2));
+        return c;
     }
 
     /// <summary>12 px restart glyph: a three-quarter arc with an arrow head; it turns slowly while counting down (t = 0: still).</summary>
@@ -142,84 +210,7 @@ public partial class WhatsAnAiBridge
         dl.AddTriangleFilled(tip - dir * 3.2f, tip + dir * 1.2f + n * 2.6f, tip + dir * 1.2f - n * 2.6f, col);
     }
 
-    /// <summary>
-    /// "WHO IS ASKING  Claude, Tester": the agents that ask the user for something right now, by readable name, askers
-    /// first (AgentsView's order). Drawn only when two or more ask (DrawGuideBody). Hover: one line per agent, "Name:
-    /// what it asks" in plain words, with what else it does after a dash. Nothing about idle or gone sessions, branches
-    /// or folders: the player can act on none of it.
-    /// </summary>
-    private void DrawSessionsStrip(AgentsView ag, PanelTheme th)
-    {
-        var dl = ImGui.GetWindowDrawList();
-        var font = ImGui.GetFont();
-        var f = ImGui.GetFontSize();
-        var small = f * 0.85f;
-        var p = ImGui.GetCursorScreenPos();
-        var x0 = p.X + GuideEdge;
-        var w = GuideWidth - GuideEdge * 2;
-        const float pad = 12f;
-        var h = f + 10;
-        var min = new Vector2(x0, p.Y);
-        var max = new Vector2(x0 + w, p.Y + h);
-        dl.AddRectFilled(min, max, U(th.Card, 0.92f), 5f);
-        dl.AddRect(min, max, U(ToneNeutral, 0.4f), 5f);
-
-        // The line and the hover text are recomposed only when the agents view changes (Sessions.cs rebuilds it at 4 Hz,
-        // and only while something is going on): no per-frame string building.
-        var u = _guideUi;
-        if (!ReferenceEquals(u.SessionsAgents, ag))
-        {
-            u.SessionsAgents = ag;
-            var sb = new System.Text.StringBuilder();
-            var tip = new System.Text.StringBuilder();
-            foreach (var x1 in ag.Active)
-            {
-                if (x1.Asks.Length == 0) continue;
-                if (sb.Length > 0) sb.Append(", ");
-                sb.Append(x1.Name);
-                for (var i = 0; i < x1.Asks.Length; i++)
-                {
-                    if (tip.Length > 0) tip.Append('\n');
-                    tip.Append(x1.Name).Append(": ").Append(AskWords(x1.Asks[i]));
-                    if (i == 0 && x1.Doing.Length > 0) tip.Append(" - also ").Append(string.Join(", ", x1.Doing));
-                }
-            }
-            u.SessionsLine = sb.ToString();
-            u.SessionsTip = tip.ToString();
-        }
-
-        ImGui.SetCursorScreenPos(min);
-        ImGui.InvisibleButton("##sessions_strip", new Vector2(w, h));
-        // The hover, in the toast family under the card's stack: one line per ask, "Name: what it asks".
-        if (ImGui.IsItemHovered() && u.SessionsTip != null) GuideHover("Who is asking you for something", u.SessionsTip, null, null, ToneNeutral);
-
-        var hy = min.Y + h * 0.5f;
-        var x = min.X + pad;
-        DrawSessionsGlyph(dl, new Vector2(x + 6, hy), U(ToneNeutral));
-        x += 18;
-        const string label = "WHO IS ASKING";
-        dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(ToneNeutral), label);
-        x += ImGui.CalcTextSize(label).X * (small / f) + 10;
-        var rx = max.X - pad;
-        if (rx - x > 40 && u.SessionsLine != null) dl.AddText(new Vector2(x, hy - f * 0.5f), U(th.TextDim), GuideClipText(u.SessionsLine, rx - x));
-
-        ImGui.SetCursorScreenPos(p);
-        ImGui.Dummy(new Vector2(GuideWidth, h + GuideEdge));
-    }
-
-    /// <summary>
-    /// A pilot blocker's label (Sessions.cs BlockersLocked) as the strip's hover says it: the step itself for "waiting
-    /// for the user: X" (the strip already says it is asking), "asks: X" for a question, the rest as written.
-    /// </summary>
-    private static string AskWords(string ask)
-    {
-        const string waiting = "waiting for the user: ", question = "question for the user: ";
-        if (ask.StartsWith(waiting, StringComparison.Ordinal)) return ask[waiting.Length..];
-        if (ask.StartsWith(question, StringComparison.Ordinal)) return "asks: " + ask[question.Length..];
-        return ask;
-    }
-
-    /// <summary>12 px "several" glyph: two overlapping rings.</summary>
+    /// <summary>12 px "several" glyph: two overlapping rings (the next strip's "WHO IS ASKING" form, GuidePanelQueue.cs).</summary>
     private static void DrawSessionsGlyph(ImDrawListPtr dl, Vector2 c, uint col)
     {
         dl.AddCircle(new Vector2(c.X - 2.5f, c.Y), 4.2f, col, 14, 1.3f);

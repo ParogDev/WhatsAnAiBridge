@@ -114,6 +114,7 @@ public partial class WhatsAnAiBridge
         public Dictionary<int, bool> WasFound = new();   // order -> found at the last resolution
         public string? Session, Who;        // the session that set it (Sessions.cs), or the one a flow / queued step belongs to
         public int? StepGen;                // the guide step it goes with (GuideState.StepGen), null = none
+        public bool AsksHeld;               // its question strips wait for the session's turn (attention queue, C7): boxes draw, strips don't
         public int Pending => Targets.Count(t => t.Ask != null && t.Answer == null && !t.Expired);
     }
 
@@ -297,7 +298,69 @@ public partial class WhatsAnAiBridge
     internal JObject HighlightSet(JToken? p)
     {
         var me = CurrentSession();   // before the lock (Sessions.cs lock order)
-        return HighlightSetLayer(HlOwnerOf(me), me?.Id, me?.Label, p);
+        var owner = HlOwnerOf(me);
+        // Asked targets are questions for the player: their strips wait for this session's turn (AttentionQueue.cs, C7).
+        // Decided before the layer is set, so a held strip never shows for a frame.
+        var asked = p?["clear"]?.Value<bool>() == true ? 0 : (p?["targets"] as JArray)?.OfType<JObject>().Count(t => !string.IsNullOrWhiteSpace(t["ask"]?.ToString())) ?? 0;
+        var (hold, note, item) = asked > 0 ? AttnHighlightAsks(me, owner, asked, Clip(p?["title"]?.ToString(), 40)) : (false, null, null);
+        var r = HighlightSetLayer(owner, me?.Id, me?.Label, p, hold);
+        // The turn may have come between the decision and the layer (the tick granted it and released a layer that was
+        // not set yet): then the strips would stay held under a showing turn until they expire. Release them now.
+        if (hold && item != null && AttnItemShowing(item)) { HighlightHoldAsks(owner, false); hold = false; }
+        if (hold && r["error"] == null) { r["asksHeld"] = true; r["attentionNote"] = note; }
+        return r;
+    }
+
+    /// <summary>
+    /// Hold or release a layer's question strips (the attention queue decides; boxes are never held). A released question
+    /// gets its whole default lifetime from now: its strip was not on screen while it waited, so the player gets the same
+    /// HlDefaultLifeSec to answer it as a question asked on its turn (its box was, and kept fading by the same clock).
+    /// </summary>
+    internal void HighlightHoldAsks(string owner, bool hold)
+    {
+        lock (_hlLock)
+        {
+            if (HlLayerLocked(owner) is not { } l || l.AsksHeld == hold) return;
+            l.AsksHeld = hold;
+            if (!hold)
+            {
+                var life = DateTime.UtcNow.AddSeconds(HlDefaultLifeSec);
+                foreach (var t in l.Targets)
+                    if (t is { Ask: not null, Answer: null, Expired: false, EndsAt: { } e } && e < life) t.EndsAt = life;
+            }
+            _hlLastResolve = DateTime.MinValue;   // the next resolution rebuilds the boxes with or without their questions
+        }
+    }
+
+    /// <summary>
+    /// Per layer (layers without questions included): its unanswered questions still on (Pending), the answered ones, and
+    /// those whose lifetime ran out unanswered, for the attention tick (how an asked highlight's turn ends).
+    /// </summary>
+    internal Dictionary<string, (int Pending, int Answered, int Expired)> HighlightPendingByLayer()
+    {
+        lock (_hlLock)
+        {
+            var d = new Dictionary<string, (int, int, int)>(StringComparer.Ordinal);
+            foreach (var l in _hlLayers)
+            {
+                int pending = 0, answered = 0, expired = 0;
+                foreach (var t in l.Targets)
+                {
+                    if (t.Ask == null) continue;
+                    if (t.Answer != null) answered++;
+                    else if (t.Expired) expired++;
+                    else pending++;
+                }
+                d[l.Owner] = (pending, answered, expired);
+            }
+            return d;
+        }
+    }
+
+    /// <summary>Remove one owner's layer (a disconnected session, after the attention queue's grace).</summary>
+    internal void HighlightDropLayer(string owner)
+    {
+        lock (_hlLock) _hlLayers.RemoveAll(l => l.Owner == owner);
     }
 
     /// <summary>
@@ -305,7 +368,7 @@ public partial class WhatsAnAiBridge
     /// only clear + force clears every layer (the user asked for a clean screen). The HUD's own highlights use the
     /// layers "flow" (a running guided flow) and "queue" (a queued step being recorded), owned by whoever started them.
     /// </summary>
-    internal JObject HighlightSetLayer(string owner, string? session, string? who, JToken? p)
+    internal JObject HighlightSetLayer(string owner, string? session, string? who, JToken? p, bool asksHeld = false)
     {
         if (p?["clear"]?.Value<bool>() == true || p?["targets"] is not JArray arr)
         {
@@ -354,6 +417,7 @@ public partial class WhatsAnAiBridge
             var hl = HlLayerOrNewLocked(owner);
             hl.Session = session; hl.Who = who;
             hl.StepGen = step.Active && step.Session == session ? step.Gen : null;
+            hl.AsksHeld = asksHeld;
             hl.Targets = targets;
             hl.Boxes = new(); hl.Missing = new();
             hl.Auto = p?["auto"]?.Value<bool>() != false;
@@ -509,7 +573,8 @@ public partial class WhatsAnAiBridge
                     foreach (var (_, x, y, w, h, panned) in found)
                     {
                         var (covered, docked) = HlPanelRule(panels, x, y, w, h, t);
-                        boxes.Add(new(x, y, w, h, t.Label, t.Tier, t.Order, i, t.Action, t.Ask, t.Answer, panned, pan.PanX, pan.PanY, end, covered, docked));
+                        if (layer.AsksHeld) docked = false;   // a held question has no strip to dock
+                        boxes.Add(new(x, y, w, h, t.Label, t.Tier, t.Order, i, t.Action, layer.AsksHeld ? null : t.Ask, t.Answer, panned, pan.PanX, pan.PanY, end, covered, docked));
                     }
                     // Checkbox state (PoE2: byte at +0x60A of the checkbox element, see finding ui.poe2.checkbox-checked).
                     if (t.UntilCond is "checked" or "unchecked" && found.FirstOrDefault(f => f.e != null).e is { } cb)

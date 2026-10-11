@@ -41,6 +41,7 @@ public partial class WhatsAnAiBridge
         public string?[] OptionWhy = [];        // per option of the current step: null = available, else why not
         public List<string> Preflight = new();  // static paths that do not resolve: API or layout changes
         public string? Who;                     // the session that started it (Sessions.cs: a restart waits for a running flow)
+        public string? AttnItem;                // the attention turn it runs under (AttentionQueue.cs), ended with the flow
         public int Rev;
     }
 
@@ -50,22 +51,59 @@ public partial class WhatsAnAiBridge
 
     private string? ProcessFlowMethod(string method, JToken? p) => method switch
     {
-        "guide.flow" => SafeMemory(() => FlowSet(p)),
+        "guide.flow" => SafeMemory(() => FlowRequest(p)),
         "guide.flow_state" => SafeMemory(FlowStateJson),
         _ => null,
     };
 
-    internal JObject FlowSet(JToken? p)
+    /// <summary>
+    /// guide.flow from an agent, under the attention queue (AttentionQueue.cs): a start from a session that does not hold
+    /// the floor is queued and starts when its turn comes; stop acts only on the caller's own flow.
+    /// </summary>
+    private JObject FlowRequest(JToken? p)
     {
-        if (p?["stop"]?.Value<bool>() == true || p?["steps"] is not JArray steps)
+        var me = CurrentSession();
+        if (p?["stop"]?.Value<bool>() == true || p?["steps"] is not JArray)
         {
-            bool wasRunning;
-            lock (_flowLock) { wasRunning = _flow.Status == "running"; if (wasRunning) _flow.Status = "stopped"; _flow.Rev++; }
-            HighlightSetLayer(HlFlow, null, null, new JObject { ["clear"] = true });
-            if (wasRunning) GuideSet(new JObject { ["clear"] = true });   // the card showed the flow: don't leave its instruction behind
-            return FlowStateJson();
+            string? who; bool running;
+            lock (_flowLock) { who = _flow.Who; running = _flow.Status == "running"; }
+            if (running && me != null && who != null && who != me.Label)
+                return Err("not_yours", $"The running flow '{FlowSnapshot().title ?? "untitled"}' is {who}'s: stop acts only on your own (the player can stop it on the card).");
+            return FlowStop();
         }
-        var flow = new FlowState { Title = Clip(p["title"]?.ToString(), 80), Goal = p["goal"], Status = "running", StartedAt = DateTime.UtcNow, Who = CurrentWho() };
+        var gate = AttnGate(me, "guide.flow", p, "flow", Clip(p["title"]?.ToString(), 80));
+        if (!gate.Proceed) return gate.Reply!;
+        return FlowStart(p, me?.Label, gate.Item?.Id);
+    }
+
+    /// <summary>Stop the running flow (its highlight and card go with it) and end the attention turn it held.</summary>
+    internal JObject FlowStop()
+    {
+        bool wasRunning; string? item, who;
+        lock (_flowLock) { wasRunning = _flow.Status == "running"; if (wasRunning) _flow.Status = "stopped"; _flow.Rev++; item = _flow.AttnItem; who = _flow.Who; }
+        HighlightSetLayer(HlFlow, null, null, new JObject { ["clear"] = true });
+        if (wasRunning) GuideSet(new JObject { ["clear"] = true }, null);   // the card showed the flow: don't leave its instruction behind
+        if (wasRunning) AttnEndFlowItem(item, "flow_stopped");
+        return FlowStateJson();
+    }
+
+    /// <summary>The flow's turn ends with it, unless the turn is a step's (a queued step's flow ends with the step).</summary>
+    private void AttnEndFlowItem(string? item, string reason)
+    {
+        if (item == null) return;
+        bool flowTurn;
+        lock (_sessionLock) flowTurn = _attn.FirstOrDefault(i => i.Id == item) is { Kind: "flow" };
+        if (flowTurn) AttnEndById(item, "done", reason, reason == "flow_stopped" ? "the flow was stopped" : "the flow ended");
+    }
+
+    /// <summary>
+    /// Start a flow. who: the session it is for (stamped on the card and its highlight from Render); item: the attention
+    /// turn it runs under (ended when the flow ends), or null when something else holds the turn (a queued step).
+    /// </summary>
+    internal JObject FlowStart(JToken? p, string? who, string? item)
+    {
+        if (p?["steps"] is not JArray steps) return Err("no_steps", "Pass steps: [{label, done, options:[{target, label?, when?}]}].");
+        var flow = new FlowState { Title = Clip(p["title"]?.ToString(), 80), Goal = p["goal"], Status = "running", StartedAt = DateTime.UtcNow, Who = who, AttnItem = item };
         var timeout = p["timeoutSec"]?.Value<double>();
         if (timeout is > 0) flow.EndsAt = DateTime.UtcNow.AddSeconds(Math.Min(timeout.Value, 3600));
         foreach (var s in steps.OfType<JObject>().Take(20))
@@ -220,8 +258,7 @@ public partial class WhatsAnAiBridge
                 ["title"] = f.Title, ["instruction"] = option >= 0 ? step.Options[option].Label ?? step.Label : step.Label,
                 ["status"] = "waiting", ["step"] = current + 1, ["steps"] = f.Steps.Count,
                 ["detail"] = option >= 0 ? null : "Not on screen yet - open the panel it is in",
-                ["who"] = f.Who,   // the flow runs in the HUD (no session on this call): the card names who started it
-            });
+            }, f.Who);   // the flow runs in the HUD (no session on this call): the card names who started it, and no disconnect clears it
         }
         catch (Exception ex) { LogError($"[GuideFlow] {ex.Message}"); }
     }
@@ -230,8 +267,9 @@ public partial class WhatsAnAiBridge
     {
         lock (_flowLock) { f.Status = status; f.Current = -1; f.Option = -1; f.Rev++; }
         HighlightSetLayer(HlFlow, null, f.Who, new JObject { ["clear"] = true });
-        GuideSet(new JObject { ["status"] = status == "done" ? "done" : "failed", ["detail"] = detail, ["step"] = null, ["steps"] = null });
+        GuideSet(new JObject { ["status"] = status == "done" ? "done" : "failed", ["detail"] = detail, ["step"] = null, ["steps"] = null }, f.Who);
         GuideLog(new JObject { ["text"] = $"{f.Title ?? "Guide"}: {detail}", ["kind"] = status == "done" ? "result" : "warn" });
+        AttnEndFlowItem(f.AttnItem, status == "done" ? "flow_done" : "flow_timeout");
     }
 
     // ── Conditions ───────────────────────────────────────────────────
