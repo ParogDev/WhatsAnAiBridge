@@ -95,6 +95,7 @@ public partial class WhatsAnAiBridge
             }).ToList(),
             ReloadEnabled = Settings.AllowPluginReload.Value,
             AvoidLockingDllFiles = AvoidLockingDllFiles,
+            Instrumentation = InstrState(full: false),
         };
     }
 
@@ -180,6 +181,11 @@ public partial class WhatsAnAiBridge
             var pm = Core.Current?.pluginManager ?? throw new InvalidOperationException("plugin manager unavailable");
             if (r.CompiledPath != null)
             {
+                // A measurement patching this plugin ends first: the old load's patches go, and nothing is measured on a
+                // load that is about to stop running (Instrumentation.cs).
+                var asms = pm.Plugins.Where(w => string.Equals(w.PathOnDisk, r.CompiledPath, StringComparison.OrdinalIgnoreCase))
+                    .Select(PluginObject).Where(o => o != null).Select(o => o!.GetType().Assembly).ToHashSet();
+                InstrDropPluginAssemblies(asms, $"cut: {r.Folder} was reloaded (hud.reload_plugin) mid-measurement");
                 var reload = pm.GetType().GetMethod("ReloadSourcePlugin", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
                              ?? throw new MissingMethodException("PluginManager.ReloadSourcePlugin not found in this HUD build");
                 reload.Invoke(pm, new object?[] { r.CompiledPath, null });
@@ -217,6 +223,8 @@ public class HudPluginsResponse
     [JsonProperty("reloadEnabled")] public bool ReloadEnabled { get; set; }
     /// <summary>HUD core setting; reloads of changed code need it on (see WhatsAnAiBridge.AvoidLockingDllFiles).</summary>
     [JsonProperty("avoidLockingDllFiles")] public bool AvoidLockingDllFiles { get; set; }
+    /// <summary>Harmony patches of running measurements, leftovers and cleanup events (instrument.state, Instrumentation.cs).</summary>
+    [JsonProperty("instrumentation", NullValueHandling = NullValueHandling.Ignore)] public Newtonsoft.Json.Linq.JObject? Instrumentation { get; set; }
     [JsonProperty("error", NullValueHandling = NullValueHandling.Ignore)] public string? Error { get; set; }
 }
 

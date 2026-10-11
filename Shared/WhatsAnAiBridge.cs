@@ -93,6 +93,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
         if (Settings.EnableTcp.Value)
             StartTcpServer();
+        InstrStartup();   // patches a previous load of the bridge left in this HUD process (Instrumentation.cs)
 
         return true;
     }
@@ -118,6 +119,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void OnClose()
     {
+        InstrEndWhere(_ => true, "cut: the HUD is closing");
+        InstrStopTimer();
         StopWatchdog();
         _tcpServer?.Dispose();
         _tcpServer = null;
@@ -128,6 +131,9 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void OnPluginDestroyForHotReload()
     {
+        // The next load of the bridge can't see this load's sets: end them now (its startup sweep catches what remains).
+        InstrEndWhere(_ => true, "cut: the bridge is reloading");
+        InstrStopTimer();
         StopWatchdog();
         _tcpServer?.Dispose();
         _tcpServer = null;
@@ -282,7 +288,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessLabMethod(method, parameters) ?? ProcessProfileMethod(method, parameters)
                          ?? ProcessSelfPerfMethod(method, parameters) ?? ProcessGcPoolMethod(method, parameters)
                          ?? ProcessSettingsMethod(method, parameters) ?? ProcessFocusMethod(method, parameters)
-                         ?? ProcessSessionMethod(method, parameters);
+                         ?? ProcessSessionMethod(method, parameters) ?? ProcessInstrumentMethod(method, parameters);
         if (structured != null) return structured;
 
         // Map JSON-RPC method to query string

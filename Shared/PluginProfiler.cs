@@ -28,7 +28,6 @@ public partial class WhatsAnAiBridge
     // Per frame on the stack: callee time and callee allocation accumulated so far, and this call's allocation start.
     [ThreadStatic] private static Stack<(long childTime, long childAlloc, long allocStart)>? _profChild;
     private static readonly Dictionary<string, JObject> ProfJobs = new();
-    private Harmony? _profHarmony;
 
     private string? ProcessProfileMethod(string method, JToken? p) => method switch
     {
@@ -73,7 +72,8 @@ public partial class WhatsAnAiBridge
     {
         if (!Settings.AllowHudInstrumentation.Value)
             return Err("instrumentation_disabled", "Enable 'Allow HUD Instrumentation' in the bridge settings (Dev Loop) to profile plugins.");
-        if (_profOn) return Err("busy", "A profile is already running.");
+        // Busy from the first patch on (patching takes seconds before _profOn), not only while measuring.
+        if (_profOn || InstrAnyActive("profile")) return Err("busy", "A profile is already running.");
         var name = p?["name"]?.ToString() ?? "";
         var duration = Math.Clamp(p?["durationMs"]?.Value<int>() ?? 3000, 500, 20_000);
         var asmName = p?["assembly"]?.ToString();
@@ -83,6 +83,7 @@ public partial class WhatsAnAiBridge
         const BindingFlags any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         Assembly? asm;
         string label;
+        string? pluginName = null;   // a plugin's patches end when that plugin reloads or unloads
         if (!string.IsNullOrWhiteSpace(asmName))
         {
             // A HUD assembly (e.g. ExileCore2): profile its core. Only a filtered part at a time (type name substring),
@@ -96,16 +97,16 @@ public partial class WhatsAnAiBridge
         }
         else
         {
-            object? PluginOf(object w) => w.GetType().GetProperty("Plugin", any)?.GetValue(w) ?? w.GetType().GetField("_plugin", any)?.GetValue(w);
             // The HUD's display name, or the plugin's type name (what pipeline.trace reports, e.g. SkillDpsCore for "Skill DPS").
             var wrapper = Core.Current?.pluginManager?.Plugins.FirstOrDefault(w => string.Equals(w.Name, name, StringComparison.OrdinalIgnoreCase))
-                          ?? Core.Current?.pluginManager?.Plugins.FirstOrDefault(w => string.Equals(PluginOf(w)?.GetType().Name, name, StringComparison.OrdinalIgnoreCase));
+                          ?? Core.Current?.pluginManager?.Plugins.FirstOrDefault(w => string.Equals(PluginObject(w)?.GetType().Name, name, StringComparison.OrdinalIgnoreCase));
             if (wrapper == null)
                 return Err("not_found", $"No loaded plugin named '{name}'. Loaded: {string.Join(", ", Core.Current?.pluginManager?.Plugins.Select(w => w.Name) ?? [])}");
-            var plugin = PluginOf(wrapper);
+            var plugin = PluginObject(wrapper);
             asm = plugin?.GetType().Assembly;
             if (asm == null) return Err("not_found", $"Could not reach {name}'s plugin object (PluginWrapper.Plugin)");
             label = wrapper.Name;
+            pluginName = wrapper.Name;
         }
         if (!string.IsNullOrWhiteSpace(methodFilter)) label += $" (methods ~{methodFilter})";
         var self = asm == typeof(WhatsAnAiBridge).Assembly;
@@ -136,31 +137,61 @@ public partial class WhatsAnAiBridge
             }
         }
         ProfStats.Clear();
-        _profHarmony ??= new Harmony("whatsanaibridge.plugin-profiler");
         var pre = new HarmonyMethod(typeof(WhatsAnAiBridge).GetMethod(nameof(ProfPre), BindingFlags.Static | BindingFlags.NonPublic));
         var post = new HarmonyMethod(typeof(WhatsAnAiBridge).GetMethod(nameof(ProfPost), BindingFlags.Static | BindingFlags.NonPublic));
         var id = Guid.NewGuid().ToString("N")[..10];
         var job = new JObject { ["id"] = id, ["status"] = "patching", ["plugin"] = label, ["methods"] = targets.Count, ["durationMs"] = duration };
         lock (ProfJobs) { if (ProfJobs.Count >= 10) ProfJobs.Remove(ProfJobs.Keys.First()); ProfJobs[id] = job; }
-        var harmony = _profHarmony;
+        // Every patch belongs to this set and is removed (original code restored) when it ends, whatever ends it: done,
+        // instrument.cancel, a reload of the plugin, the set's expiry (Instrumentation.cs).
+        var set = InstrBegin(id, "profile", label, duration, CurrentWho());
         System.Threading.Tasks.Task.Run(async () =>
         {
             var refused = new JArray();
             var patched = 0;
-            var sw = Stopwatch.StartNew();
-            foreach (var m in targets)
+            long patchMs = 0;
+            double ohTicks = 0, ohBytes = 0;
+            JObject? foreground = null, ended;
+            string? failure = null;
+            var measuring = false;
+            long measuredMs = 0;
+            var window = new Stopwatch();
+            try
             {
-                try { harmony.Patch(m, prefix: pre, postfix: post); patched++; }
-                catch (Exception ex) { if (refused.Count < 20) refused.Add($"{m.DeclaringType?.Name}.{m.Name}: {ex.GetType().Name}"); }
+                var sw = Stopwatch.StartNew();
+                foreach (var m in targets)
+                {
+                    if (set.Cts.IsCancellationRequested) break;
+                    if (InstrPatch(set, m, pre, post, pluginName) is { } why) { if (refused.Count < 20) refused.Add($"{m.DeclaringType?.Name}.{m.Name}: {why}"); }
+                    else patched++;
+                }
+                patchMs = sw.ElapsedMilliseconds;
+                // The copies must call this load's types: a plugin reloaded since the first load shares its assembly name.
+                if (InstrBindingCheck(asm) is { } bad) throw new InvalidOperationException($"binding check failed, patches removed: {bad}");
+                (ohTicks, ohBytes) = ProfCalibrate(set, pre, post);
+                ProfStats.Clear();
+                MeasureBegin($"profiling {label}", duration);
+                measuring = true;
+                InstrArm(set, duration);
+                _profOn = !set.Cts.IsCancellationRequested;
+                window.Start();
+                await System.Threading.Tasks.Task.Delay(duration, set.Cts.Token);
             }
-            var patchMs = sw.ElapsedMilliseconds;
-            var (ohTicks, ohBytes) = ProfCalibrate(harmony, pre, post);
-            ProfStats.Clear();
-            MeasureBegin($"profiling {label}", duration);
-            _profOn = true;
-            await System.Threading.Tasks.Task.Delay(duration);
-            _profOn = false;
-            var foreground = MeasureEnd();
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { failure = $"{ex.GetType().Name}: {ex.Message}"; }
+            finally
+            {
+                _profOn = false;
+                measuredMs = window.ElapsedMilliseconds;
+                if (measuring) try { foreground = MeasureEnd(); } catch { }
+                ended = InstrEnd(set, failure == null ? "done" : $"failed: {failure}");
+            }
+            var endedBy = ended["endedBy"]?.ToString() ?? "done";
+            if (failure != null)
+            {
+                lock (ProfJobs) ProfJobs[id] = new JObject { ["id"] = id, ["status"] = "done", ["error"] = "profile_failed", ["message"] = failure, ["plugin"] = label, ["refused"] = refused, ["unpatch"] = ended };
+                return;
+            }
             // Remove the hooks' own cost (measured on an empty method) from every call's self numbers.
             foreach (var st in ProfStats.Values)
             {
@@ -169,36 +200,38 @@ public partial class WhatsAnAiBridge
                 st.AllocSelf = Math.Max(0, st.AllocSelf - (long)(st.Calls * ohBytes));
                 st.AllocInclusive = Math.Max(0, st.AllocInclusive - (long)(st.Calls * ohBytes));
             }
-            try { harmony.UnpatchAll(harmony.Id); } catch { }
+            double per = Math.Max(1, measuredMs);   // a cancelled or cut profile covers only the time it ran
             double Ms(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
             var stats = ProfStats.ToArray();
             var totalCalls = stats.Sum(kv => kv.Value.Calls);
             var result = new JObject
             {
-                ["id"] = id, ["status"] = "done", ["plugin"] = label, ["durationMs"] = duration,
+                ["id"] = id, ["status"] = "done", ["plugin"] = label, ["durationMs"] = duration, ["measuredMs"] = measuredMs,
+                ["endedBy"] = endedBy == "done" ? null : endedBy,
+                ["unpatch"] = ended,
                 ["foreground"] = foreground,
                 ["methodsPatched"] = patched, ["methodsCapped"] = targets.Count >= max, ["patchMs"] = patchMs, ["refused"] = refused, ["calls"] = totalCalls,
-                ["selfTotalMsPerSecond"] = Math.Round(stats.Sum(kv => Ms(kv.Value.Self)) * 1000.0 / duration, 3),
+                ["selfTotalMsPerSecond"] = Math.Round(stats.Sum(kv => Ms(kv.Value.Self)) * 1000.0 / per, 3),
                 ["hookOverhead"] = new JObject { ["usPerCall"] = Math.Round(ohTicks * 1e6 / Stopwatch.Frequency, 3), ["bytesPerCall"] = Math.Round(ohBytes, 1) },
                 ["note"] = "self = inclusive minus profiled callees (BCL/HUD calls count as self). The hooks' own cost (hookOverhead, measured on an empty method) is subtracted per call.",
                 ["top"] = new JArray(stats.OrderByDescending(kv => kv.Value.Self).Take(25).Select(kv => new JObject
                 {
                     ["method"] = $"{kv.Key.DeclaringType?.Name}.{kv.Key.Name}",
                     ["calls"] = kv.Value.Calls,
-                    ["selfMsPerSecond"] = Math.Round(Ms(kv.Value.Self) * 1000.0 / duration, 3),
-                    ["inclMsPerSecond"] = Math.Round(Ms(kv.Value.Inclusive) * 1000.0 / duration, 3),
+                    ["selfMsPerSecond"] = Math.Round(Ms(kv.Value.Self) * 1000.0 / per, 3),
+                    ["inclMsPerSecond"] = Math.Round(Ms(kv.Value.Inclusive) * 1000.0 / per, 3),
                     ["selfUsPerCall"] = Math.Round(Ms(kv.Value.Self) * 1000.0 / Math.Max(1, kv.Value.Calls), 2),
-                    ["allocSelfKBPerSecond"] = Math.Round(kv.Value.AllocSelf / 1024.0 * 1000.0 / duration, 1),
-                    ["allocInclKBPerSecond"] = Math.Round(kv.Value.AllocInclusive / 1024.0 * 1000.0 / duration, 1),
+                    ["allocSelfKBPerSecond"] = Math.Round(kv.Value.AllocSelf / 1024.0 * 1000.0 / per, 1),
+                    ["allocInclKBPerSecond"] = Math.Round(kv.Value.AllocInclusive / 1024.0 * 1000.0 / per, 1),
                 })),
                 // Where the garbage comes from (GC pauses at high fps): self = bytes allocated in the method minus its
                 // profiled callees, so BCL work it calls (LINQ, string building) counts as its own.
-                ["allocTotalKBPerSecond"] = Math.Round(stats.Sum(kv => kv.Value.AllocSelf) / 1024.0 * 1000.0 / duration, 1),
+                ["allocTotalKBPerSecond"] = Math.Round(stats.Sum(kv => kv.Value.AllocSelf) / 1024.0 * 1000.0 / per, 1),
                 ["topAlloc"] = new JArray(stats.Where(kv => kv.Value.AllocSelf > 0).OrderByDescending(kv => kv.Value.AllocSelf).Take(15).Select(kv => new JObject
                 {
                     ["method"] = $"{kv.Key.DeclaringType?.Name}.{kv.Key.Name}",
                     ["calls"] = kv.Value.Calls,
-                    ["allocSelfKBPerSecond"] = Math.Round(kv.Value.AllocSelf / 1024.0 * 1000.0 / duration, 1),
+                    ["allocSelfKBPerSecond"] = Math.Round(kv.Value.AllocSelf / 1024.0 * 1000.0 / per, 1),
                     ["bytesPerCall"] = kv.Value.Calls == 0 ? 0 : kv.Value.AllocSelf / kv.Value.Calls,
                 })),
             };
@@ -215,17 +248,23 @@ public partial class WhatsAnAiBridge
 
     /// <summary>The hooks' own time and allocation per call: an empty method patched like the targets, called 2000 times.
     /// Without this, every profiled call carries the prefix/postfix cost (Harmony loads __originalMethod inside the window).</summary>
-    private static (double ticks, double bytes) ProfCalibrate(Harmony harmony, HarmonyMethod pre, HarmonyMethod post)
+    private (double ticks, double bytes) ProfCalibrate(InstrSet set, HarmonyMethod pre, HarmonyMethod post)
     {
         var m = typeof(WhatsAnAiBridge).GetMethod(nameof(ProfCalibrationTarget), BindingFlags.Static | BindingFlags.NonPublic);
         if (m == null) return (0, 0);
-        try { harmony.Patch(m, prefix: pre, postfix: post); } catch { return (0, 0); }
-        ProfStats.Clear();
-        _profOn = true;
+        if (InstrPatch(set, m, pre, post) != null) return (0, 0);
         var x = 0;
-        for (var i = 0; i < 2000; i++) x = ProfCalibrationTarget(x);
-        _profOn = false;
-        try { harmony.Unpatch(m, HarmonyPatchType.All, harmony.Id); } catch { }
+        try
+        {
+            ProfStats.Clear();
+            _profOn = true;
+            for (var i = 0; i < 2000; i++) x = ProfCalibrationTarget(x);
+        }
+        finally
+        {
+            _profOn = false;
+            InstrRelease(set, m);
+        }
         return ProfStats.TryGetValue(m, out var s) && s.Calls > 0 && x > 0 ? ((double)s.Self / s.Calls, (double)s.AllocSelf / s.Calls) : (0, 0);
     }
 }

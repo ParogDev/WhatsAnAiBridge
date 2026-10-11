@@ -39,7 +39,6 @@ public partial class WhatsAnAiBridge
         KReadCamera = 7, KReadEntity = 8, KPluginBegin = 9, KPluginEnd = 10, KFetchCamera = 11, KFetchEntity = 12, KCacheCycle = 13, KTickBegin = 14, KTickEnd = 15;
 
     private static readonly Dictionary<string, JObject> TraceJobs = new();
-    private Harmony? _harmony;
 
     private string? ProcessTraceMethod(string method, JToken? p) => method switch
     {
@@ -60,6 +59,14 @@ public partial class WhatsAnAiBridge
     {
         if (_harmonyAsm != null) return null;
         if (_harmonyError != null) return _harmonyError;
+        // A previous load of the bridge in this HUD process already put 0Harmony there: reuse that copy. A second copy
+        // would have its own detour table and could never undo the patches the first one left (Instrumentation.cs).
+        if (System.Runtime.Loader.AssemblyLoadContext.Default.Assemblies.FirstOrDefault(a => a.GetName().Name == "0Harmony") is { } loaded)
+        {
+            System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += (_, name) => name.Name == "0Harmony" ? loaded : null;
+            _harmonyAsm = loaded;
+            return null;
+        }
         var dir = System.IO.Path.GetFileName(DirectoryFullName.TrimEnd('\\', '/'));
         var candidates = new[] { "Temp", "Compiled" }
             .Select(sub => System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Plugins", sub, dir, "0Harmony.dll")).ToList();
@@ -190,7 +197,7 @@ public partial class WhatsAnAiBridge
     {
         if (!Settings.AllowHudInstrumentation.Value)
             return Err("instrumentation_disabled", "Enable 'Allow HUD Instrumentation' in the bridge settings (Dev Loop) to trace the render pipeline.");
-        if (_trOn) return Err("busy", "A trace is already running.");
+        if (_trOn || InstrAnyActive("trace")) return Err("busy", "A trace is already running.");
         var duration = Math.Clamp(p?["durationMs"]?.Value<int>() ?? 3000, 500, 20_000);
         var maxEntities = Math.Clamp(p?["entities"]?.Value<int>() ?? 8, 0, 32);
         _trSeries = p?["series"]?.Value<bool>() == true;
@@ -219,7 +226,12 @@ public partial class WhatsAnAiBridge
         _trRanges = ranges.ToArray();
 
         var report = new JObject { ["patched"] = new JArray(), ["refused"] = new JArray() };
-        _harmony ??= new Harmony("whatsanaibridge.pipeline-trace");
+        var id = Guid.NewGuid().ToString("N")[..10];
+        // Every patch belongs to this set and is removed (original code restored) when it ends, whatever ends it (Instrumentation.cs).
+        var set = InstrBegin(id, "trace", "HUD frame timing", duration, CurrentWho());
+        Action? unwrap = null;
+        try
+        {
         TrPluginIdx.Clear(); TrTickIdx.Clear(); TrPluginNames.Clear();
         var asms = AppDomain.CurrentDomain.GetAssemblies();
         Type? T(string asmName, string typeName) => asms.FirstOrDefault(a => a.GetName().Name == asmName)?.GetType(typeName);
@@ -227,16 +239,12 @@ public partial class WhatsAnAiBridge
         var self = typeof(WhatsAnAiBridge);
         HarmonyMethod H(string name) => new(self.GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic));
 
-        void Patch(MethodBase? m, string label, string? pre, string? post)
+        void Patch(MethodBase? m, string label, string? pre, string? post, string? plugin = null)
         {
             if (m == null) { ((JArray)report["refused"]!).Add($"{label}: not found in this HUD build"); return; }
             if (TraceIsStub(m)) { ((JArray)report["refused"]!).Add($"{label}: protected (IL stub) - never patched"); return; }
-            try
-            {
-                _harmony.Patch(m, prefix: pre == null ? null : H(pre), postfix: post == null ? null : H(post));
-                ((JArray)report["patched"]!).Add(label);
-            }
-            catch (Exception ex) { ((JArray)report["refused"]!).Add($"{label}: patch failed: {ex.GetType().Name}: {ex.Message}"); }
+            if (InstrPatch(set, m, pre == null ? null : H(pre), post == null ? null : H(post), plugin) is { } why) ((JArray)report["refused"]!).Add($"{label}: {why}");
+            else ((JArray)report["patched"]!).Add(label);
         }
 
         var renderer = T("ClickableTransparentOverlay", "ClickableTransparentOverlay.ImGuiRenderer");
@@ -249,31 +257,48 @@ public partial class WhatsAnAiBridge
         var overlay = T("ClickableTransparentOverlay", "ClickableTransparentOverlay.Overlay");
         Patch(overlay?.GetMethod("ReplaceFontIfRequired", all), "Overlay.ReplaceFontIfRequired (Present returned)", nameof(PostPresent), null);
 
-        // Plugin Render methods (plugins are compiled from source: never protected, but checked anyway).
-        foreach (var a in asms)
+        // Plugin Render and Tick methods (plugins are compiled from source: never protected, but checked anyway). Only the
+        // loaded plugins: an earlier load of a reloaded plugin is still in the process, and patching it is pointless (it no
+        // longer runs) and used to leave MonoMod's by-name type cache pointing at it (Instrumentation.cs).
+        List<(Type type, string name)> pluginTypes;
+        try
         {
-            Type[] types;
-            try { types = a.GetTypes(); } catch { continue; }
-            foreach (var t in types)
+            pluginTypes = (Core.Current?.pluginManager?.Plugins.ToList() ?? throw new InvalidOperationException("Core.Current.pluginManager is null"))
+                .Select(w => (plugin: PluginObject(w), name: w.Name)).Where(x => x.plugin != null)
+                .Select(x => (x.plugin!.GetType(), x.name)).DistinctBy(x => x.Item1).ToList();
+        }
+        catch (Exception ex)
+        {
+            pluginTypes = [];
+            ((JArray)report["refused"]!).Add($"plugin Render/Tick: the HUD's plugin list could not be read ({ex.GetType().Name}: {ex.Message}) - not instrumented");
+        }
+        foreach (var (t, pluginName) in pluginTypes)
+        {
+            if (t.IsAbstract) continue;
+            var render = t.GetMethod("Render", all, null, Type.EmptyTypes, null);
+            if (render == null) continue;
+            TrPluginIdx[render] = TrPluginNames.Count;
+            TrPluginNames.Add(t.Name);
+            Patch(render, $"{t.Name}.Render", nameof(PrePlugin), nameof(PostPlugin), pluginName);
+            // Tick too: HealthBars, for one, positions its bars there, not in Render.
+            if (t.GetMethod("Tick", all, null, Type.EmptyTypes, null) is { } tick)
             {
-                if (t.IsAbstract || t.BaseType is not { IsGenericType: true } bt || !bt.Name.StartsWith("BaseSettingsPlugin", StringComparison.Ordinal)) continue;
-                var render = t.GetMethod("Render", all, null, Type.EmptyTypes, null);
-                if (render == null) continue;
-                TrPluginIdx[render] = TrPluginNames.Count;
-                TrPluginNames.Add(t.Name);
-                Patch(render, $"{t.Name}.Render", nameof(PrePlugin), nameof(PostPlugin));
-                // Tick too: HealthBars, for one, positions its bars there, not in Render.
-                if (t.GetMethod("Tick", all, null, Type.EmptyTypes, null) is { } tick)
-                {
-                    TrTickIdx[tick] = TrPluginNames.Count - 1;
-                    Patch(tick, $"{t.Name}.Tick", nameof(PreTick), nameof(PostTick));
-                }
+                TrTickIdx[tick] = TrPluginNames.Count - 1;
+                Patch(tick, $"{t.Name}.Tick", nameof(PreTick), nameof(PostTick), pluginName);
             }
         }
-        var unwrap = WrapMemoryBackends(report, out var whyNoReads);
+        // Each plugin is its own assembly: a binding to another load of one is refused per assembly (nothing of it measured).
+        foreach (var asm in pluginTypes.Select(x => x.type.Assembly).Distinct())
+            if (InstrBindingCheck(asm) is { } bad)
+            {
+                List<MethodBase> ofAsm;
+                lock (InstrLock) ofAsm = set.Methods.Where(m => m.DeclaringType?.Assembly == asm).ToList();
+                foreach (var m in ofAsm) InstrRelease(set, m);
+                ((JArray)report["refused"]!).Add($"{asm.GetName().Name}: patches removed again: {bad}");
+            }
+        unwrap = WrapMemoryBackends(report, out var whyNoReads);
         if (whyNoReads != null) ((JArray)report["refused"]!).Add(whyNoReads);
 
-        var id = Guid.NewGuid().ToString("N")[..10];
         var job = new JObject { ["id"] = id, ["status"] = "running", ["durationMs"] = duration, ["watch"] = new JObject { ["camera"] = ranges.Any(r => !r.Item3), ["entities"] = new JArray(entityNames) }, ["patches"] = report };
         lock (TraceJobs)
         {
@@ -286,16 +311,28 @@ public partial class WhatsAnAiBridge
         var gcPause0 = GC.GetTotalPauseDuration(); var gcAlloc0 = GC.GetTotalAllocatedBytes();
         _trLogicalAll = 0; _trFetchAll = 0; _trFetchBytes = 0;
         MeasureBegin("HUD frame timing", duration);   // guide card + foreground sampling (MeasureFocus.cs)
+        InstrArm(set, duration);
         _trOn = true;
         var started = Stopwatch.GetTimestamp();
         System.Threading.Tasks.Task.Run(async () =>
         {
-            await System.Threading.Tasks.Task.Delay(duration);
-            _trOn = false;
-            var foreground = MeasureEnd();
-            try { _harmony.UnpatchAll(_harmony.Id); } catch { }
-            try { unwrap?.Invoke(); } catch { }
+            JObject? foreground = null, ended = null;
+            try { await System.Threading.Tasks.Task.Delay(duration, set.Cts.Token); }
+            catch (OperationCanceledException) { }
+            finally
+            {
+                // Whatever ended it (done, instrument.cancel, a plugin reload, expiry): hooks off, patches out, backends back.
+                _trOn = false;
+                try { foreground = MeasureEnd(); } catch { }
+                ended = InstrEnd(set, "done");
+                try { unwrap?.Invoke(); } catch { }
+            }
+            report["unpatch"] = ended;
+            try
+            {
+            var endedBy = ended["endedBy"]?.ToString() ?? "done";
             var result = AnalyzeTrace(Math.Min(_trIdx, TraceCap), started);
+            if (endedBy != "done") { result["endedBy"] = endedBy; result["note"] = $"The trace ended early ({endedBy}): the numbers cover only the time it ran."; }
             result["foreground"] = foreground;
             var secs = duration / 1000.0;
             var frames = Math.Max(1, result["frames"]?.Value<int>() ?? 1);
@@ -316,8 +353,23 @@ public partial class WhatsAnAiBridge
             result["pluginAllocKBPerFrame"] = new JObject { ["render"] = Alloc(TrRenderAlloc), ["tick"] = Alloc(TrTickAlloc) };
             result["id"] = id; result["status"] = "done"; result["durationMs"] = duration; result["patches"] = report; result["watch"] = job["watch"];
             lock (TraceJobs) TraceJobs[id] = result;
+            }
+            catch (Exception ex)
+            {
+                lock (TraceJobs) TraceJobs[id] = new JObject { ["id"] = id, ["status"] = "done", ["error"] = "analysis_failed", ["message"] = $"{ex.GetType().Name}: {ex.Message}", ["patches"] = report };
+            }
         });
         return job;
+        }
+        catch (Exception ex)
+        {
+            // Setting up failed after patching began: nothing may stay patched or wrapped.
+            _trOn = false;
+            try { MeasureEnd(); } catch { }
+            InstrEnd(set, $"failed while starting: {ex.GetType().Name}: {ex.Message}");
+            try { unwrap?.Invoke(); } catch { }
+            throw;
+        }
     }
 
     /// <summary>A protector stub (tiny body, backward branch, no member reference): must never be patched.</summary>
