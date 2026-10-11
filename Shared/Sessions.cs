@@ -298,6 +298,8 @@ public partial class WhatsAnAiBridge
     private JObject SessionList()
     {
         var me = CurrentSession();
+        // Harmony patches of measurements (Instrumentation.cs): read outside the sessions lock.
+        var instrumentation = InstrState(full: false);
         lock (_sessionLock)
         {
             var now = DateTime.UtcNow;
@@ -330,6 +332,7 @@ public partial class WhatsAnAiBridge
                 ["blockers"] = new JArray(blockers.Select(BlockerJson)),
                 ["restarts"] = new JArray(_restarts.OrderByDescending(r => r.At).Select(RestartJsonLocked)),
                 ["mcpRollout"] = McpRolloutLocked()?.Json(),
+                ["instrumentation"] = instrumentation,
             };
         }
     }
@@ -535,6 +538,10 @@ public partial class WhatsAnAiBridge
         bool Yours(string? who) => requesterLabel != null && who == requesterLabel;
         lock (_measureLock)
             if (_measure is { } m) list.Add(new Blocker("perf", $"measuring: {m.What}", m.Who, m.EndsAt, Yours(m.Who)));
+        // Still patching (before its measured window), or measured window not announced: the patch set blocks too.
+        lock (InstrLock)
+            foreach (var s in InstrSets.Values.Where(s => !list.Any(b => b.Kind == "perf" && b.Who == s.Who)))
+                list.Add(new Blocker("perf", $"patching the HUD for a {s.Kind} ({s.Label})", s.Who, s.ExpiresAt, Yours(s.Who)));
         foreach (var r in _pendingReloads) list.Add(new Blocker("reload", $"compiling {r.Folder}", r.Who, null, Yours(r.Who)));
         if (_isRecording) list.Add(new Blocker("record", "recording a gameplay session", _recordingWho, null, Yours(_recordingWho)));
         var run = _queueRun;

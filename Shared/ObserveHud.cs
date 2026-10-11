@@ -80,7 +80,7 @@ public partial class WhatsAnAiBridge
         "guide.set", "guide.log", "guide.highlight", "guide.highlight_advance", "guide.flow",
         "experiment.queue", "experiment.start", "experiment.cancel",
         "hud.reload_plugin", "hud.bridge_call", "settings.set", "focus.game", "script.run", "gc.pool", "lab.set",
-        "pipeline.trace", "profile.plugin", "tracker.start", "tracker.stop",
+        "pipeline.trace", "profile.plugin", "instrument.cancel", "tracker.start", "tracker.stop",
         "stats.select", "stats.set_filter", "stats.set_pinned", "stats.set_view",
         "observe.layer_set", "observe.layer_remove",
         "restart.request", "restart.cancel", "lease.acquire", "lease.release",
