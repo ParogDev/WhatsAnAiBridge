@@ -99,7 +99,16 @@ public partial class WhatsAnAiBridge
         ImGui.InvisibleButton("##next_strip", new Vector2(w, h));
         if (ImGui.IsItemHovered())
         {
-            if (a.StripNext) GuideHover("Waiting for you", StripTooltip(q, ag, restartUp, utc), null, null, ToneNeutral);
+            if (a.StripNext)
+            {
+                var sec = utc.Ticks / TimeSpan.TicksPerSecond;   // the waits it lists count in seconds: rebuilt once a second while hovered
+                if (!ReferenceEquals(a.TipFor, q) || !ReferenceEquals(a.TipAg, ag) || a.TipRestart != restartUp || a.TipSecond != sec)
+                {
+                    a.TipFor = q; a.TipAg = ag; a.TipRestart = restartUp; a.TipSecond = sec;
+                    a.TipText = StripTooltip(q, ag, restartUp, utc);
+                }
+                GuideHover("Waiting for you", a.TipText, null, null, ToneNeutral);
+            }
             else if (a.StripTip != null) GuideHover("Who is asking you for something", a.StripTip, null, null, ToneNeutral);
         }
 
@@ -121,16 +130,22 @@ public partial class WhatsAnAiBridge
         {
             DrawWhoDot(dl, new Vector2(x + GuideDotR, hy), a.StripHue);
             x += WhoDotW;
-            if (rx - x > 40) dl.AddText(new Vector2(x, hy - f * 0.5f), U(th.TextDim), GuideClipText(a.StripText!, rx - x));
+            if (rx - x > 40)
+            {
+                if (!ReferenceEquals(a.ClipSrc, a.StripText) || a.ClipW != rx - x) { a.ClipSrc = a.StripText; a.ClipW = rx - x; a.ClipOut = GuideClipText(a.StripText!, rx - x); }
+                dl.AddText(new Vector2(x, hy - f * 0.5f), U(th.TextDim), a.ClipOut);
+            }
         }
         else
         {
+            // The clipped names are kept until the names or the strip's start change (the room they get follows from those).
+            if (!ReferenceEquals(a.AgentClipSrc, a.StripAgents) || a.AgentClipX != x) { a.AgentClipSrc = a.StripAgents; a.AgentClipX = x; a.AgentClips = new string?[a.StripAgents.Length]; }
             for (var i = 0; i < a.StripAgents.Length && rx - x > 40; i++)
             {
                 if (i > 0) { dl.AddText(new Vector2(x, hy - f * 0.5f), U(th.TextDim, 0.6f), ","); x += ImGui.CalcTextSize(",").X + 8; }
                 DrawWhoDot(dl, new Vector2(x + GuideDotR, hy), a.StripAgentHues[i]);
                 x += WhoDotW;
-                var t = GuideClipText(a.StripAgents[i], rx - x);
+                var t = a.AgentClips[i] ??= GuideClipText(a.StripAgents[i], rx - x);
                 dl.AddText(new Vector2(x, hy - f * 0.5f), U(th.TextDim), t);
                 if (!ReferenceEquals(t, a.StripAgents[i])) break;
                 x += ImGui.CalcTextSize(t).X;

@@ -83,6 +83,12 @@ public partial class WhatsAnAiBridge
         public string StripLabel = ""; public string? StripText, StripTail, StripTip; public int StripHue; public bool StripNext;
         public string[] StripAgents = []; public int[] StripAgentHues = [];
         public AttnQueueView? DotFor; public AgentsView? DotAg; public string DotLabel = "";
+        // The next strip's hover (rebuilt once a second while hovered) and its clipped line (rebuilt when text or room change).
+        public AttnQueueView? TipFor; public AgentsView? TipAg; public bool TipRestart; public long TipSecond = -1; public string TipText = "";
+        public string? ClipSrc; public float ClipW = -1; public string ClipOut = "";
+        public string?[] AgentClips = []; public string[]? AgentClipSrc; public float AgentClipX = -1;
+        // The ask card's elapsed text and the again pill's hover, rebuilt once a second.
+        public long ElapsedSecond = -1; public string ElapsedText = ""; public string? LaterTip;
         public string? RestartTop; public double RestartTopAt = -1e9;
         public bool DotWasHovered;
     }
@@ -131,6 +137,7 @@ public partial class WhatsAnAiBridge
     {
         var owner = ask.Whos[0];
         a.Flash = !ask.Softened;
+        a.ElapsedSecond = -1;   // its own elapsed and Later texts
         a.FlashTone = a.SlotOwner != null && a.SlotOwner != owner ? AttnHueColor(ask.Hues[0]) : ToneAccent;
         a.SlotOwner = owner; a.Shown = ask; a.ArrivedAt = now; a.GuardFrom = now;
         a.Loud = ask.Urgency == "now" && !ask.Softened ? 1f : 0f;
@@ -277,7 +284,13 @@ public partial class WhatsAnAiBridge
         }
         rx -= 16 + 8;
         {
-            var t = receipt ? AskAnsweredText : GuideElapsed(utc - ask.CreatedAt);
+            var sec = utc.Ticks / TimeSpan.TicksPerSecond;
+            if (a.ElapsedSecond != sec)
+            {
+                a.ElapsedSecond = sec; a.ElapsedText = GuideElapsed(utc - ask.CreatedAt);
+                a.LaterTip = ask.LaterAt is { } la0 ? $"You said Later {GuideElapsed(utc - la0)} ago." : null;
+            }
+            var t = receipt ? AskAnsweredText : a.ElapsedText;
             var tw = ImGui.CalcTextSize(t).X * k;
             dl.AddText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(GuideToastMuted, alpha), t);
             rx -= tw + 10;
@@ -290,7 +303,7 @@ public partial class WhatsAnAiBridge
             var pmin = new Vector2(rx - pillW, hy - ph * 0.5f);
             ImGui.SetCursorScreenPos(pmin);
             ImGui.InvisibleButton("##ask_again", new Vector2(pillW, ph));
-            if (ImGui.IsItemHovered() && ask.LaterAt is { } la) GuideTooltip($"You said Later {GuideElapsed(utc - la)} ago.");
+            if (ImGui.IsItemHovered() && a.LaterTip != null) GuideTooltip(a.LaterTip);
             dl.AddRectFilled(pmin, pmin + new Vector2(pillW, ph), U(GuideToastLine, 0.7f * alpha), 0f);
             dl.AddRect(pmin, pmin + new Vector2(pillW, ph), U(GuideToastLine, alpha), 0f);
             dl.AddText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(GuideToastMuted, alpha), AskAgainText);

@@ -70,14 +70,8 @@ public partial class WhatsAnAiBridge
         // Text first, then measure: the background needs the full height.
         var bullets = handover ? 1 : rr.Blockers.Count;
         var shown = Math.Min(bullets, RestartBlockersShown);
-        var secondsToGo = rr.HoldUntil is DateTime h ? Math.Max(0, (int)Math.Ceiling((h - utc).TotalSeconds)) : 0;
-        var lead = blocked
-            ? (bullets == 1 ? "Waits for:" : $"Waits for {bullets} things:")
-            : secondsToGo > 0 ? $"Restarts in {secondsToGo} s - nothing running would be lost." : "Restarting now.";
-        var who = ag.NameOf(rr.Session, rr.Who);
-        var leaveWho = handover ? ag.NameOf(a.LeaveSession, a.LeaveWho) : null;
-        var meta = $"{who} asked {GuideElapsed(utc - rr.At)} ago" + (rr.Reason != null ? $" - {rr.Reason}" : "")
-                   + (rr.MergedCount > 0 ? $" - +{rr.MergedCount} more agent{(rr.MergedCount == 1 ? " waits" : "s wait")} for it" : "");
+        var rt = RestartTextsFor(rr, handover, blocked, bullets, shown, ag, utc, innerW, innerW - bulletIndent);
+        var who = rt.Who;
         var bodyH = f + 4                                   // lead line
                     + (blocked ? shown * (small + 3) + (bullets > shown ? small + 3 : 0) : 0)
                     + small + 8                             // meta
@@ -113,42 +107,28 @@ public partial class WhatsAnAiBridge
         // Body: the lead line, then the blockers as bullets (whose, what, how long left).
         var y = min.Y + headH + 2;
         var bx = min.X + pad;
-        dl.AddText(font, f, new Vector2(bx, y), U(blocked ? th.Text : tone), GuideClipText(lead, innerW));
+        dl.AddText(font, f, new Vector2(bx, y), U(blocked ? th.Text : tone), rt.Lead);
         y += f + 4;
-        if (handover)
+        if (blocked)
         {
-            dl.AddCircleFilled(new Vector2(bx + 4, y + small * 0.5f), 2f, U(th.TextDim), 8);
-            dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim), GuideClipText($"{leaveWho}: your answer", innerW - bulletIndent));
-            y += small + 3;
-        }
-        else if (blocked)
-        {
-            for (var i = 0; i < shown; i++)
+            foreach (var line in rt.Lines)
             {
-                var b = rr.Blockers[i];
-                var line = (b.Who != null ? $"{ag.NameOf(b.Who)}: " : "") + b.Label;
-                if (b.Until is DateTime u && u > utc) line += $" ({GuideElapsed(u - utc)} left)";
-                if (b.Yours) line += " (its own)";
                 dl.AddCircleFilled(new Vector2(bx + 4, y + small * 0.5f), 2f, U(th.TextDim), 8);
-                dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim), GuideClipText(line, innerW - bulletIndent));
+                dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim), line);
                 y += small + 3;
             }
-            if (rr.Blockers.Count > shown)
+            if (rt.More != null)
             {
-                dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim, 0.8f), $"+{rr.Blockers.Count - shown} more");
+                dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim, 0.8f), rt.More);
                 y += small + 3;
             }
         }
-        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim, 0.85f), GuideClipText(meta, innerW));
+        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim, 0.85f), rt.Meta);
         y += small + 8;
 
         // Buttons: Restart now (primary) and Not now. The tooltip says what Restart now would interrupt. Both ignore clicks
         // for the click guard right after the card took the top slot.
-        var interrupt = rr.Blockers.Count > 0
-            ? "Restart now anyway. It interrupts " + string.Join(", ", rr.Blockers.Take(3).Select(b => b.Who != null ? $"{ag.NameOf(b.Who)}'s {b.Label}" : b.Label)) + "; they are told why in the log."
-            : handover ? $"Restart now anyway. It interrupts {leaveWho}'s hand-over; they are told why in the log."
-            : "Don't wait the countdown.";
-        QueuePillButton(dl, "##restart_now", new Vector2(bx, y), btnH, "Restart now", true, th, out var nowClick, interrupt);
+        QueuePillButton(dl, "##restart_now", new Vector2(bx, y), btnH, "Restart now", true, th, out var nowClick, rt.Interrupt);
         if (nowClick && !guard) RestartAllow(rr.Id);
         var notW = ImGui.CalcTextSize("Not now").X + 24;
         QueuePillButton(dl, "##restart_deny", new Vector2(max.X - pad - notW, y), btnH, "Not now", false, th, out var denyClick,
@@ -157,6 +137,63 @@ public partial class WhatsAnAiBridge
 
         ImGui.SetCursorScreenPos(p);
         ImGui.Dummy(new Vector2(GuideWidth, hgt + GuideEdge * 2));
+    }
+
+    /// <summary>The restart card's texts, already clipped to its width (RestartTextsFor).</summary>
+    private sealed class RestartTexts
+    {
+        public RestartRequest? For; public long Second = -1; public int ToGo = -1; public bool Handover; public AgentsView? Ag; public float W;
+        public string? LeaveWho, LeaveSession;
+        public string Who = "", Lead = "", Meta = "", Interrupt = "";
+        public string[] Lines = [];
+        public string? More;
+    }
+
+    private readonly RestartTexts _restartTexts = new();
+
+    /// <summary>
+    /// The restart card's lead, bullets, meta line and Restart now tooltip, composed and clipped only when something they
+    /// show changes: the request copy (Sessions.cs republishes it at most 4 Hz), the second (elapsed and time-left
+    /// counts), the countdown, the names (the AgentsView instance), the hand-over or the width. Not per frame: the card can
+    /// stay up for minutes while a test blocks the restart.
+    /// </summary>
+    private RestartTexts RestartTextsFor(RestartRequest rr, bool handover, bool blocked, int bullets, int shown, AgentsView ag, DateTime utc, float w, float bulletW)
+    {
+        var c = _restartTexts;
+        var a = _askUi;
+        var second = utc.Ticks / TimeSpan.TicksPerSecond;
+        var toGo = rr.HoldUntil is DateTime h ? Math.Max(0, (int)Math.Ceiling((h - utc).TotalSeconds)) : 0;
+        if (ReferenceEquals(c.For, rr) && c.Second == second && c.ToGo == toGo && c.Handover == handover && ReferenceEquals(c.Ag, ag) && c.W == w
+            && (!handover || (c.LeaveWho == a.LeaveWho && c.LeaveSession == a.LeaveSession))) return c;
+        c.For = rr; c.Second = second; c.ToGo = toGo; c.Handover = handover; c.Ag = ag; c.W = w; c.LeaveWho = a.LeaveWho; c.LeaveSession = a.LeaveSession;
+        c.Who = ag.NameOf(rr.Session, rr.Who);
+        var leaveWho = handover ? ag.NameOf(a.LeaveSession, a.LeaveWho) : null;
+        c.Lead = GuideClipText(blocked
+            ? (bullets == 1 ? "Waits for:" : $"Waits for {bullets} things:")
+            : toGo > 0 ? $"Restarts in {toGo} s - nothing running would be lost." : "Restarting now.", w);
+        c.Meta = GuideClipText($"{c.Who} asked {GuideElapsed(utc - rr.At)} ago" + (rr.Reason != null ? $" - {rr.Reason}" : "")
+                               + (rr.MergedCount > 0 ? $" - +{rr.MergedCount} more agent{(rr.MergedCount == 1 ? " waits" : "s wait")} for it" : ""), w);
+        if (handover) { c.Lines = [GuideClipText($"{leaveWho}: your answer", bulletW)]; c.More = null; }
+        else if (blocked)
+        {
+            var lines = new string[shown];
+            for (var i = 0; i < shown; i++)
+            {
+                var b = rr.Blockers[i];
+                var line = (b.Who != null ? $"{ag.NameOf(b.Who)}: " : "") + b.Label;
+                if (b.Until is DateTime u && u > utc) line += $" ({GuideElapsed(u - utc)} left)";
+                if (b.Yours) line += " (its own)";
+                lines[i] = GuideClipText(line, bulletW);
+            }
+            c.Lines = lines;
+            c.More = rr.Blockers.Count > shown ? $"+{rr.Blockers.Count - shown} more" : null;
+        }
+        else { c.Lines = []; c.More = null; }
+        c.Interrupt = rr.Blockers.Count > 0
+            ? "Restart now anyway. It interrupts " + string.Join(", ", rr.Blockers.Take(3).Select(b => b.Who != null ? $"{ag.NameOf(b.Who)}'s {b.Label}" : b.Label)) + "; they are told why in the log."
+            : handover ? $"Restart now anyway. It interrupts {leaveWho}'s hand-over; they are told why in the log."
+            : "Don't wait the countdown.";
+        return c;
     }
 
     /// <summary>12 px restart glyph: a three-quarter arc with an arrow head; it turns slowly while counting down (t = 0: still).</summary>
