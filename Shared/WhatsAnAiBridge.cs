@@ -322,10 +322,11 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void Render()
     {
-        // Plugin reloads requested over the bridge run here, on the main thread, like the menu's Reload button.
+        // Plugin reloads requested over the bridge are scheduled here and run at the next frame's start,
+        // outside the HUD's plugin loops (HudControl.cs).
         _selfFrames++;
         RunMainActions();   // settings changes (SettingsControl.cs) and other main-thread work queued by bridge clients
-        var sp = SelfStart(); RunPendingReload(); SelfEnd(0, sp);
+        var sp = SelfStart(); SchedulePendingReload(); SelfEnd(0, sp);
         sp = SelfStart(); RunPendingScript(); SelfEnd(1, sp);
         sp = SelfStart(); RunQueuedStep(); SelfEnd(2, sp);
         sp = SelfStart(); ObserveTick(); SelfEnd(3, sp);

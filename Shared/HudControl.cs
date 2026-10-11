@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -21,13 +22,18 @@ namespace WhatsAnAiBridge;
 /// LoadFailedSourcePlugin(sourceDir). ReloadSourcePlugin is internal, hence reflection.
 ///
 /// Threading: requests may be served by the watchdog thread, so hud.reload_plugin only queues the
-/// work; Render (the main thread, where the menu button runs it too) performs it. The HUD freezes
+/// work; Render hands it to the HUD's next-frame hook (NextFrameTask), which runs on the main thread at the
+/// start of Core.Tick, before the plugin loops. Never reload from inside Render itself: Core.Tick calls each
+/// plugin's Render from a foreach over pluginManager.Plugins, and a reload removes the old wrapper from that
+/// list ("Collection was modified" in Core.Tick, and the rest of that frame's plugins skipped). The menu's
+/// Reload button runs outside those loops too. The HUD freezes
 /// while the plugin compiles (a few seconds). The watchdog keeps answering hud.reload_status meanwhile.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
     private readonly ConcurrentQueue<ReloadRequest> _pendingReloads = new();
     private volatile ReloadResultDto? _lastReload;
+    private int _reloadScheduled;   // 1 while a reload waits for the HUD's next frame start
 
     private sealed record ReloadRequest(string Folder, string? CompiledPath, string? FailedSourceDir, DateTime QueuedAt, string? Who = null);
 
@@ -150,7 +156,19 @@ public partial class WhatsAnAiBridge
         };
     }
 
-    /// <summary>Called at the start of Render: performs at most one queued reload per frame.</summary>
+    /// <summary>Called from Render: hands at most one queued reload to the next frame's start, outside the
+    /// HUD's plugin loops (see the class summary).</summary>
+    private void SchedulePendingReload()
+    {
+        if (_pendingReloads.IsEmpty || Interlocked.Exchange(ref _reloadScheduled, 1) == 1) return;
+        new NextFrameTask().GetAwaiter().OnCompleted(() =>
+        {
+            try { RunPendingReload(); }
+            finally { Volatile.Write(ref _reloadScheduled, 0); }
+        });
+    }
+
+    /// <summary>Performs at most one queued reload. Runs from the HUD's next-frame hook, never from Render.</summary>
     private void RunPendingReload()
     {
         if (!_pendingReloads.TryDequeue(out var r)) return;
