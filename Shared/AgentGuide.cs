@@ -106,7 +106,10 @@ public partial class WhatsAnAiBridge
         // ifStep is the asker's cleanup of its own step: GuideSet applies it only while the card still shows that step,
         // so it needs no floor and is never refused as another session's card.
         var ifStep = p?["ifStep"] is { Type: not JTokenType.Null } ifs ? ifs.ToString() : null;
-        if (p?["instruction"] is { Type: not JTokenType.Null } ins && ins.ToString().Length > 0)
+        // With ifStep, an instruction too goes straight to GuideSet: it lands only on the asker's own step that is on the
+        // card now, else it is skipped. Queued behind the floor it would wait for a turn only to be skipped then (a
+        // flash and a hand-over gap for nothing), and the reply would say "queued" instead of "skipped".
+        if (ifStep == null && p?["instruction"] is { Type: not JTokenType.Null } ins && ins.ToString().Length > 0)
         {
             var gate = AttnGate(me, "guide.set", p, "step", Clip(ins.ToString(), 80));
             if (!gate.Proceed) return gate.Reply!;
@@ -400,10 +403,10 @@ public partial class WhatsAnAiBridge
     /// </summary>
     internal void GuideDismiss()
     {
-        string? who;
+        string? who, session;
         lock (_guideLock)
         {
-            who = _guide.Who;
+            who = _guide.Who; session = _guide.Session;
             if (_guide.OfferDone && GuideActive(_guide.Status) && _guide.StepId != null) { _guide.Mark = "cancelled"; _guide.MarkAt = DateTime.UtcNow; }
             _guide.Instruction = null;
             _guide.Status = "idle";
@@ -414,7 +417,7 @@ public partial class WhatsAnAiBridge
             _guide.StepGen++;
             _guide.Rev++;
         }
-        AttnDismissedByUser(who);   // after the guide lock (lock order): the turn behind the card ends as dismissed
+        AttnDismissedByUser(who, null, session);   // after the guide lock (lock order): the turn behind the card ends as dismissed
     }
 
     /// <summary>The user's mark on the queue runner's own step (ExperimentQueue.cs), read without the JSON round trip.</summary>

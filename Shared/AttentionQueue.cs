@@ -607,7 +607,8 @@ public partial class WhatsAnAiBridge
     {
         bool clear;
         lock (_guideLock)
-            clear = _guide.Who != null && (_guide.Session != null ? _guide.Session != session : _guide.Who != who) && (_guide.Instruction != null || _guide.Status != "idle");
+            clear = _guide.Who != null && (_guide.Session != null ? _guide.Session != session : _guide.Who != who) && (_guide.Instruction != null || _guide.Status != "idle")
+                    && _guide.StepId?.StartsWith(MeasureStepPrefix, StringComparison.Ordinal) != true;   // a measurement's card is nobody's turn: it stays
         if (clear) GuideSet(new JObject { ["clear"] = true });
     }
 
@@ -869,14 +870,19 @@ public partial class WhatsAnAiBridge
         AttnRun(effects);
     }
 
-    /// <summary>The player dismissed a card: the turn behind it (if that session holds the floor) ends as dismissed.</summary>
-    internal void AttnDismissedByUser(string? who, string? itemId = null)
+    /// <summary>
+    /// The player dismissed a card: the turn behind it (if that session holds the floor) ends as dismissed. The ask card
+    /// names its item; the instruction card its owner, by session id when it carries one (two sessions may share a
+    /// label), else by label (HUD-run cards).
+    /// </summary>
+    internal void AttnDismissedByUser(string? who, string? itemId = null, string? session = null)
     {
         var effects = new List<Action>();
         lock (_sessionLock)
         {
             var now = DateTime.UtcNow;
-            if (AttnHolderLocked() is { } h && (itemId != null ? h.Id == itemId : who != null && h.Who == who && h.Kind != "ask"))
+            if (AttnHolderLocked() is { } h && (itemId != null ? h.Id == itemId
+                    : h.Kind != "ask" && (session != null ? h.SessionId == session : who != null && h.Who == who)))
                 AttnEndLocked(h, "dismissed", now, "user_dismissed", "the player dismissed the card", effects);
             AttnArbitrateLocked(now, effects);
         }
