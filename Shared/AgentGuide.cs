@@ -8,7 +8,7 @@ namespace WhatsAnAiBridge;
 /// <summary>
 /// The in-game agent guide: what the agent wants the user to do right now (a sticky instruction with step and status)
 /// and a short log of what the agent is doing - so the user never has to watch the chat to know what to do in game.
-///   guide.set   {title?, instruction?, step?, steps?, status?, detail?, clear?}
+///   guide.set   {title?, instruction?, step?, steps?, status?, detail?, clear?, timeLimitSec?}
 ///               status: waiting (do it now) | detected (change seen) | settling | captured | failed | info | done
 ///   guide.log   {text, kind?: agent|step|result|warn|error, title?}
 ///               title: the toast's caps title (up to 40 chars, e.g. "Low life"); without one the kind is the title
@@ -23,6 +23,9 @@ namespace WhatsAnAiBridge;
 /// guide.set {clear, ifStep} clears only that step, expiresSec clears it when the agent goes quiet, and a session that
 /// disconnected and did not come back within the grace loses the step it left waiting (GuideOwnerGone, from the one
 /// disconnect cleanup, AttentionQueue.cs AttnSessionGoneLocked).
+/// timeLimitSec is the time the user has for the step (await_change's timeout, the queue runner's per-repeat limit): the
+/// card counts it down while the step is active, so the user always sees how long is left; null clears it. It is shown,
+/// never enforced here (the asker ends the step when its own timeout runs out).
 /// Who may write the card is the attention queue's business (AttentionQueue.cs): guide.set goes through
 /// GuideSetRequest, which queues an instruction from a session without the floor and refuses status / detail / clear
 /// on another session's card (not_your_card; ifStep is always allowed: it only ever touches the asker's own step).
@@ -59,6 +62,8 @@ public partial class WhatsAnAiBridge
         public DateTime? WaitingSince;  // the status last became waiting (or Not done yet restarted the clock)
         public double UnseenAfterSec = GuideUnseenDefaultSec;
         public DateTime? ExpiresAt;     // a waiting step whose agent went quiet is cleared then (GuideExpireTick)
+        public DateTime? DeadlineAt;    // timeLimitSec: when the user's time for this step runs out (the card counts down to it)
+        public double LimitSec;         // the whole time limit, for the card's draining bar
         public int StepGen;             // bumped whenever the card's step changes (new step id or instruction, clear, dismiss): highlights set during a step go with it
         public int Rev;
         public readonly List<GuideLogEntry> Log = new();
@@ -72,9 +77,11 @@ public partial class WhatsAnAiBridge
     /// <summary>
     /// A step that offers Done as the card draws it this frame: whether the Done button shows, the user's mark (done:
     /// the agent is checking; cancelled), how long ago it was made, whether the "I can't see that change yet" line is
-    /// due (waiting, no mark, unseenAfterSec passed), and how long the waiting phase has lasted.
+    /// due (waiting, no mark, unseenAfterSec passed), and how long the waiting phase has lasted. TimeLeftSec: the step's
+    /// time limit counting down (null without one, or once the step is over), LimitSec its whole length.
     /// </summary>
-    internal readonly record struct GuideAskView(string? StepId, bool OfferDone, string? Mark, double MarkAgoSec, bool Unseen, double WaitingSec);
+    internal readonly record struct GuideAskView(string? StepId, bool OfferDone, string? Mark, double MarkAgoSec, bool Unseen, double WaitingSec,
+        double? TimeLeftSec = null, double LimitSec = 0);
 
     /// <summary>Statuses in which the user is acting on the card (a restart blocker; cleared with their asker).</summary>
     private static bool GuideActive(string status) => status is "waiting" or "detected" or "settling";
@@ -191,6 +198,11 @@ public partial class WhatsAnAiBridge
             if (p?["unseenAfterSec"] is { Type: JTokenType.Integer or JTokenType.Float } ua) _guide.UnseenAfterSec = Math.Clamp(ua.Value<double>(), 3, 600);
             if (p?["expiresSec"] is { } ex)
                 _guide.ExpiresAt = ex.Type is JTokenType.Integer or JTokenType.Float ? now.AddSeconds(Math.Clamp(ex.Value<double>(), 5, 3600)) : null;
+            if (p?["timeLimitSec"] is { } tl)
+            {
+                _guide.LimitSec = tl.Type is JTokenType.Integer or JTokenType.Float ? Math.Clamp(tl.Value<double>(), 3, 3600) : 0;
+                _guide.DeadlineAt = _guide.LimitSec > 0 ? now.AddSeconds(_guide.LimitSec) : null;
+            }
             if (p?["step"] is { } s) _guide.Step = s.Type == JTokenType.Integer ? s.Value<int>() : null;
             if (p?["steps"] is { } n) _guide.Steps = n.Type == JTokenType.Integer ? n.Value<int>() : null;
             if (p?["detail"] is { } d) _guide.Detail = Clip(d.Type == JTokenType.Null ? null : d.ToString(), 300);
@@ -199,7 +211,7 @@ public partial class WhatsAnAiBridge
                 if (!GuideStatuses.Contains(st)) return new JObject { ["error"] = "bad_status", ["message"] = $"status must be one of {string.Join(", ", GuideStatuses)}" };
                 _guide.Status = st;
                 // A step that is over offers nothing more: the button goes, and a late Done can't land on a finished step.
-                if (!GuideActive(st)) { _guide.OfferDone = false; _guide.ExpiresAt = null; }
+                if (!GuideActive(st)) { _guide.OfferDone = false; _guide.ExpiresAt = null; _guide.DeadlineAt = null; }
             }
             if (_guide.Status != "waiting") _guide.WaitingSince = null;
             else if (prevStatus != "waiting" || _guide.WaitingSince == null || p?["instruction"] != null) _guide.WaitingSince = now;
@@ -219,6 +231,7 @@ public partial class WhatsAnAiBridge
         _guide.MarkAt = null;
         _guide.UnseenAfterSec = GuideUnseenDefaultSec;
         _guide.ExpiresAt = null;
+        _guide.DeadlineAt = null;
     }
 
     /// <summary>
@@ -261,7 +274,8 @@ public partial class WhatsAnAiBridge
         var waiting = _guide.WaitingSince is DateTime ws ? (now - ws).TotalSeconds : 0;
         var markAgo = _guide.MarkAt is DateTime ma ? (now - ma).TotalSeconds : 0;
         var unseen = _guide.OfferDone && _guide.Status == "waiting" && _guide.Mark == null && _guide.WaitingSince != null && waiting >= _guide.UnseenAfterSec;
-        return new GuideAskView(_guide.StepId, _guide.OfferDone, _guide.Mark, markAgo, unseen, waiting);
+        double? left = _guide.DeadlineAt is DateTime dl && GuideActive(_guide.Status) ? Math.Max(0, (dl - now).TotalSeconds) : null;
+        return new GuideAskView(_guide.StepId, _guide.OfferDone, _guide.Mark, markAgo, unseen, waiting, left, _guide.LimitSec);
     }
 
     /// <summary>The card's step now, for highlights that go with it (GuideHighlight.cs): its generation, whether the user is
@@ -353,6 +367,7 @@ public partial class WhatsAnAiBridge
         // The step id and its mark stay: an agent that comes back and asks guide.user learns its card is gone.
         _guide.OfferDone = false;
         _guide.ExpiresAt = null;
+        _guide.DeadlineAt = null;
         _guide.StepGen++;
         _guide.UpdatedAt = DateTime.UtcNow;
         _guide.Rev++;
@@ -379,15 +394,22 @@ public partial class WhatsAnAiBridge
 
     private JObject GuideStateJson() { lock (_guideLock) return GuideStateJsonLocked(); }
 
-    private JObject GuideStateJsonLocked() => new()
+    private JObject GuideStateJsonLocked()
     {
-        ["ok"] = true, ["rev"] = _guide.Rev, ["title"] = _guide.Title, ["instruction"] = _guide.Instruction,
-        ["step"] = _guide.Step, ["steps"] = _guide.Steps, ["status"] = _guide.Status, ["detail"] = _guide.Detail, ["who"] = _guide.Who,
-        ["stepId"] = _guide.StepId, ["offerDone"] = _guide.OfferDone, ["mark"] = _guide.Mark, ["unseen"] = GuideAskLocked(DateTime.UtcNow).Unseen,
-        ["log"] = new JArray(_guide.Log.TakeLast(10).Select(e => new JObject { ["at"] = e.At.ToString("HH:mm:ss"), ["kind"] = e.Kind, ["text"] = e.Text, ["title"] = e.Title })),
-        // What the panel's attention decided last frame (GuideToastFeed.cs): combat hold, held toasts, quiet dot.
-        ["attention"] = AttentionJson(),
-    };
+        var a = GuideAskLocked(DateTime.UtcNow);
+        return new JObject
+        {
+            ["ok"] = true, ["rev"] = _guide.Rev, ["title"] = _guide.Title, ["instruction"] = _guide.Instruction,
+            ["step"] = _guide.Step, ["steps"] = _guide.Steps, ["status"] = _guide.Status, ["detail"] = _guide.Detail, ["who"] = _guide.Who,
+            ["stepId"] = _guide.StepId, ["offerDone"] = _guide.OfferDone, ["mark"] = _guide.Mark, ["unseen"] = a.Unseen,
+            // The step's time limit as the card counts it down: null without one, or once the step is over.
+            ["timeLimitSec"] = a.TimeLeftSec == null ? null : Math.Round(a.LimitSec, 1),
+            ["timeLeftSec"] = a.TimeLeftSec is double left ? Math.Round(left, 1) : null,
+            ["log"] = new JArray(_guide.Log.TakeLast(10).Select(e => new JObject { ["at"] = e.At.ToString("HH:mm:ss"), ["kind"] = e.Kind, ["text"] = e.Text, ["title"] = e.Title })),
+            // What the panel's attention decided last frame (GuideToastFeed.cs): combat hold, held toasts, quiet dot.
+            ["attention"] = AttentionJson(),
+        };
+    }
 
     /// <summary>A consistent copy for drawing (taken once per frame).</summary>
     internal (string? title, string? instruction, int? step, int? steps, string status, string? detail, DateTime updatedAt, DateTime? instructionSince, int rev, GuideLogEntry[] log, string? who, string? session) GuideSnapshot()
@@ -414,6 +436,7 @@ public partial class WhatsAnAiBridge
             _guide.WaitingSince = null;
             _guide.OfferDone = false;
             _guide.ExpiresAt = null;
+            _guide.DeadlineAt = null;
             _guide.StepGen++;
             _guide.Rev++;
         }
