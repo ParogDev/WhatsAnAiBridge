@@ -163,7 +163,20 @@ public partial class WhatsAnAiBridge
     private void SchedulePendingReload()
     {
         // The last reload isn't final until its plugin is seen running (CheckReloadedPlugin only reads the plugin list).
-        if (_reloadCheck != null) { CheckReloadedPlugin(); return; }
+        if (_reloadCheck is { } c)
+        {
+            // Runs every frame while checking: a throw must end the check once, never repeat per frame.
+            try { CheckReloadedPlugin(); }
+            catch (Exception ex)
+            {
+                _reloadCheck = null;
+                c.Result.Ok = false;
+                c.Result.Error = "check_failed";
+                c.Result.Message = $"{c.Request.Folder} compiled, but checking that it loaded threw {ex.GetType().Name}: {ex.Message}";
+                try { FinishReload(c); } catch { /* the result above is already set */ }
+            }
+            return;
+        }
         if (_pendingReloads.IsEmpty || Interlocked.Exchange(ref _reloadScheduled, 1) == 1) return;
         new NextFrameTask().GetAwaiter().OnCompleted(() =>
         {
@@ -364,11 +377,14 @@ public partial class WhatsAnAiBridge
         var bridge = GameController.PluginBridge;
         if (bridge?.GetType().GetField("_methods", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(bridge) is not IDictionary dict) return new();
         var live = LivePluginAssemblies() ?? new();
-        return dict.Cast<DictionaryEntry>()
-            .Where(e => e.Value is Delegate d && DelegateAssembly(d) is { } a && assemblies.Contains(a) && !live.Contains(a))
-            .Select(e => e.Key?.ToString() ?? "")
-            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        // foreach over IDictionary uses its IDictionaryEnumerator; Cast<DictionaryEntry>() would go through the plain
+        // IEnumerable, which yields KeyValuePairs for the generic dictionary behind PluginBridge (InvalidCastException).
+        var names = new List<string>();
+        foreach (DictionaryEntry e in dict)
+            if (e.Value is Delegate d && DelegateAssembly(d) is { } a && assemblies.Contains(a) && !live.Contains(a))
+                names.Add(e.Key?.ToString() ?? "");
+        names.Sort(StringComparer.OrdinalIgnoreCase);
+        return names;
     }
 
     private static Assembly? DelegateAssembly(Delegate d) => d.Target?.GetType().Assembly ?? d.Method.DeclaringType?.Assembly;
