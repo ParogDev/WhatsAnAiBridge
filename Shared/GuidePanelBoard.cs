@@ -112,6 +112,16 @@ public partial class WhatsAnAiBridge
                 row.TailKind = WorkTailKind.Text;
                 row.Tail = "PR #" + pr.Number + (pr.Checks switch { "pending" => " - CI", "green" => " - CI green", "red" => " - CI red", _ => "" });
             }
+            // The owner's session: what else it is doing (a lease, a recording: what a restart may wait on) and its MCP build.
+            if (r.Owner != null)
+                foreach (var s in rs.Sessions)
+                {
+                    if (s.Id != r.Owner) continue;
+                    var extra = s.Doing.Length > 0 ? "Doing: " + string.Join("; ", s.Doing) : null;
+                    if (BoardMcpLine(s, rs) is { } mcp) extra = extra != null ? extra + "\n" + mcp : mcp;
+                    if (extra != null) row.HoverNote = row.HoverNote != null ? row.HoverNote + "\n" + extra : extra;
+                    break;
+                }
             if (r.Stale) { row.StageWord = null; row.Track = false; row.Spinner = false; row.TailKind = WorkTailKind.Text; row.Tail = "(quiet " + GuideElapsed(utc - r.UpdatedAt) + ")"; }
             Add(row);
         }
@@ -130,7 +140,7 @@ public partial class WhatsAnAiBridge
                 Add(new BoardRow
                 {
                     Name = s.Name, Hue = hue, HasHue = true, Request = doing, Spinner = s.Doing.Length > 0, Tone = ToneNeutral,
-                    HoverTitle = s.Name, HoverBody = doing, HoverNote = s.Mcp is { } m ? "MCP " + (m.Version ?? ShortSha(m.Sha) ?? "?") + (m.Local ? ", local build" : m.Unsupervised ? ", no supervisor: restart this session for one" : "") : null,
+                    HoverTitle = s.Name, HoverBody = doing, HoverNote = BoardMcpLine(s, rs),
                 });
             }
             else
@@ -173,6 +183,17 @@ public partial class WhatsAnAiBridge
             b.Foot1 = foot;
         }
         b.Foot2 = infra != null ? "Shared server: " + infra : b.Empty ? BoardEmptyFoot : null;
+    }
+
+    /// <summary>A session's MCP build for its row's hover: "MCP 3.58.0, swapping to 3.58.1" while a rollout has not reached it.</summary>
+    private static string? BoardMcpLine(SessionView s, SessionsView rs)
+    {
+        if (s.Mcp is not { } m) return null;
+        var line = "MCP " + (m.Version ?? ShortSha(m.Sha) ?? "?");
+        if (m.Local) line += ", local build";
+        else if (m.Unsupervised) line += ", no supervisor: restart this session for one";
+        else if (rs.Rollout is { } ro && m.Behind(ro.DeployedSha)) line += ", swapping to " + (ro.DeployedVersion ?? ShortSha(ro.DeployedSha));
+        return line;
     }
 
     private static string BoardBlockers(RestartRequest rr, AgentsView ag)

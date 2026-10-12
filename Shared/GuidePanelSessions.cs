@@ -244,9 +244,9 @@ public partial class WhatsAnAiBridge
         var hovered = u.ChipAlpha > 0.05f && io.MousePos.X >= u.ChipMin.X && io.MousePos.X < u.ChipMax.X
                       && io.MousePos.Y >= u.ChipMin.Y && io.MousePos.Y < u.ChipMax.Y;
         u.ChipHover += ((hovered ? 1f : 0f) - u.ChipHover) * (1f - MathF.Exp(-io.DeltaTime / (float)ChipHoverSec));
-        var down = io.MouseDown[0];
-        if (hovered && down && !_workUi.ChipWasDown) _workUi.Pinned = !_workUi.Pinned;
-        _workUi.ChipWasDown = down;
+        // The click goes through a tiny ImGui window over last frame's rect (like the highlight ask pills): ImGui then
+        // captures the mouse there, so the click that pins the board never also reaches the game underneath.
+        if (u.ChipAlpha > 0.05f && u.ChipMax.X > u.ChipMin.X && ChipClicked(u.ChipMin, u.ChipMax - u.ChipMin)) _workUi.Pinned = !_workUi.Pinned;
 
         // Strength: calm at half, more when a restart is queued or something needs the player, nearly full when one is
         // granted (with a slow shallow breathe); ghosted with the card while a highlight carries the words (attention),
@@ -348,7 +348,36 @@ public partial class WhatsAnAiBridge
         }
     }
 
-    private const string ChipPinnedTip = "The agents board is pinned under the card. Click to unpin it (Esc does too).";
+    /// <summary>An input-only window (no background, no decoration) over the chip with one InvisibleButton: true on a click.</summary>
+    private static bool ChipClicked(Vector2 pos, Vector2 size)
+    {
+        const ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
+            | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoNav
+            | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoBringToFrontOnFocus | ImGuiWindowFlags.NoBackground | ImGuiWindowFlags.NoSavedSettings;
+        ImGui.SetNextWindowPos(pos, ImGuiCond.Always);
+        ImGui.SetNextWindowSize(size, ImGuiCond.Always);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowMinSize, Vector2.One);
+        var clicked = false;
+        try
+        {
+            if (ImGui.Begin("##sessions_chip", flags))
+            {
+                ImGui.SetCursorScreenPos(pos);
+                ImGui.InvisibleButton("##sessions_chip_btn", size);
+                clicked = ImGui.IsItemClicked();
+            }
+        }
+        finally
+        {
+            ImGui.End();
+            ImGui.PopStyleVar(3);
+        }
+        return clicked;
+    }
+
+    private const string ChipPinnedTip ="The agents board is pinned under the card. Click to unpin it (Esc does too).";
 
     /// <summary>The first seven characters of a git sha (null stays null).</summary>
     private static string? ShortSha(string? sha) => sha == null ? null : sha.Length > 7 ? sha[..7] : sha;

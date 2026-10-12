@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -95,7 +96,8 @@ public partial class WhatsAnAiBridge
         public string Phase { get; set; } = "Sent";         // F8Phase, from Stage
         public string WaitingOn { get; set; } = "None";     // None | Session | Player | Ci | Review | OtherAgent | Restart
         public string? WaitingOnSet { get; set; }           // what the agent said it waits on (Player never)
-        public string? Ask { get; set; }                    // <= 120, while WaitingOn = Player
+        public string? Ask { get; set; }                    // <= 120, while WaitingOn = Player (derived; null otherwise)
+        public string? AskSet { get; set; }                 // the agent's own Ask line (reply / work.set): Ask's fallback text
         public string? NeedsYou { get; set; }               // what the player is asked through: answer | step | recording | route
         public string? Text { get; set; }                   // <= 400
         public string? Detail { get; set; }                 // <= 400
@@ -198,6 +200,13 @@ public partial class WhatsAnAiBridge
 
     private readonly Dictionary<string, AgentWorkDto> _work = new(StringComparer.Ordinal);   // active and final (recent) items
     private readonly ConcurrentQueue<JObject> _workInbox = new();                             // pub/sub events to apply (any thread)
+    private readonly ConcurrentQueue<JObject> _workOutbox = new();                            // "work" events to publish (one pool worker)
+    private int _workOutboxBusy;
+    private readonly object _workFileLock = new();                                           // items.json writes in snapshot order (never taken under the sessions lock; may nest it)
+    private long _workSaveGen, _workWrittenGen;
+    private readonly HashSet<long> _workEndedSeqs = new();                                    // F8 seqs that ended and left recent (this load)
+    private readonly Queue<long> _workEndedOrder = new();
+    private const int WorkEndedKeep = 500;
     private readonly Dictionary<string, AgentRouteView> _agentRoutes = new(StringComparer.Ordinal);   // owner session id -> its agent route
     private readonly Dictionary<string, (string? Owner, string? Title, int TtlSec, long? Ref)> _agentRouteInfo = new(StringComparer.Ordinal);   // route id -> set
     private long _workRev, _workViewRev = -1, _workSavedRev = -1;
@@ -274,7 +283,7 @@ public partial class WhatsAnAiBridge
 
     // ── Events in (any thread) ───────────────────────────────────────
 
-    /// <summary>From PubPublish (after the pub/sub lock): the kinds work items are built from go to the inbox (lock-free).</summary>
+    /// <summary>From PubPublish (under the pub/sub lock, so in seq order): the kinds work items are built from go to the inbox (lock-free).</summary>
     private void WorkEnqueue(string kind, JObject e)
     {
         if (WorkEventKinds.Contains(kind)) _workInbox.Enqueue(e);
@@ -286,7 +295,13 @@ public partial class WhatsAnAiBridge
     /// </summary>
     private void WorkStampRouteAgent(string? kind, JObject data)
     {
-        if (kind != "route.agent" || CurrentSession() is not { } me) return;
+        if (kind != "route.agent") return;
+        // A client-sent owner never goes through, in any casing: without a session there is no owner at all (it would draw
+        // in another session's highlight layer and take its attention turn).
+        foreach (var p in data.Properties().Where(p => p.Name.Equals("Owner", StringComparison.OrdinalIgnoreCase)
+                     || p.Name.Equals("OwnerName", StringComparison.OrdinalIgnoreCase) || p.Name.Equals("Hue", StringComparison.OrdinalIgnoreCase)).ToList())
+            p.Remove();
+        if (CurrentSession() is not { } me) return;
         lock (_sessionLock)
         {
             data["Owner"] = me.Id;
@@ -344,6 +359,8 @@ public partial class WhatsAnAiBridge
                 _work.Remove(key);   // a session's next task after a finished one starts fresh
                 item = null;
             }
+            if (item == null && f8 && _workEndedSeqs.Contains(seq))
+                return Err("final", $"{key} ended and left the board (recent keeps 10 min): a final F8 item does not reopen (a new press does).");
             if (item == null)
             {
                 item = f8 ? WorkNewF8Locked(seq, now, null) : new AgentWorkDto
@@ -481,9 +498,17 @@ public partial class WhatsAnAiBridge
     /// <summary>A press: the F8 item at Pressed (C2). A works-only press is recorded Done at once and starts nothing (C7).</summary>
     private void WorkOnPressLocked(long seq, JObject? d, DateTime now)
     {
-        if (seq <= 0 || _work.ContainsKey("f8:" + seq)) return;
-        var item = WorkNewF8Locked(seq, now, d);
-        _work[item.Key] = item;
+        if (seq <= 0) return;
+        var fresh = WorkNewF8Locked(seq, now, d);
+        if (_work.TryGetValue(fresh.Key, out var item))
+        {
+            // A reply was applied first (a bare "F8 #n" item): the press's own data fills it in; anything else stays.
+            if (item.Flags != null || item.Note != null || item.Scope != null) return;
+            item.Flags = fresh.Flags; item.Note = fresh.Note; item.Scope = fresh.Scope;
+            if (item.Title == $"F8 #{seq}") item.Title = fresh.Title;
+            if (item.Final) { WorkTouchLocked(item, now); return; }
+        }
+        else _work[fresh.Key] = item = fresh;
         WorkTouchLocked(item, now);
         var flags = item.Flags ?? [];
         var verdict = WorkStr(d, "Verdict", 20);
@@ -535,6 +560,7 @@ public partial class WhatsAnAiBridge
         var key = "f8:" + refSeq;
         if (!_work.TryGetValue(key, out var item))
         {
+            if (_workEndedSeqs.Contains(refSeq.Value)) return;   // a late reply for a press that ended and left recent: no phantom row
             item = WorkNewF8Locked(refSeq.Value, now, null);   // a reply for a press this load never saw (it came before the HUD did)
             _work[key] = item;
         }
@@ -557,7 +583,7 @@ public partial class WhatsAnAiBridge
             var parsed = w.Type == JTokenType.Null ? null : WorkParseWait(w.ToString());
             item.WaitingOnSet = parsed is null or "None" or "Player" ? null : parsed;
         }
-        if (WorkGet(o, "Ask") != null && WorkStr(o, "Ask", 120) is { } ask) item.Ask = ask;   // kept as the fallback line while the bridge derives Player
+        if (WorkGet(o, "Ask") != null) item.AskSet = WorkStr(o, "Ask", 120);   // the agent's own line: the fallback while the bridge derives Player
         if (WorkGet(o, "Pr") is { } pr)
         {
             if (pr is JObject po)
@@ -585,7 +611,7 @@ public partial class WhatsAnAiBridge
         if (item.History.Count > WorkHistoryMax) item.History.RemoveRange(0, item.History.Count - WorkHistoryMax);
         item.Final = stage is "Done" or "Failed" or "Dropped";
         item.FinalAt = item.Final ? now : null;
-        if (item.Final) { item.WaitingOnSet = null; item.WaitingOn = "None"; item.Ask = null; item.NeedsYou = null; }
+        if (item.Final) { item.WaitingOnSet = null; item.WaitingOn = "None"; item.Ask = item.AskSet = null; item.NeedsYou = null; }
         if (toast && item.Kind == "F8") WorkToastStageLocked(item);
     }
 
@@ -705,12 +731,17 @@ public partial class WhatsAnAiBridge
             // Expiry: recent items after 10 min; a task whose session is gone (forgotten, or absent 30 min); an F8 item with
             // no news for 3 h is dropped (a dispatcher that died mid-way never leaves it on the strip forever).
             if (item.Final) { if (now - (item.FinalAt ?? item.UpdatedAt) > WorkRecentKeep) (remove ??= new()).Add(item.Key); continue; }
+            // The F8 owner: the connected route-f8-<seq> session. Re-linked while the linked one is not connected, so a
+            // replacement handler (same label, a new session id) takes the item over.
             SessionInfo? owner = null;
-            if (item.Kind == "F8" && item.Owner == null && item.Seq is long sq)
+            if (item.Owner != null) _sessions.TryGetValue(item.Owner, out owner);
+            if (item.Kind == "F8" && owner is not { Connected: true } && item.Seq is long sq)
+            {
+                SessionInfo? handler = null;
                 foreach (var s in _sessions.Values)
-                    if (s.Connected && WorkIsHandlerLabel(s.Label, sq) && (owner == null || s.LastSeen > owner.LastSeen)) owner = s;
-            if (owner != null) { item.Owner = owner.Id; WorkTouchLocked(item, now); }
-            else if (item.Owner != null) _sessions.TryGetValue(item.Owner, out owner);
+                    if (s.Connected && WorkIsHandlerLabel(s.Label, sq) && (handler == null || s.LastSeen > handler.LastSeen)) handler = s;
+                if (handler != null && handler.Id != item.Owner) { owner = handler; item.Owner = handler.Id; WorkTouchLocked(item, now); }
+            }
             if (item.Kind == "Task" && (owner == null ? now - Max(item.UpdatedAt, _workLoadedAt) > WorkTaskGone : !PresentLocked(owner, now) && now - owner.LastSeen > WorkTaskGone))
             {
                 (remove ??= new()).Add(item.Key);
@@ -724,7 +755,19 @@ public partial class WhatsAnAiBridge
             }
             WorkDeriveLocked(item, owner, now, guide, hlAsks);
         }
-        if (remove != null) { foreach (var k in remove) _work.Remove(k); _workRev++; }
+        if (remove != null)
+        {
+            foreach (var k in remove)
+            {
+                if (_work.Remove(k, out var gone) && gone is { Kind: "F8", Final: true, Seq: long es })
+                {
+                    // Remembered (bounded) so a late reply for it never makes a new, non-final row.
+                    if (_workEndedSeqs.Add(es)) _workEndedOrder.Enqueue(es);
+                    while (_workEndedOrder.Count > WorkEndedKeep) _workEndedSeqs.Remove(_workEndedOrder.Dequeue());
+                }
+            }
+            _workRev++;
+        }
         WorkPublishDueLocked(now, pubs);
         WorkPublishViewLocked(now);
     }
@@ -758,16 +801,16 @@ public partial class WhatsAnAiBridge
             if (needs == null && route is { Leading: true, Manual: true }) { needs = "route"; ask = route.Title ?? route.Label; }
         }
         var waiting = needs != null ? "Player" : item.WaitingOnSet ?? (item.Kind == "F8" && item.Stage == "Pressed" ? "Session" : "None");
-        ask = needs != null ? Clip(ask ?? item.Ask, 120) : null;
+        ask = needs != null ? Clip(ask ?? item.AskSet, 120) : null;   // never a stale derived line: Ask exists only while WaitingOn = Player
         if (waiting != item.WaitingOn) { item.WaitSince = waiting is "Ci" or "Review" or "Restart" or "OtherAgent" ? now : null; item.WaitToasted = false; }
         var nobody = item.Kind == "F8" && item.Stage == "Pressed" && now - item.StartedAt > WorkNobodyAfter;
         var stalled = (item.WaitSince is { } ws && now - ws > WorkWaitToastAfter) || (item.Kind == "F8" && now - item.StageAt > WorkStallAfter);
         var routeView = route is { Leading: true } || (route != null && now - route.At < TimeSpan.FromSeconds(5)) ? route : null;
         if (name != item.OwnerName || hue != item.Hue || stale != item.Stale || waiting != item.WaitingOn || needs != item.NeedsYou
-            || (needs != null && ask != item.Ask) || nobody != item.NobodyListening || stalled != item.Stalled || !Equals(routeView, item.Route))
+            || ask != item.Ask || nobody != item.NobodyListening || stalled != item.Stalled || !Equals(routeView, item.Route))
         {
             item.OwnerName = name; item.Hue = hue; item.Stale = stale; item.WaitingOn = waiting; item.NeedsYou = needs;
-            if (needs != null) item.Ask = ask;
+            item.Ask = ask;
             item.NobodyListening = nobody; item.Stalled = stalled; item.Route = routeView;
             item.PubDirty = true;
             _workRev++;
@@ -802,12 +845,31 @@ public partial class WhatsAnAiBridge
         }
     }
 
-    /// <summary>Outside the sessions lock: the "work" events (pub/sub kind work, source bridge).</summary>
+    /// <summary>
+    /// Outside the sessions lock: the "work" events (pub/sub kind work, source bridge). Handed to one pool worker at a time
+    /// (the events.jsonl append and the local handlers never run on the render thread; order kept), never after WorkClose.
+    /// </summary>
     private void WorkFlush(List<JObject> pubs)
     {
-        foreach (var o in pubs)
-            try { PubPublish("work", o, "bridge"); }
-            catch (Exception ex) { LogError($"[Work] publishing work {o["Key"]}: {ex.Message}"); }
+        if (pubs.Count == 0 || _workClosed) return;
+        foreach (var o in pubs) _workOutbox.Enqueue(o);
+        if (Interlocked.CompareExchange(ref _workOutboxBusy, 1, 0) == 0) ThreadPool.QueueUserWorkItem(_ => WorkOutboxDrain());
+    }
+
+    private void WorkOutboxDrain()
+    {
+        while (true)
+        {
+            while (_workOutbox.TryDequeue(out var o))
+            {
+                if (_workClosed) continue;   // a later bridge load hands out these seqs: drop, never publish from an ended load
+                try { PubPublish("work", o, "bridge"); }
+                catch (Exception ex) { LogError($"[Work] publishing work {o["Key"]}: {ex.Message}"); }
+            }
+            Volatile.Write(ref _workOutboxBusy, 0);
+            // An enqueue that saw busy = 1 just before it was cleared: take it up here (else the next WorkFlush would).
+            if (_workOutbox.IsEmpty || Interlocked.CompareExchange(ref _workOutboxBusy, 1, 0) != 0) return;
+        }
     }
 
     // ── The drawer's view ────────────────────────────────────────────
@@ -962,7 +1024,7 @@ public partial class WhatsAnAiBridge
         if (i.StageAt == default || i.StageAt > now) i.StageAt = i.StartedAt;
         if (i.UpdatedAt == default || i.UpdatedAt > now) i.UpdatedAt = i.StageAt;
         i.Title = Clip(string.IsNullOrWhiteSpace(i.Title) ? (kind == "F8" ? $"F8 #{i.Seq}" : "Task") : i.Title, 60)!;
-        i.Text = Clip(i.Text, 400); i.Detail = Clip(i.Detail, 400); i.Note = Clip(i.Note, 300); i.Ask = Clip(i.Ask, 120);
+        i.Text = Clip(i.Text, 400); i.Detail = Clip(i.Detail, 400); i.Note = Clip(i.Note, 300); i.AskSet = Clip(i.AskSet, 120); i.Ask = null;
         i.Owner = Clip(i.Owner, 80); i.Scope = Clip(i.Scope, 20);
         i.Flags = i.Flags?.Where(f => !string.IsNullOrWhiteSpace(f)).Select(f => Clip(f, 24)!).Take(12).ToArray();
         i.WaitingOnSet = WorkParseWait(i.WaitingOnSet) is { } w and not ("None" or "Player") ? w : null;
@@ -970,6 +1032,10 @@ public partial class WhatsAnAiBridge
         foreach (var h in i.History) { h.Stage = WorkParseStage(h.Stage)!; h.Text = Clip(h.Text, 400); }
         i.Final = false; i.FinalAt = null; i.Route = null; i.OwnerName = ""; i.Hue = -1; i.NeedsYou = null;
         i.WaitingOn = i.WaitingOnSet ?? (kind == "F8" && stage == "Pressed" ? "Session" : "None");
+        // The derive pass starts a wait's clock only when WaitingOn changes, and a restored wait already holds its value: start
+        // it here (from the restore; the time before it is unknown), so the 90 s stall and STILL SHIPPING still come.
+        i.WaitSince = i.WaitingOn is "Ci" or "Review" or "Restart" or "OtherAgent" ? now : null;
+        i.WaitToasted = false;
         i.Stale = i.NobodyListening = i.Stalled = false;
         return i;
     }
@@ -982,6 +1048,7 @@ public partial class WhatsAnAiBridge
     private void WorkSaveIfChanged()
     {
         string? json = null;
+        long gen;
         lock (_sessionLock)
         {
             if (!_workLoaded || _workSavedRev == _workRev) return;
@@ -998,15 +1065,27 @@ public partial class WhatsAnAiBridge
                 arr.Add(o);
             }
             json = arr.ToString(Formatting.Indented);
+            gen = ++_workSaveGen;
         }
-        try
+        // TCP threads (work.set / work.end) and the render thread (SessionsTick) save: one writer at a time, and a snapshot
+        // older than the one already written is skipped (it would overwrite newer items; the newer key is already recorded).
+        lock (_workFileLock)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(WorkFile)!);
-            var tmp = WorkFile + ".tmp";
-            File.WriteAllText(tmp, json);
-            File.Move(tmp, WorkFile, true);
+            if (gen <= _workWrittenGen) return;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(WorkFile)!);
+                var tmp = WorkFile + ".tmp";
+                File.WriteAllText(tmp, json);
+                File.Move(tmp, WorkFile, true);
+                _workWrittenGen = gen;
+            }
+            catch (Exception ex)
+            {
+                LogError($"[Work] save failed ({WorkFile}): {ex.Message}");
+                lock (_sessionLock) { if (_workSaveGen == gen) _workSavedKey = null; }   // the next change writes again
+            }
         }
-        catch (Exception ex) { LogError($"[Work] save failed ({WorkFile}): {ex.Message}"); }
     }
 
     // ── Parsing helpers ──────────────────────────────────────────────

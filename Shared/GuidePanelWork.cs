@@ -59,7 +59,6 @@ public partial class WhatsAnAiBridge
         // 30 min without any agent.
         public bool Pinned;
         public double NoAgentSince = -1e9;
-        public bool ChipWasDown;
     }
 
     private readonly WorkUiState _workUi = new();

@@ -182,8 +182,11 @@ public partial class WhatsAnAiBridge
             listeners = PubListenersLocked(kind);
             // The plugins it reaches by name (a "*" watcher handles nothing), so a publisher can tell "no plugin listens".
             plugins = new JArray(_pubLocal.Where(kv => kv.Value.kinds.Contains(kind)).Select(kv => kv.Key));
+            // Presses, replies and route events build the F8 work items (Work.cs; applied under the sessions lock). Enqueued
+            // under this lock (lock-free queue, no other lock taken): the inbox is in seq order, and a press is in it before
+            // any poller can read it and reply.
+            WorkEnqueue(kind, e);
         }
-        WorkEnqueue(kind, e);   // presses, replies and route events build the F8 work items (Work.cs; applied under the sessions lock)
         try
         {
             if (Obs().Enabled)
