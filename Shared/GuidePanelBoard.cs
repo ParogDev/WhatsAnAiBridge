@@ -28,6 +28,7 @@ namespace WhatsAnAiBridge;
 public partial class WhatsAnAiBridge
 {
     private const int BoardRowsMax = 6;
+    private const float BoardRequestMinW = 70f, BoardTailMinW = 64f;
     private const double BoardUnpinAfterSec = 1800, BoardFailedHairlineSec = 10;
     private const string BoardTitle = "AGENTS ON THIS HUD", BoardPinnedText = "pinned", BoardEmptyRow = "No agents on this HUD",
         BoardEmptyFoot = "Press F8 to send the route to Claude. Agents connect through the AI Bridge.", BoardUnpinTip = "Unpin the board (Esc does too). The chip's hover still shows it.";
@@ -389,9 +390,16 @@ public partial class WhatsAnAiBridge
         if (!ReferenceEquals(r.NameSrc, r.Name) || r.NameW != WorkNameW) { r.NameSrc = r.Name; r.NameW = WorkNameW; r.NameOut = GuideClipText(r.Name, (WorkNameW - 8f) / k); }
         dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * a), r.NameOut);
         x += WorkNameW;
-        if (!ReferenceEquals(r.ReqSrc, r.Request) || r.ReqW != WorkRequestW) { r.ReqSrc = r.Request; r.ReqW = WorkRequestW; r.ReqOut = GuideClipText(r.Request, (WorkRequestW - 8f) / k); }
+        // The right side first (elapsed, the stage word, the track and a minimum tail): the request column gives way so the
+        // stage word never runs into the elapsed and the tail ("waits for CI", "PR #57 - CI") keeps a readable slot.
+        var ew = r.Elapsed.Length > 0 ? ImGui.CalcTextSize(r.Elapsed).X * k + 10f : 0f;
+        var trackW = r.Track && r.Work != null && r.Ui != null ? WorkDotR * 2 + WorkDotPitch * 4 + 12f : r.Spinner ? 18f : 0f;
+        var wordW = r.StageWord != null ? GuideTrackedWidth(font, small, r.StageWord, GuideToastTitleTrack) + 10f : 0f;
+        var tailMin = r.Tail != null ? BoardTailMinW : 0f;
+        var reqW = Math.Clamp(rx - ew - x - trackW - wordW - tailMin, BoardRequestMinW, WorkRequestW);
+        if (!ReferenceEquals(r.ReqSrc, r.Request) || r.ReqW != reqW) { r.ReqSrc = r.Request; r.ReqW = reqW; r.ReqOut = GuideClipText(r.Request, (reqW - 8f) / k); }
         dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.8f * a), r.ReqOut);
-        x += WorkRequestW;
+        x += reqW;
         if (r.Track && r.Work != null && r.Ui != null)
         {
             DrawWorkTrack(dl, new Vector2(x + WorkDotR, cy), r.Work, r.Ui, r.Tone, now, a);
@@ -411,9 +419,8 @@ public partial class WhatsAnAiBridge
         }
         if (r.Elapsed.Length > 0)
         {
-            var ew = ImGui.CalcTextSize(r.Elapsed).X * k;
-            dl.AddText(font, small, new Vector2(rx - ew, cy - small * 0.5f), U(r.Work is { Stalled: true, Final: false } ? ToneWarn : GuideToastMuted, a), r.Elapsed);
-            rx -= ew + 10f;
+            dl.AddText(font, small, new Vector2(rx - (ew - 10f), cy - small * 0.5f), U(r.Work is { Stalled: true, Final: false } ? ToneWarn : GuideToastMuted, a), r.Elapsed);
+            rx -= ew;
         }
         if (r.Tail == null || rx - x < 24f) return;
         if (r.TailKind == WorkTailKind.NeedsYou)

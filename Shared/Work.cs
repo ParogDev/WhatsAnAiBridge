@@ -924,7 +924,10 @@ public partial class WhatsAnAiBridge
               : w.Note != null ? Clip(w.Note, 24)! : "Feedback"
             : w.Title;
         // The hover (3.2): title, the stage history, the current text and detail, and a foot.
-        var hoverTitle = f8 ? $"F8 #{w.Seq} - {w.Title}" + (w.Scope != null ? $" - {WorkScopeWords(w.Scope)}" : "") : w.Title;
+        // A bare item (a reply for a press this load never saw) has the placeholder title "F8 #n": name the request instead
+        // of repeating the number ("F8 #12 - F8 #12").
+        var hoverWhat = f8 && w.Title == label ? request : w.Title;
+        var hoverTitle = f8 ? $"{label} - {hoverWhat}" + (w.Scope != null ? $" - {WorkScopeWords(w.Scope)}" : "") : w.Title;
         var body = new StringBuilder();
         foreach (var h in w.History)
         {
