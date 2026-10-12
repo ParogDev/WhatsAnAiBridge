@@ -180,6 +180,7 @@ public partial class WhatsAnAiBridge
     {
         if (BridgeRegistry() is not { } dict) return BridgeUnavailable();
         var rows = new List<JObject>();
+        var live = LivePluginAssemblies();
         foreach (DictionaryEntry e in dict)
         {
             var row = new JObject { ["name"] = e.Key?.ToString() };
@@ -189,6 +190,7 @@ public partial class WhatsAnAiBridge
                 row["signature"] = DelegateSignature(m);
                 row["delegateType"] = TypeName(d.GetType());
                 row["declaredIn"] = m.DeclaringType?.FullName;
+                if (StaleDelegateNote(d, live) is { } stale) row["stale"] = stale;
             }
             else row["valueType"] = e.Value?.GetType().FullName;
             rows.Add(row);
@@ -268,6 +270,7 @@ public partial class WhatsAnAiBridge
             return new JObject { ["error"] = "invoke_failed", ["message"] = $"'{name}' could not be invoked: {ex.GetType().Name}: {ex.Message}", ["signature"] = signature, ["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 2) };
         }
         var reply = new JObject { ["ok"] = true, ["name"] = name, ["signature"] = signature, ["ms"] = Math.Round(sw.Elapsed.TotalMilliseconds, 2) };
+        if (StaleDelegateNote(d, LivePluginAssemblies()) is { } stale) reply["stale"] = $"'{name}' is {stale}";
         switch (result)
         {
             case null:

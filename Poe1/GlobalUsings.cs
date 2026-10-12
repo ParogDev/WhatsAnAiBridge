@@ -14,3 +14,5 @@ global using Vector2N = System.Numerics.Vector2;
 global using FileInMemory = ExileCore.PoEMemory.FileInMemory;
 global using UiElement = ExileCore.PoEMemory.Element;
 global using NextFrameTask = ExileCore.Shared.NextFrameTask;
+global using PluginManager = ExileCore.Shared.PluginManager;
+global using PluginWrapper = ExileCore.Shared.PluginWrapper;
