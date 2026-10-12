@@ -113,12 +113,8 @@ public partial class WhatsAnAiBridge
         // count and countdown texts rebuilt only when their number changes, and the hover texts rebuilt once a second.
         public Vector2 ChipMin, ChipMax;
         public float ChipAlpha, ChipHover;
-        public int ChipCount = -1, ChipSecs = -1;
-        public string ChipCountText = "", ChipSecsText = "";
-        public SessionsView? ChipTipView;
-        public AgentsView? ChipTipAgents;
-        public long ChipTipSecond = -1;
-        public string? ChipTipTitle, ChipTipBody, ChipTipNote, ChipTipFoot;
+        public int ChipCount = -1, ChipSecs = -1, ChipBadge = -1;
+        public string ChipCountText = "", ChipSecsText = "", ChipBadgeText = "";
         public string? LastError;
         // Quiet dot (attention rule 5): the card was hidden last frame, and the dot was drawn in its place; its hover
         // halo eased 0..1.
@@ -202,10 +198,13 @@ public partial class WhatsAnAiBridge
         var ag = AgentsSnapshot();
         var ask = AttnAskSnapshot();   // the attention queue's floor holder when it is a question (AttentionQueue.cs)
         var queue = _askUi.Queue = AttnQueueSnapshot();   // who waits behind it (the next strip, the dot; GuidePanelQueue.cs)
+        var work = WorkSnapshot();     // the work items (Work.cs): the strip, the chip's badge and the board (GuidePanelWork.cs, GuidePanelBoard.cs)
         var now = ImGui.GetTime();
         var utc = DateTime.UtcNow;
         ObserveGuide(g, q, now);
         ObserveFlow(fl, plan, now);
+        ObserveWork(work, now, utc);
+        BoardTick(work, rs, now);
         AskObserveGuideOwner(g.who, g.session, ag, now);   // the slot's owner for the hand-over cues (GuidePanelAsk.cs)
         // The floor's card slot: the ask shown, leaving (receipt, fade) or the empty gap after it (GuidePanelAsk.cs).
         var askUp = AskSlotUp(ask, now, utc, ImGui.GetIO().MousePos);
@@ -255,10 +254,11 @@ public partial class WhatsAnAiBridge
         // The user has pressed Done (checking): their part is done, so the card no longer asks them to act now.
         var mustAct = g.status is "waiting" or "failed" && g.instruction != null && !GuideChecking(a, g.status);
         var bridgeDown = _tcpServer?.IsRunning != true;
-        var peekable = hasCard || q.Next != null || askUp;
+        var peekable = hasCard || q.Next != null || askUp || WorkStripHasRows;
         var waiting = queue.Rows.Length > 0 || ask != null;   // something for the player, on screen or not: the dot means something
         var at = GuideAttentionFor(boxes.Count > 0, hovered, now - u.HoverAt, needsUser, mustAct, avoid,
-            CombatNear(now), quiet, peekable, g.rev > 0 || bridgeDown || waiting, bridgeDown, toastsH > 0, rs.Waiting != null);
+            CombatNear(now), quiet, peekable, g.rev > 0 || bridgeDown || waiting || work.Active > 0, bridgeDown, toastsH > 0, rs.Waiting != null,
+            WorkStripHasRows, WorkQuiet(now), WorkStripNeedsYou(), work.AnyF8Running, BoardPinned);
         FeedGuideToasts(g, at, hl, utc);
         PublishAttention(at);
         var hide = at.CardHidden;
@@ -319,7 +319,7 @@ public partial class WhatsAnAiBridge
             u.WinPos = ImGui.GetWindowPos();
             u.WinH = shown ? ImGui.GetWindowSize().Y : 0;
             if (!shifted) u.Home = u.WinPos;
-            if (shown) DrawGuideBody(g, a, q, fv, at, hasCard, needsUser, rs.Waiting, ag, ask, th, now, utc);
+            if (shown) DrawGuideBody(g, a, q, fv, at, hasCard, needsUser, rs, work, ag, ask, th, now, utc);
         }
         catch (Exception ex) { GuideReport(ex); }
         finally
@@ -361,14 +361,25 @@ public partial class WhatsAnAiBridge
     /// <param name="ShowDot">Output: the quiet status dot is drawn where the card was.</param>
     /// <param name="RestartUp">Input: a restart card is on screen (it stays drawn in combat: its countdown and Not now must stay reachable).</param>
     /// <param name="FloorHidden">Output: combat hides the floor card (an ask, an instruction) and the dot stands in; hovering the dot brings it back.</param>
+    /// <param name="WorkRows">Input: the work strip has rows (active F8 items, or a terminal one in its hold; GuidePanelWork.cs).</param>
+    /// <param name="WorkQuiet">Input: no F8 stage change for 2 min.</param>
+    /// <param name="WorkNeedsYou">Input: a strip row waits on the player (never hidden by the quiet rule).</param>
+    /// <param name="F8Running">Input: an F8 item is between Pressed and Verifying (the dot's accent ring while the strip is not drawn).</param>
+    /// <param name="BoardPinned">Input: the user pinned the agents board into the stack (it keeps the panel up).</param>
+    /// <param name="WorkStripShown">Output: the work strip is drawn (f8-agent-ux.md 3.3: it ghosts with the card, hides in combat, collapses into the dot after 2 min quiet).</param>
+    /// <param name="BoardShown">Output: the pinned board is drawn in the stack (it hides with the card; the next strip gives way to it).</param>
+    /// <param name="DotRing">Output: the quiet dot gets a 1.5 px accent ring (an F8 item runs while the strip is not on screen).</param>
     private readonly record struct GuideAttention(
         bool Highlights, bool Hovered, double HoverAgo, bool NeedsUser, bool MustAct, bool Overlapped,
         bool Combat, bool Quiet, bool Peekable, bool BridgeDown,
         float CardAlpha, bool CardPulse, bool Urgent, bool CardInput, bool ShowPlan, bool ToastsAllowed, Vector2 CardShift,
-        bool ToastHold, bool DropEchoes, bool CardHidden, bool ShowDot, bool RestartUp, bool FloorHidden);
+        bool ToastHold, bool DropEchoes, bool CardHidden, bool ShowDot, bool RestartUp, bool FloorHidden,
+        bool WorkRows, bool WorkQuiet, bool WorkNeedsYou, bool F8Running, bool BoardPinned,
+        bool WorkStripShown, bool BoardShown, bool DotRing);
 
     private static GuideAttention GuideAttentionFor(bool highlights, bool hovered, double hoverAgo, bool needsUser, bool mustAct, Vector2 avoid,
-        bool combat, bool quiet, bool peekable, bool dotWanted, bool bridgeDown, bool toastsUp, bool restartUp)
+        bool combat, bool quiet, bool peekable, bool dotWanted, bool bridgeDown, bool toastsUp, bool restartUp,
+        bool workRows, bool workQuiet, bool workNeedsYou, bool f8Running, bool boardPinned)
     {
         var explicitly = hovered || hoverAgo < GuideHoverKeepSec;   // rule 7: a hovered surface shows until 5 s after
         // rule 8: a card that asks the user to act is never ghosted - it is the thing to look at, highlight or not.
@@ -379,9 +390,16 @@ public partial class WhatsAnAiBridge
         // a waiting step included - the player is fighting. The dot in the item's tone stands in; hovering it brings the
         // card back for 5 s (rule 7), input on. A restart card keeps the panel up (its countdown must stay answerable).
         var floorHidden = combat && !explicitly;
+        // The work strip (f8-agent-ux.md 3.3) is a progress state: it keeps the panel up like a waiting card, but after 2 min
+        // without a stage change it collapses into the dot (any change brings it back; a row that waits on the player never
+        // hides, the floor card carries that anyway); hovering brings it back like the card. The pinned board is the user's
+        // choice: it keeps the panel up until unpinned. Both hide in combat with the floor card.
+        var workUp = workRows && (!workQuiet || workNeedsYou || explicitly);
         // rule 5 (quiet dot): after the quiet hide the card leaves a dot where it was; hovering the dot brings the card
         // back (rule 7 keeps it 5 s after the mouse leaves). Only quiet states: a card asking for the user is never quiet.
-        var hidden = (quiet && !mustAct && !(explicitly && peekable)) || (floorHidden && !restartUp);
+        var hidden = (quiet && !workUp && !boardPinned && !mustAct && !(explicitly && peekable)) || (floorHidden && !restartUp);
+        var workShown = workUp && !hidden && !floorHidden;
+        var boardShown = boardPinned && !hidden && !floorHidden;
         // With the card hidden its toasts anchor at its home, right where the dot sits: the dot waits until they are gone.
         // rule 1 (combat): while a hostile is near, the non-actionable toasts (agent, result) wait. Cards, warnings,
         // errors and steps are untouched: what asks the user to act always wins (rule 8).
@@ -391,7 +409,9 @@ public partial class WhatsAnAiBridge
         return new GuideAttention(highlights, hovered, hoverAgo, needsUser, mustAct, avoid != Vector2.Zero,
             combat, quiet, peekable, bridgeDown,
             alpha, !ghost, mustAct, !ghost, !ghost, true, avoid,
-            combat, highlights, hidden, hidden && dotWanted && !toastsUp, restartUp, floorHidden);
+            combat, highlights, hidden, hidden && dotWanted && !toastsUp, restartUp, floorHidden,
+            workRows, workQuiet, workNeedsYou, f8Running, boardPinned,
+            workShown, boardShown, f8Running && !workShown);
     }
 
     /// <summary>
@@ -516,9 +536,14 @@ public partial class WhatsAnAiBridge
 
     // ── Body ─────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The stack, top to bottom (f8-agent-ux.md 6): the floor card (instruction or ask), the restart card, the work strip
+    /// (F8 items, at most two lines), the next strip or the pinned agents board, the queue card or its QUEUED strip.
+    /// </summary>
     private void DrawGuideBody(in GuideSnap g, in GuideAskView a, in QueueView q, in FlowView fv, in GuideAttention at, bool hasCard, bool needsUser,
-        RestartRequest? restart, AgentsView ag, AskView? ask, PanelTheme th, double now, DateTime utc)
+        SessionsView rs, WorkView work, AgentsView ag, AskView? ask, PanelTheme th, double now, DateTime utc)
     {
+        var restart = rs.Waiting;
         // The floor's slot (GuidePanelAsk.cs): the attention queue's question, its answer receipt and fade, or the empty
         // hand-over gap. First, since it holds the floor. Not drawn in combat (the dot stands in, attention FloorHidden).
         var slot = DrawAskSlot(at, ag, th, now, utc);
@@ -536,20 +561,33 @@ public partial class WhatsAnAiBridge
             DrawRestartCard(restart, floorUp, ag, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
+        // The work strip (GuidePanelWork.cs): one line per F8 press, where each is in its pipeline. Attention decides whether
+        // it is drawn (combat, the 2 min quiet collapse); it keeps the panel up while it shows.
+        if (at.WorkStripShown)
+        {
+            DrawWorkStrip(at, now, utc);
+            ImGui.Dummy(new Vector2(GuideWidth, 5));
+        }
+        // The pinned agents board (GuidePanelBoard.cs) takes the next strip's place: it lists the queue already. Otherwise,
+        // several agents want the player: one quiet line says who is next in the attention queue, or, with nobody in line,
+        // who is asking (two or more at once). Never for one obvious agent, never idle or gone sessions, and only while
+        // the panel is up anyway (never a reason to show it on its own; GuidePanelQueue.cs).
+        if (at.BoardShown)
+        {
+            DrawBoardCard(work, rs, ag, now, utc);
+            ImGui.Dummy(new Vector2(GuideWidth, 5));
+        }
+        else if (NextStripWanted(ag) && (floorUp || restart != null || q.Next != null || at.WorkStripShown))
+        {
+            DrawNextStrip(ag, restart != null, th, now, utc);
+            ImGui.Dummy(new Vector2(GuideWidth, 5));
+        }
         if (q.Next != null)
         {
             // The live card wins while the user has something to do (an agent's direct instruction, a failed step to
             // redo, or the queued step that is recording): the queue then shrinks to a one-line "next" strip.
             if (needsUser || q.Running != null) DrawQueueStrip(q, th);
             else DrawQueueCard(q, th, now, utc);
-            ImGui.Dummy(new Vector2(GuideWidth, 5));
-        }
-        // Several agents want the player: one quiet line says who is next in the attention queue, or, with nobody in line,
-        // who is asking (two or more at once). Never for one obvious agent, never idle or gone sessions, and only while
-        // the panel is up anyway (never a reason to show it on its own; GuidePanelQueue.cs).
-        if (NextStripWanted(ag) && (floorUp || restart != null || q.Next != null))
-        {
-            DrawNextStrip(ag, restart != null, th, now, utc);
             ImGui.Dummy(new Vector2(GuideWidth, 5));
         }
     }
@@ -1317,6 +1355,8 @@ public partial class WhatsAnAiBridge
         dl.AddCircleFilled(c, r + 1.5f, U(GuideToastInk, 0.85f), 20);
         var a = at.BridgeDown ? 0.65f + 0.25f * breathe : 0.8f;
         dl.AddCircleFilled(c, r, U(tone, MathF.Min(1f, a + 0.2f * h)), 20);
+        // An F8 press runs while its strip is not on screen (combat, the quiet collapse): a 1.5 px accent ring says so (f8-agent-ux.md 3.3).
+        if (at.DotRing) dl.AddCircle(c, r + 4f, U(ToneAccent, 0.85f), 20, 1.5f);
         if (hovered && !peekable) DrawGuideDotTip(c, at.BridgeDown ? GuideDotTipDown : tip ?? GuideDotTipIdle, tone);
     }
 
