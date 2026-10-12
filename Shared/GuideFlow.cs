@@ -160,17 +160,32 @@ public partial class WhatsAnAiBridge
         }
     }
 
-    /// <summary>For the guide card: the checklist (label, state) and the current option's instruction.</summary>
+    // The checklist as the last snapshot built it: rebuilt only when a label or a state differs (the guide card reads it per frame).
+    private (string label, string state)[] _flowStepsPub = [];
+
+    /// <summary>For the guide card: the checklist (label, state; shared until it changes: read only) and the current option's instruction.</summary>
     internal (string? title, (string label, string state)[] steps, string? showing, string status, int rev) FlowSnapshot()
     {
         lock (_flowLock)
         {
             var f = _flow;
-            var steps = f.Steps.Select((s, i) => (s.Label, f.Status == "done" || (i < f.DoneNow.Length && f.DoneNow[i]) ? "done" : i == f.Current ? "current" : "todo")).ToArray();
+            var same = _flowStepsPub.Length == f.Steps.Count;
+            for (var i = 0; same && i < f.Steps.Count; i++)
+                same = ReferenceEquals(_flowStepsPub[i].label, f.Steps[i].Label) && ReferenceEquals(_flowStepsPub[i].state, FlowStepState(f, i));
+            if (!same)
+            {
+                var built = new (string label, string state)[f.Steps.Count];
+                for (var i = 0; i < built.Length; i++) built[i] = (f.Steps[i].Label, FlowStepState(f, i));
+                _flowStepsPub = built;
+            }
+            var steps = _flowStepsPub;
             var showing = f.Current >= 0 && f.Option >= 0 ? f.Steps[f.Current].Options[f.Option].Label ?? f.Steps[f.Current].Label : null;
             return (f.Title, steps, showing, f.Status, f.Rev);
         }
     }
+
+    private static string FlowStepState(FlowState f, int i) =>
+        f.Status == "done" || (i < f.DoneNow.Length && f.DoneNow[i]) ? "done" : i == f.Current ? "current" : "todo";
 
     /// <summary>
     /// The current best order of actions from where the user is now: options are ordered best-first, so the ones above

@@ -287,6 +287,16 @@ public partial class WhatsAnAiBridge
         lock (_queueLock) return Queue().Where(s => s.Status is "queued" or "running").ToList();
     }
 
+    /// <summary>The same copy into a list the caller reuses (the guide panel, once per frame): no allocation.</summary>
+    internal List<QueuedStep> QueueSnapshotInto(List<QueuedStep> into)
+    {
+        into.Clear();
+        lock (_queueLock)
+            foreach (var s in Queue())
+                if (s.Status is "queued" or "running") into.Add(s);
+        return into;
+    }
+
     /// <summary>Bump the guide's rev so the panel shows itself for queue changes.</summary>
     private void TouchGuide() { lock (_guideLock) { _guide.UpdatedAt = DateTime.UtcNow; _guide.Rev++; } }
 
