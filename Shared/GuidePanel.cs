@@ -1227,7 +1227,7 @@ public partial class WhatsAnAiBridge
             var e = _toasts[i];
             if (!GuideToastLive(e, utc)) continue;
             var age = (utc - e.At).TotalSeconds;
-            var alpha = (float)Math.Clamp((GuideToastSec - age) / GuideToastFadeSec, 0, 1) * HlEase((utc - e.Born).TotalSeconds / GuideToastInSec);
+            var alpha = (float)Math.Clamp((e.Life - age) / GuideToastFadeSec, 0, 1) * HlEase((utc - e.Born).TotalSeconds / GuideToastInSec);
             if (shown > 0) y -= push * (rowH + GuideToastGap);   // older rows catch up with the push from above
             var tone = GuideKindTone(e.Kind);
             var min = new Vector2(x0, y);

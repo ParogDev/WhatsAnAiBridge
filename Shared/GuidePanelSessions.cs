@@ -336,13 +336,17 @@ public partial class WhatsAnAiBridge
             // connections (infra) go on the dim foot line, not in the count.
             var body = new System.Text.StringBuilder();
             string? infra = null;
+            var work = WorkSnapshot();   // work items (Work.cs): one short line each, until the board (GuidePanelBoard.cs) replaces this hover
             foreach (var s in rs.Sessions)
             {
                 if (!s.Present) continue;
                 if (s.Infra) { infra = infra == null ? s.Name : infra + ", " + s.Name; continue; }
                 if (body.Length > 0) body.Append('\n');
                 body.Append(s.Name).Append(": ");
-                if (s.Doing.Length == 0) body.Append("idle");
+                var hasWork = false;
+                foreach (var r in work.Rows) if (r.Owner == s.Id) { body.Append(hasWork ? "; " : "").Append(WorkHoverLine(r)); hasWork = true; }
+                if (hasWork && s.Doing.Length > 0) body.Append("; ");
+                if (s.Doing.Length == 0) { if (!hasWork) body.Append("idle"); }
                 else body.Append(string.Join("; ", s.Doing));
                 if (s.Mcp is { } m)
                 {
@@ -353,6 +357,16 @@ public partial class WhatsAnAiBridge
                     body.Append(']');
                 }
             }
+            // F8 presses no present agent has (not claimed yet, or its handler left): their own lines.
+            foreach (var r in work.Rows)
+            {
+                if (r.Owner != null && rs.Sessions.Any(s => s.Id == r.Owner && s.Present && !s.Infra)) continue;
+                if (body.Length > 0) body.Append('\n');
+                body.Append(WorkHoverLine(r));
+            }
+            if (work.Recent.Length > 0)
+                body.Append(body.Length > 0 ? "\n" : "").Append("recent: ")
+                    .Append(string.Join(" . ", work.Recent.Take(3).Select(r => $"{r.Label} {r.Stage} {Math.Max(0, (int)(utc - (r.FinalAt ?? r.UpdatedAt)).TotalMinutes)} min ago")));
             u.ChipTipTitle = rs.Agents == 1 ? "1 agent on this HUD" : $"{rs.Agents} agents on this HUD";
             u.ChipTipBody = body.Length > 0 ? body.ToString() : null;
             u.ChipTipNote = rs.Granted is { } go
