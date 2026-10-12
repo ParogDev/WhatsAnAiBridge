@@ -200,7 +200,10 @@ public partial class WhatsAnAiBridge
                 _guide.ExpiresAt = ex.Type is JTokenType.Integer or JTokenType.Float ? now.AddSeconds(Math.Clamp(ex.Value<double>(), 5, 3600)) : null;
             if (p?["timeLimitSec"] is { } tl)
             {
-                _guide.LimitSec = tl.Type is JTokenType.Integer or JTokenType.Float ? Math.Clamp(tl.Value<double>(), 3, 3600) : 0;
+                // A number, or a numeric string (bridge-query.ps1 sends key=value as text); null or anything else clears it.
+                double? sec = tl.Type is JTokenType.Integer or JTokenType.Float ? tl.Value<double>()
+                    : tl.Type == JTokenType.String && double.TryParse(tl.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ps) ? ps : null;
+                _guide.LimitSec = sec is double v && v > 0 ? Math.Clamp(v, 3, 3600) : 0;
                 _guide.DeadlineAt = _guide.LimitSec > 0 ? now.AddSeconds(_guide.LimitSec) : null;
             }
             if (p?["step"] is { } s) _guide.Step = s.Type == JTokenType.Integer ? s.Value<int>() : null;
