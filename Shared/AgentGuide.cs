@@ -10,8 +10,9 @@ namespace WhatsAnAiBridge;
 /// and a short log of what the agent is doing - so the user never has to watch the chat to know what to do in game.
 ///   guide.set   {title?, instruction?, step?, steps?, status?, detail?, clear?, timeLimitSec?}
 ///               status: waiting (do it now) | detected (change seen) | settling | captured | failed | info | done
-///   guide.log   {text, kind?: agent|step|result|warn|error, title?}
+///   guide.log   {text, kind?: agent|step|result|warn|error, title?, holdSec?}
 ///               title: the toast's caps title (up to 40 chars, e.g. "Low life"); without one the kind is the title
+///               holdSec: how long the toast stays (1-30 s, default 3); a toast held over 3 s is never merged with repeats
 ///   guide.state {}
 ///   guide.user  {stepId}  the user's answer to a step that offered Done: {current, mark: null|done|cancelled, markAgoMs,
 ///               unseen, status}. current false: the card shows another step now (replaced, cleared, expired), or the
@@ -40,6 +41,7 @@ public partial class WhatsAnAiBridge
         public string Kind = "agent";
         public string Text = "";
         public string? Title;   // the toast's title line; null = the kind as a word
+        public double Hold = GuideHoldDefaultSec;   // guide.log holdSec (C3): how long its toast stays, 1-30 s; over 3 s never merged with repeats
     }
 
     internal sealed class GuideState
@@ -72,6 +74,7 @@ public partial class WhatsAnAiBridge
     private readonly object _guideLock = new();
     private readonly GuideState _guide = new();
     private const int GuideLogMax = 40;
+    internal const double GuideHoldDefaultSec = 3, GuideHoldMinSec = 1, GuideHoldMaxSec = 30;
     private const double GuideUnseenDefaultSec = 20;
 
     /// <summary>
@@ -384,9 +387,15 @@ public partial class WhatsAnAiBridge
         if (string.IsNullOrWhiteSpace(text)) return new JObject { ["error"] = "missing_text" };
         var kind = p?["kind"]?.ToString() is "step" or "result" or "warn" or "error" ? p["kind"]!.ToString() : "agent";
         var title = Clip(p?["title"]?.ToString(), 40);
+        // holdSec (C3): a number or a numeric string, clamped to 1-30 s; anything else is the default 3 s.
+        var hold = GuideHoldDefaultSec;
+        if (p?["holdSec"] is JValue hv && hv.Value != null
+            && double.TryParse(Convert.ToString(hv.Value, System.Globalization.CultureInfo.InvariantCulture), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var h) && !double.IsNaN(h))
+            hold = Math.Clamp(h, GuideHoldMinSec, GuideHoldMaxSec);
         lock (_guideLock)
         {
-            _guide.Log.Add(new GuideLogEntry { At = DateTime.UtcNow, Kind = kind, Text = text!, Title = string.IsNullOrWhiteSpace(title) ? null : title });
+            _guide.Log.Add(new GuideLogEntry { At = DateTime.UtcNow, Kind = kind, Text = text!, Title = string.IsNullOrWhiteSpace(title) ? null : title, Hold = hold });
             if (_guide.Log.Count > GuideLogMax) _guide.Log.RemoveRange(0, _guide.Log.Count - GuideLogMax);
             // No UpdatedAt here: the quiet clock counts what the user saw (a toast that showed, GuideToastFeed.cs), not every
             // line; agent lines for each tool call are off by default and would keep the quiet card awake forever.
@@ -408,7 +417,11 @@ public partial class WhatsAnAiBridge
             // The step's time limit as the card counts it down: null without one, or once the step is over.
             ["timeLimitSec"] = a.TimeLeftSec == null ? null : Math.Round(a.LimitSec, 1),
             ["timeLeftSec"] = a.TimeLeftSec is double left ? Math.Round(left, 1) : null,
-            ["log"] = new JArray(_guide.Log.TakeLast(10).Select(e => new JObject { ["at"] = e.At.ToString("HH:mm:ss"), ["kind"] = e.Kind, ["text"] = e.Text, ["title"] = e.Title })),
+            ["log"] = new JArray(_guide.Log.TakeLast(10).Select(e => new JObject
+            {
+                ["at"] = e.At.ToString("HH:mm:ss"), ["kind"] = e.Kind, ["text"] = e.Text, ["title"] = e.Title,
+                ["holdSec"] = e.Hold != GuideHoldDefaultSec ? e.Hold : null,
+            })),
             // What the panel's attention decided last frame (GuideToastFeed.cs): combat hold, held toasts, quiet dot.
             ["attention"] = AttentionJson(),
         };

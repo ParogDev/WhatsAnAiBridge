@@ -95,6 +95,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             StartTcpServer();
         InstrStartup();   // patches a previous load of the bridge left in this HUD process (Instrumentation.cs)
         try { PubRegister(); } catch (Exception ex) { LogError($"[PubSub] registering {PublishMethodName} / {SubscribeMethodName} on PluginBridge failed: {ex.Message}"); }
+        try { WorkRegister(); } catch (Exception ex) { LogError($"[Work] registering {WorkListMethodName} / {HighlightForMethodName} on PluginBridge failed: {ex.Message}"); }
 
         return true;
     }
@@ -124,6 +125,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         InstrStopTimer();
         StopWatchdog();
         PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
+        WorkClose();  // and AIBridge.WorkList / AIBridge.HighlightFor (Work.cs)
         _tcpServer?.Dispose();
         _tcpServer = null;
         RecordingCut("hud_closing");
@@ -138,6 +140,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         InstrStopTimer();
         StopWatchdog();
         PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
+        WorkClose();  // and AIBridge.WorkList / AIBridge.HighlightFor (Work.cs)
         _tcpServer?.Dispose();
         _tcpServer = null;
         RecordingCut("bridge_reload");

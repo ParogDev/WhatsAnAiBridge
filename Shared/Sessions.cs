@@ -196,7 +196,7 @@ public partial class WhatsAnAiBridge
         "restart.request" => SafeMemory(() => RestartRequestNew(p)),
         "restart.status" => SafeMemory(() => RestartStatus(p?["id"]?.ToString())),
         "restart.cancel" => SafeMemory(() => RestartCancel(p?["id"]?.ToString())),
-        _ => ProcessAttentionMethod(method, p),
+        _ => ProcessWorkMethod(method, p) ?? ProcessAttentionMethod(method, p),
     };
 
     // ── Sessions ─────────────────────────────────────────────────────
@@ -377,6 +377,7 @@ public partial class WhatsAnAiBridge
             var now = DateTime.UtcNow;
             SessionsExpireLocked(now);
             AttnLoadLocked();
+            WorkLoadLocked();
             var blockers = BlockersLocked(me?.Id);
             var doing = DoingBySessionLocked(blockers);
             var holder = AttnHolderLocked();
@@ -397,7 +398,12 @@ public partial class WhatsAnAiBridge
                     ["mcp"] = s.Mcp?.Json(),
                     // Its attention items (AttentionQueue.cs): what it waits to show the player, and where it stands.
                     ["queued"] = AttnOfSessionLocked(s.Id, now),
+                    // Its work items (Work.cs): its own Task item, the F8 presses it handles, active and recent.
+                    ["work"] = WorkOfSessionLocked(s.Id),
                 })),
+                // Every active work item (F8 presses nobody owns yet included), in board order, and those that ended in the last 10 min.
+                ["work"] = WorkActiveJsonLocked(),
+                ["recent"] = WorkRecentJsonLocked(),
                 ["floor"] = holder == null ? null : new JObject
                 {
                     ["itemId"] = holder.Id, ["who"] = holder.Who, ["hue"] = AttnHueLocked(holder.SessionId, holder.Who), ["kind"] = holder.Kind,
@@ -645,6 +651,7 @@ public partial class WhatsAnAiBridge
         // the same owner, by session id when both know it (two sessions labelled "main" are two owners), else by label.
         if (AttnFloorBlockerLocked(requesterLabel) is { } floor
             && !list.Any(b => b.Kind == "pilot" && (b.Session != null && floor.Session != null ? b.Session == floor.Session : b.Who == floor.Who))) list.Add(floor);
+        WorkRouteBlockersLocked(list, requesterLabel);   // an agent route leading the player (Work.cs): the owner's Doing
         foreach (var l in _leases) list.Add(new Blocker(l.Kind, l.Label, l.Who, l.Until, l.Session == requester, l.Id, l.Session));
         return list;
     }
@@ -808,7 +815,9 @@ public partial class WhatsAnAiBridge
         bool flowRunning; string? flowWho;
         lock (_flowLock) { flowRunning = _flow.Status == "running"; flowWho = _flow.Who; }
         var hlPending = HighlightPendingByLayer();
+        var hlAsks = HighlightAskTextByLayer();   // the work items' WaitingOn = Player (Work.cs), read before the lock like the rest
         var effects = new List<Action>();
+        var workPubs = new List<JObject>();
         lock (_sessionLock)
         {
             if (_sessions.Count > 0 || _leases.Count > 0 || _restarts.Count > 0)
@@ -831,6 +840,14 @@ public partial class WhatsAnAiBridge
                 var msg = $"[Attention] tick: {ex.GetType().Name}: {ex.Message}";
                 if (msg != _attnTickError) { _attnTickError = msg; LogError(msg + " " + ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim()); }
             }
+            // Work items (Work.cs) after the queue moved (their WaitingOn = Player reads its items) and before the blockers
+            // (an agent route leading the player is its owner's Doing). Guarded the same way: a fault never stops the tick.
+            try { WorkTickLocked(now, guide, hlAsks, workPubs); }
+            catch (Exception ex)
+            {
+                var msg = $"[Work] tick: {ex.GetType().Name}: {ex.Message}";
+                if (msg != _workTickError) { _workTickError = msg; LogError(msg + " " + ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim()); }
+            }
             // After the queue moved: the floor holder is one of the asks. The blockers are read once per tick, here on the
             // render thread (they enumerate render-owned state such as the step queue), for the agents view and for the
             // per-session doing the published view carries (SessionsPublishLocked also runs on the TCP thread, so it
@@ -841,6 +858,8 @@ public partial class WhatsAnAiBridge
             SessionsPublishLocked();
         }
         AttnRun(effects);
+        WorkFlush(workPubs);    // "work" events, outside the lock
+        WorkSaveIfChanged();
     }
 
     /// <summary>What the panel shows about sessions (SessionsView): the copy published last, never taken per frame.</summary>

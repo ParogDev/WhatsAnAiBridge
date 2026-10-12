@@ -295,9 +295,11 @@ public partial class WhatsAnAiBridge
     }));
 
     /// <summary>guide.highlight from a request: the caller's own layer (its session, else anon).</summary>
-    internal JObject HighlightSet(JToken? p)
+    internal JObject HighlightSet(JToken? p) => HighlightSetAs(CurrentSession(), p);   // the session before the lock (Sessions.cs lock order)
+
+    /// <summary>guide.highlight on behalf of a session: the request's own (HighlightSet), or an agent route's owner (AIBridge.HighlightFor, Work.cs).</summary>
+    internal JObject HighlightSetAs(SessionInfo? me, JToken? p)
     {
-        var me = CurrentSession();   // before the lock (Sessions.cs lock order)
         var owner = HlOwnerOf(me);
         // Asked targets are questions for the player: their strips wait for this session's turn (AttentionQueue.cs, C7).
         // Decided before the layer is set, so a held strip never shows for a frame.
@@ -353,6 +355,23 @@ public partial class WhatsAnAiBridge
                 }
                 d[l.Owner] = (pending, answered, expired);
             }
+            return d;
+        }
+    }
+
+    /// <summary>
+    /// Per layer owner, the first unanswered question still on (held strips included: the question waits for the player
+    /// either way), for the work items' WaitingOn = Player (Work.cs). Null when no layer asks anything (the usual case:
+    /// nothing allocated).
+    /// </summary>
+    internal Dictionary<string, string>? HighlightAskTextByLayer()
+    {
+        lock (_hlLock)
+        {
+            Dictionary<string, string>? d = null;
+            foreach (var l in _hlLayers)
+                foreach (var t in l.Targets)
+                    if (t.Ask != null && t.Answer == null && !t.Expired) { (d ??= new(StringComparer.Ordinal))[l.Owner] = t.Ask; break; }
             return d;
         }
     }

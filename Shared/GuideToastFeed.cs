@@ -38,6 +38,7 @@ public partial class WhatsAnAiBridge
         public DateTime Born;        // when the toast first appeared: its slide-in and the stack's push key off this, so
                                      // a repeat restarts the life (At) without replaying the entry; only the chip bumps
         public bool Summary;         // the "N updates" toast after a combat hold (shown whatever its kind's setting)
+        public double Life = GuideToastSec;   // how long it shows (guide.log holdSec, C3); over GuideToastSec it never merges
     }
 
     // Repeats merge while the next equal line comes within this long of the last one (a toast lives 3 s, so a merged
@@ -121,9 +122,9 @@ public partial class WhatsAnAiBridge
             for (var i = _toasts.Count - 1; i >= 0; i--)
             {
                 var t = _toasts[i];
-                if (!GuideHeldKind(t.Kind) || (utc - t.At).TotalSeconds >= GuideToastSec) continue;
+                if (!GuideHeldKind(t.Kind) || (utc - t.At).TotalSeconds >= t.Life) continue;
                 _toastHeld++;   // one update cut short, however many repeats it had merged (those were seen)
-                if (_toastHeldLast == null) _toastHeldLast = new GuideLogEntry { Kind = t.Kind, Text = t.Text, Title = t.Title, At = t.At };
+                if (_toastHeldLast == null) _toastHeldLast = new GuideLogEntry { Kind = t.Kind, Text = t.Text, Title = t.Title, At = t.At, Hold = t.Life };
                 _toasts.RemoveAt(i);
             }
         }
@@ -136,7 +137,7 @@ public partial class WhatsAnAiBridge
         if (start < 0)
         {
             start = g.log.Length;
-            while (start > 0 && (utc - g.log[start - 1].At).TotalSeconds < GuideToastSec) start--;
+            while (start > 0 && (utc - g.log[start - 1].At).TotalSeconds < g.log[start - 1].Hold) start--;
         }
         for (var i = start; i < g.log.Length; i++) OfferGuideToast(g, g.log[i], at, hl);
         if (g.log.Length > 0) _toastSeen = g.log[^1];
@@ -146,15 +147,15 @@ public partial class WhatsAnAiBridge
         {
             _toastHolding = false;
             if (_toastHeld == 1 && _toastHeldLast != null)
-                PushGuideToast(g, _toastHeldLast.Kind, _toastHeldLast.Title, _toastHeldLast.Text, utc, false, 1);
+                PushGuideToast(g, _toastHeldLast.Kind, _toastHeldLast.Title, _toastHeldLast.Text, utc, false, 1, _toastHeldLast.Hold);
             else if (_toastHeld > 1 && _toastHeldLast != null)
-                PushGuideToast(g, "result", $"{_toastHeld} updates", _toastHeldLast.Text, utc, true, _toastHeld);
+                PushGuideToast(g, "result", $"{_toastHeld} updates", _toastHeldLast.Text, utc, true, _toastHeld, GuideToastSec);
             _toastHeld = 0;
             _toastHeldLast = null;
         }
 
         // Forget toasts long gone (the stack draws at most GuideToastMax; a few more are kept for merging).
-        while (_toasts.Count > GuideToastKeep || (_toasts.Count > 0 && (utc - _toasts[0].At).TotalSeconds > GuideRepeatMergeSec)) _toasts.RemoveAt(0);
+        while (_toasts.Count > GuideToastKeep || (_toasts.Count > 0 && (utc - _toasts[0].At).TotalSeconds > Math.Max(GuideRepeatMergeSec, _toasts[0].Life))) _toasts.RemoveAt(0);
     }
 
     private static bool GuideHeldKind(string kind) => kind is "agent" or "result";
@@ -170,7 +171,9 @@ public partial class WhatsAnAiBridge
         }
         if (at.DropEchoes && GuideEchoes(e.Text, hl)) return;
         var top = _toasts.Count > 0 ? _toasts[^1] : null;
-        if (top is { Summary: false } && top.Kind == e.Kind && top.Title == e.Title && top.Text == e.Text
+        // A held toast (holdSec over 3 s: an F8 answer, a failure) is read whole: never merged with repeats either way.
+        if (top is { Summary: false } && top.Life <= GuideToastSec && e.Hold <= GuideToastSec
+            && top.Kind == e.Kind && top.Title == e.Title && top.Text == e.Text
             && (e.At - top.At).TotalSeconds < GuideRepeatMergeSec)
         {
             top.Count++;
@@ -179,12 +182,12 @@ public partial class WhatsAnAiBridge
             _toastShownAt = e.At;
             return;
         }
-        PushGuideToast(g, e.Kind, e.Title, e.Text, e.At, false, 1);
+        PushGuideToast(g, e.Kind, e.Title, e.Text, e.At, false, 1, e.Hold);
     }
 
-    private void PushGuideToast(in GuideSnap g, string kind, string? title, string text, DateTime at, bool summary, int count)
+    private void PushGuideToast(in GuideSnap g, string kind, string? title, string text, DateTime at, bool summary, int count, double life)
     {
-        var t = new GuideToast { Kind = kind, Title = title, Text = text, At = at, Born = at, Summary = summary, Count = summary ? count : 1 };
+        var t = new GuideToast { Kind = kind, Title = title, Text = text, At = at, Born = at, Summary = summary, Count = summary ? count : 1, Life = life };
         t.TitleCaps = GuideToastTitle(new GuideLogEntry { Kind = kind, Title = title, Text = text }, g);
         t.TextCaps = GuideCaps(summary ? "Latest: " + text : text);
         _toasts.Add(t);
@@ -212,7 +215,7 @@ public partial class WhatsAnAiBridge
     /// <summary>The toasts the stack shows now, newest first: young enough and of a kind that is on (a summary shows
     /// whatever its kind's setting: what it counts was filtered already).</summary>
     private bool GuideToastLive(GuideToast t, DateTime utc) =>
-        (utc - t.At).TotalSeconds < GuideToastSec && (t.Summary || ToastShown(t.Kind));
+        (utc - t.At).TotalSeconds < t.Life && (t.Summary || ToastShown(t.Kind));
 
     // ── What attention decided, for agents (guide.state "attention") ─
 

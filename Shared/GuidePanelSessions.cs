@@ -23,9 +23,11 @@ namespace WhatsAnAiBridge;
 ///     restart turns it with RESTARTING and a slow shallow breathe (never a throb: that is for cards asking the user to
 ///     act), and an MCP rollout in progress (supervised servers not swapped yet, which cuts nothing) is a 2 px accent
 ///     hairline along its bottom edge, filled by how many are on the deployed build. It ghosts with the card while a
-///     highlight carries the words. Hover: the panel's hover sheet (GuideHover) with who does what, each MCP's build
-///     and mode, the restart and the rollout, its texts rebuilt once a second. The chip never names who is next in
-///     line: that is the next strip's (the two never say the same thing).
+///     highlight carries the words. Work items (Work.cs, f8-agent-ux.md 5.1) add a "!N" badge in the accent while N items
+///     wait on the player (the hairline goes accent too), a 1.5 px accent ring around the rings glyph while an F8 press
+///     runs, and a ToneBad hairline for 10 s after one failed. Hover: the agents board (GuidePanelBoard.cs) under the card's
+///     stack; a click pins the board into the stack, a second click (or Esc, or its x) unpins it. The chip never names
+///     who is next in line: that is the next strip's (the two never say the same thing).
 /// Agents are named by their readable name (AgentsView.NameOf: never a system folder, no worktree hash tail, unique).
 /// Same rules as the rest of the panel: ASCII only, glyphs on the draw list, colours from PanelTheme plus the fixed tones.
 /// </summary>
@@ -231,20 +233,28 @@ public partial class WhatsAnAiBridge
         var waiting = rs.Waiting;
         var granted = rs.Granted;
         var rollout = rs.Rollout is { InProgress: true } ? rs.Rollout : null;
-        var showCount = rs.Agents > 0;
+        var work = WorkSnapshot();   // the F8 presses and tasks (Work.cs): the "!N" badge, the ring, the failed hairline, the board
+        var showCount = rs.Agents > 0 || work.Active > 0;
         var wanted = showCount || waiting != null || granted != null || rollout != null;
+        var badge = work.NeedsYouCount;
+        var failed = work.RecentFailedAt is { } fa && (utc - fa).TotalSeconds < BoardFailedHairlineSec;
 
-        // Hover: the mouse against the rect drawn last frame (a hit-test; no window, no focus taken).
+        // Hover: the mouse against the rect drawn last frame (a hit-test; no window, no focus taken). A click pins the
+        // board into the stack, a second one unpins it (f8-agent-ux.md 5.1).
         var hovered = u.ChipAlpha > 0.05f && io.MousePos.X >= u.ChipMin.X && io.MousePos.X < u.ChipMax.X
                       && io.MousePos.Y >= u.ChipMin.Y && io.MousePos.Y < u.ChipMax.Y;
         u.ChipHover += ((hovered ? 1f : 0f) - u.ChipHover) * (1f - MathF.Exp(-io.DeltaTime / (float)ChipHoverSec));
+        // The click goes through a tiny ImGui window over last frame's rect (like the highlight ask pills): ImGui then
+        // captures the mouse there, so the click that pins the board never also reaches the game underneath.
+        if (u.ChipAlpha > 0.05f && u.ChipMax.X > u.ChipMin.X && ChipClicked(u.ChipMin, u.ChipMax - u.ChipMin)) _workUi.Pinned = !_workUi.Pinned;
 
-        // Strength: calm at half, more when a restart is queued, nearly full when one is granted (with a slow shallow
-        // breathe); ghosted with the card while a highlight carries the words (attention), full on hover.
+        // Strength: calm at half, more when a restart is queued or something needs the player, nearly full when one is
+        // granted (with a slow shallow breathe); ghosted with the card while a highlight carries the words (attention),
+        // full on hover.
         var blocked = waiting is { Blockers.Count: > 0 };
         var tone = granted != null ? ToneAccent : waiting == null ? ToneNeutral : blocked ? ToneWarn : ToneAccent;
         var breathe = granted != null ? 0.5f + 0.5f * MathF.Sin((float)(now * Math.PI * 2 / GuideDotBreatheSec)) : 0f;
-        var baseA = granted != null ? ChipAlphaGranted - 0.12f * breathe : waiting != null ? ChipAlphaWaiting : ChipAlphaCalm;
+        var baseA = granted != null ? ChipAlphaGranted - 0.12f * breathe : waiting != null || badge > 0 ? ChipAlphaWaiting : ChipAlphaCalm;
         var target = wanted ? baseA * at.CardAlpha : 0f;
         target = target + (1f - target) * u.ChipHover;
         u.ChipAlpha += (target - u.ChipAlpha) * (1f - MathF.Exp(-io.DeltaTime / (float)(ChipFadeSec / 3)));
@@ -255,18 +265,21 @@ public partial class WhatsAnAiBridge
         var font = ImGui.GetFont();
         var f = ImGui.GetFontSize();
         var small = f * 0.85f;
+        var tiny = f * 0.75f;
 
         // Texts, rebuilt only when their number changes.
         if (u.ChipCount != rs.Agents) { u.ChipCount = rs.Agents; u.ChipCountText = rs.Agents.ToString(); }
+        if (u.ChipBadge != badge) { u.ChipBadge = badge; u.ChipBadgeText = badge > 0 ? "!" + badge : ""; }
         var secs = waiting?.HoldUntil is DateTime h && !blocked ? Math.Max(0, (int)Math.Ceiling((h - utc).TotalSeconds)) : -1;
         if (u.ChipSecs != secs) { u.ChipSecs = secs; u.ChipSecsText = secs < 0 ? "" : secs + "s"; }
 
-        // Measure: [rings count] [restart-glyph seconds|RESTARTING], 12 px glyphs, the texts at the small size.
+        // Measure: [rings count !N] [restart-glyph seconds|RESTARTING], 12 px glyphs, the texts at the small size.
         var countW = showCount ? 13f + 5f + ImGui.CalcTextSize(u.ChipCountText).X * (small / f) : 0f;
+        var badgeW = badge > 0 ? 5f + ImGui.CalcTextSize(u.ChipBadgeText).X * (tiny / f) : 0f;
         var stateText = granted != null ? ChipRestartingText : secs >= 0 ? u.ChipSecsText : "";
         var stateTextW = stateText.Length > 0 ? (granted != null ? GuideTrackedWidth(font, small, stateText, GuideToastMsgTrack) : ImGui.CalcTextSize(stateText).X * (small / f)) : 0f;
         var stateW = waiting != null || granted != null ? 12f + (stateTextW > 0 ? 4f + stateTextW : 0f) : 0f;
-        var w = ChipPadX * 2 + countW + (countW > 0 && stateW > 0 ? 8f : 0f) + stateW;
+        var w = ChipPadX * 2 + countW + badgeW + (countW + badgeW > 0 && stateW > 0 ? 8f : 0f) + stateW;
         if (w < ChipH) w = ChipH;
 
         // Place: right of the card's strip at title-row height (the quiet dot's row), following the card when it slides
@@ -278,16 +291,28 @@ public partial class WhatsAnAiBridge
         var max = min + new Vector2(MathF.Round(w), ChipH);
         u.ChipMin = min; u.ChipMax = max;
 
-        // The pill: the toast ink, its hairline (the tone's at half strength while a restart is on), square corners.
+        // The pill: the toast ink, its hairline (the tone's at half strength while a restart is on, accent while something
+        // needs the player, ToneBad for 10 s after a failed press), square corners.
         dl.AddRectFilled(min, max, U(GuideToastInk, 0.94f * a), 0f);
-        dl.AddRect(min, max, waiting != null || granted != null ? U(tone, 0.55f * a) : U(GuideToastLine, a), 0f);
+        dl.AddRect(min, max, failed ? U(ToneBad, 0.8f * a) : waiting != null || granted != null ? U(tone, 0.55f * a) : badge > 0 ? U(ToneAccent, 0.55f * a) : U(GuideToastLine, a), 0f);
+        if (_workUi.Pinned) dl.AddRectFilled(new Vector2(min.X + 1f, min.Y + 1f), new Vector2(max.X - 1f, max.Y - 1f), U(ToneAccent, 0.08f * a), 0f);
         var x = min.X + ChipPadX;
         if (showCount)
         {
+            // The rings glyph, with a 1.5 px accent ring around it while an F8 press runs (Pressed .. Verifying).
+            if (work.AnyF8Running) dl.AddCircle(new Vector2(x + 6.5f, cy), 8.5f, U(ToneAccent, 0.85f * a), 20, 1.5f);
             DrawSessionsGlyph(dl, new Vector2(x + 6.5f, cy), U(ToneNeutral, a));
             x += 13f + 5f;
             dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * a), u.ChipCountText);
             x += countW - 18f;
+            if (badge > 0)
+            {
+                // "!N": N items wait on the player (accent, 0.75 f).
+                x += 5f;
+                dl.AddText(font, tiny, new Vector2(x, cy - tiny * 0.5f), U(ToneAccent, a), u.ChipBadgeText);
+                dl.AddText(font, tiny, new Vector2(x + 0.6f, cy - tiny * 0.5f), U(ToneAccent, a), u.ChipBadgeText);
+                x += badgeW - 5f;
+            }
             if (stateW > 0) x += 8f;
         }
         if (stateW > 0)
@@ -315,69 +340,44 @@ public partial class WhatsAnAiBridge
             if (frac > 0) dl.AddRectFilled(new Vector2(x0, y0), new Vector2(x0 + (x1 - x0) * frac, y0 + 2f), U(ToneAccent, 0.9f * a), 0f);
         }
 
-        if (hovered) DrawSessionsChipHover(rs, AgentsSnapshot(), tone, utc);
+        // Hover: the agents board (GuidePanelBoard.cs) under the card's stack; while it is pinned there already, a one-line hint.
+        if (hovered)
+        {
+            if (_workUi.Pinned) GuideTooltip(ChipPinnedTip);
+            else DrawBoardHover(work, rs, AgentsSnapshot(), now, utc);
+        }
     }
 
-    /// <summary>
-    /// The chip's hover, on the panel's hover sheet (GuideHover, under the card's stack like every other hover): the
-    /// agents on this HUD by readable name with what each is doing (from the HUD's own state, BlockersSnapshot) and its
-    /// MCP build and mode, then the restart (whose, what it waits for or how long to go) and the rollout. The texts are
-    /// rebuilt once a second or when a view changes; GuideHover caches its lines by text, so hovering allocates only then.
-    /// </summary>
-    private void DrawSessionsChipHover(SessionsView rs, AgentsView ag, Vector4 tone, DateTime utc)
+    /// <summary>An input-only window (no background, no decoration) over the chip with one InvisibleButton: true on a click.</summary>
+    private static bool ChipClicked(Vector2 pos, Vector2 size)
     {
-        var u = _guideUi;
-        var second = utc.Ticks / TimeSpan.TicksPerSecond;
-        if (!ReferenceEquals(u.ChipTipView, rs) || !ReferenceEquals(u.ChipTipAgents, ag) || u.ChipTipSecond != second)
+        const ImGuiWindowFlags flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
+            | ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoNav
+            | ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoBringToFrontOnFocus | ImGuiWindowFlags.NoBackground | ImGuiWindowFlags.NoSavedSettings;
+        ImGui.SetNextWindowPos(pos, ImGuiCond.Always);
+        ImGui.SetNextWindowSize(size, ImGuiCond.Always);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowMinSize, Vector2.One);
+        var clicked = false;
+        try
         {
-            u.ChipTipView = rs; u.ChipTipAgents = ag; u.ChipTipSecond = second;
-            // The agents that are here now (Sessions.cs PresentLocked: a shell caller idle for 10 min is not), each with its own
-            // work (by session id, so two sessions labelled "main" never show each other's lease). The shared server's own
-            // connections (infra) go on the dim foot line, not in the count.
-            var body = new System.Text.StringBuilder();
-            string? infra = null;
-            foreach (var s in rs.Sessions)
+            if (ImGui.Begin("##sessions_chip", flags))
             {
-                if (!s.Present) continue;
-                if (s.Infra) { infra = infra == null ? s.Name : infra + ", " + s.Name; continue; }
-                if (body.Length > 0) body.Append('\n');
-                body.Append(s.Name).Append(": ");
-                if (s.Doing.Length == 0) body.Append("idle");
-                else body.Append(string.Join("; ", s.Doing));
-                if (s.Mcp is { } m)
-                {
-                    body.Append(" [mcp ").Append(m.Version ?? ShortSha(m.Sha) ?? "?");
-                    if (m.Local) body.Append(", local build");
-                    else if (m.Unsupervised) body.Append(", no supervisor: restart this session for one");
-                    else if (rs.Rollout != null && m.Behind(rs.Rollout.DeployedSha)) body.Append(", swapping to ").Append(rs.Rollout.DeployedVersion ?? ShortSha(rs.Rollout.DeployedSha));
-                    body.Append(']');
-                }
+                ImGui.SetCursorScreenPos(pos);
+                ImGui.InvisibleButton("##sessions_chip_btn", size);
+                clicked = ImGui.IsItemClicked();
             }
-            u.ChipTipTitle = rs.Agents == 1 ? "1 agent on this HUD" : $"{rs.Agents} agents on this HUD";
-            u.ChipTipBody = body.Length > 0 ? body.ToString() : null;
-            u.ChipTipNote = rs.Granted is { } go
-                ? $"Restart: {ag.NameOf(go.Session, go.Who)} is restarting the HUD now" + (go.Reason != null ? $" ({go.Reason})" : "")
-                : rs.Waiting is { } rr
-                    ? rr.Blockers.Count > 0
-                        ? $"Restart: {ag.NameOf(rr.Session, rr.Who)} waits for " + string.Join(", ", rr.Blockers.Take(3).Select(b => b.Who != null ? $"{ag.NameOf(b.Session, b.Who)}'s {b.Label}" : b.Label))
-                          + (rr.Blockers.Count > 3 ? $" (+{rr.Blockers.Count - 3})" : "")
-                        : $"Restart: {ag.NameOf(rr.Session, rr.Who)} restarts the HUD in {(rr.HoldUntil is DateTime h ? Math.Max(0, (int)Math.Ceiling((h - utc).TotalSeconds)) : 0)}s - Not now is on the card"
-                    : null;
-            u.ChipTipFoot = null;
-            if (rs.Rollout is { } ro)
-            {
-                var build = ro.DeployedVersion ?? ShortSha(ro.DeployedSha);
-                var foot = ro.Behind.Length == 0 && ro.Local.Length == 0 && ro.Unsupervised.Length == 0
-                    ? $"MCP {build}: all {ro.Total} on it" : $"MCP {build}: {ro.OnDeployed} of {ro.Total} on it";
-                if (ro.Behind.Length > 0) foot += $", {ro.Behind.Length} swapping";
-                if (ro.Local.Length > 0) foot += $", {ro.Local.Length} local";
-                if (ro.Unsupervised.Length > 0) foot += $", {ro.Unsupervised.Length} need a session restart ({string.Join(", ", ro.Unsupervised.Select(l => ag.NameOf(l)))})";
-                u.ChipTipFoot = foot;
-            }
-            if (infra != null) u.ChipTipFoot = (u.ChipTipFoot != null ? u.ChipTipFoot + "\n" : "") + "Shared server: " + infra;
         }
-        GuideHover(u.ChipTipTitle, u.ChipTipBody, u.ChipTipNote, u.ChipTipFoot, tone);
+        finally
+        {
+            ImGui.End();
+            ImGui.PopStyleVar(3);
+        }
+        return clicked;
     }
+
+    private const string ChipPinnedTip ="The agents board is pinned under the card. Click to unpin it (Esc does too).";
 
     /// <summary>The first seven characters of a git sha (null stays null).</summary>
     private static string? ShortSha(string? sha) => sha == null ? null : sha.Length > 7 ? sha[..7] : sha;

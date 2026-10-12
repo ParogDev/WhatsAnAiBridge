@@ -175,11 +175,17 @@ public partial class WhatsAnAiBridge
     /// <summary>Publish, then outside the lock the observer copy and the local handlers.</summary>
     private JObject PubPublish(string kind, JObject data, string? source)
     {
-        JObject e; List<(string name, Action<string> handler)> handlers; JArray listeners;
+        JObject e; List<(string name, Action<string> handler)> handlers; JArray listeners, plugins;
         lock (_pubLock)
         {
             (e, handlers) = PubAddLocked(kind, data, source);
             listeners = PubListenersLocked(kind);
+            // The plugins it reaches by name (a "*" watcher handles nothing), so a publisher can tell "no plugin listens".
+            plugins = new JArray(_pubLocal.Where(kv => kv.Value.kinds.Contains(kind)).Select(kv => kv.Key));
+            // Presses, replies and route events build the F8 work items (Work.cs; applied under the sessions lock). Enqueued
+            // under this lock (lock-free queue, no other lock taken): the inbox is in seq order, and a press is in it before
+            // any poller can read it and reply.
+            WorkEnqueue(kind, e);
         }
         try
         {
@@ -204,7 +210,7 @@ public partial class WhatsAnAiBridge
                 LogError($"[PubSub] subscriber {name} threw on {kind} and was dropped (it subscribes again when it loads): {ex.Message}");
             }
         }
-        return new JObject { ["ok"] = true, ["seq"] = e["seq"], ["kind"] = kind, ["subscribers"] = listeners, ["fileError"] = _pubWhy };
+        return new JObject { ["ok"] = true, ["seq"] = e["seq"], ["kind"] = kind, ["subscribers"] = listeners, ["plugins"] = plugins, ["fileError"] = _pubWhy };
     }
 
     private JArray PubListenersLocked(string kind)
@@ -354,6 +360,7 @@ public partial class WhatsAnAiBridge
         var kind = p?["kind"]?.ToString();
         if (PubKindRefused(kind) is { } refused) return Err("bad_kind", $"{refused} (claims go through pubsub.claim / pubsub.release).");
         var data = p?["data"] switch { JObject o => (JObject)o.DeepClone(), null or { Type: JTokenType.Null } => new JObject(), var v => new JObject { ["value"] = v.DeepClone() } };
+        WorkStampRouteAgent(kind, data);   // route.agent: Owner / OwnerName / Hue of the calling session (Work.cs)
         return PubPublish(kind!, data, p?["source"]?.ToString() ?? CurrentWho() ?? "anon");
     }
 
