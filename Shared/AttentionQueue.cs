@@ -1226,7 +1226,8 @@ public partial class WhatsAnAiBridge
     private Blocker? AttnFloorBlockerLocked(string? requesterLabel)
     {
         if (AttnHolderLocked() is not { } h) return null;
-        return new Blocker("pilot", h is { Kind: "ask", Question: { } q } ? $"your answer to: {q}" : h.Kind == "ask" ? "your answers" : "the step you are doing", h.Who, null, requesterLabel != null && h.Who == requesterLabel);
+        return new Blocker("pilot", h is { Kind: "ask", Question: { } q } ? $"your answer to: {q}" : h.Kind == "ask" ? "your answers" : "the step you are doing", h.Who, null, requesterLabel != null && h.Who == requesterLabel,
+            Session: string.IsNullOrEmpty(h.SessionId) ? null : h.SessionId);
     }
 
     // ── Small helpers ────────────────────────────────────────────────

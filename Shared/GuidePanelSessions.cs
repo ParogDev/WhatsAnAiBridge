@@ -180,7 +180,7 @@ public partial class WhatsAnAiBridge
             for (var i = 0; i < shown; i++)
             {
                 var b = rr.Blockers[i];
-                var line = (b.Who != null ? $"{ag.NameOf(b.Who)}: " : "") + b.Label;
+                var line = (b.Who != null ? $"{ag.NameOf(b.Session, b.Who)}: " : "") + b.Label;
                 if (b.Until is DateTime u && u > utc) line += $" ({GuideElapsed(u - utc)} left)";
                 if (b.Yours) line += " (its own)";
                 lines[i] = GuideClipText(line, bulletW);
@@ -190,7 +190,7 @@ public partial class WhatsAnAiBridge
         }
         else { c.Lines = []; c.More = null; }
         c.Interrupt = rr.Blockers.Count > 0
-            ? "Restart now anyway. It interrupts " + string.Join(", ", rr.Blockers.Take(3).Select(b => b.Who != null ? $"{ag.NameOf(b.Who)}'s {b.Label}" : b.Label)) + "; they are told why in the log."
+            ? "Restart now anyway. It interrupts " + string.Join(", ", rr.Blockers.Take(3).Select(b => b.Who != null ? $"{ag.NameOf(b.Session, b.Who)}'s {b.Label}" : b.Label)) + "; they are told why in the log."
             : handover ? $"Restart now anyway. It interrupts {leaveWho}'s hand-over; they are told why in the log."
             : "Don't wait the countdown.";
         return c;
@@ -231,7 +231,7 @@ public partial class WhatsAnAiBridge
         var waiting = rs.Waiting;
         var granted = rs.Granted;
         var rollout = rs.Rollout is { InProgress: true } ? rs.Rollout : null;
-        var showCount = rs.Connected > 0;
+        var showCount = rs.Agents > 0;
         var wanted = showCount || waiting != null || granted != null || rollout != null;
 
         // Hover: the mouse against the rect drawn last frame (a hit-test; no window, no focus taken).
@@ -257,7 +257,7 @@ public partial class WhatsAnAiBridge
         var small = f * 0.85f;
 
         // Texts, rebuilt only when their number changes.
-        if (u.ChipCount != rs.Connected) { u.ChipCount = rs.Connected; u.ChipCountText = rs.Connected.ToString(); }
+        if (u.ChipCount != rs.Agents) { u.ChipCount = rs.Agents; u.ChipCountText = rs.Agents.ToString(); }
         var secs = waiting?.HoldUntil is DateTime h && !blocked ? Math.Max(0, (int)Math.Ceiling((h - utc).TotalSeconds)) : -1;
         if (u.ChipSecs != secs) { u.ChipSecs = secs; u.ChipSecsText = secs < 0 ? "" : secs + "s"; }
 
@@ -331,16 +331,19 @@ public partial class WhatsAnAiBridge
         if (!ReferenceEquals(u.ChipTipView, rs) || !ReferenceEquals(u.ChipTipAgents, ag) || u.ChipTipSecond != second)
         {
             u.ChipTipView = rs; u.ChipTipAgents = ag; u.ChipTipSecond = second;
-            var blockers = BlockersSnapshot();
+            // The agents that are here now (Sessions.cs PresentLocked: a shell caller idle for 10 min is not), each with its own
+            // work (by session id, so two sessions labelled "main" never show each other's lease). The shared server's own
+            // connections (infra) go on the dim foot line, not in the count.
             var body = new System.Text.StringBuilder();
+            string? infra = null;
             foreach (var s in rs.Sessions)
             {
-                if (!s.Connected) continue;
+                if (!s.Present) continue;
+                if (s.Infra) { infra = infra == null ? s.Name : infra + ", " + s.Name; continue; }
                 if (body.Length > 0) body.Append('\n');
                 body.Append(s.Name).Append(": ");
-                var n = 0;
-                foreach (var b in blockers) if (b.Who == s.Label) { if (n++ > 0) body.Append("; "); body.Append(b.Label); }
-                if (n == 0) body.Append("idle");
+                if (s.Doing.Length == 0) body.Append("idle");
+                else body.Append(string.Join("; ", s.Doing));
                 if (s.Mcp is { } m)
                 {
                     body.Append(" [mcp ").Append(m.Version ?? ShortSha(m.Sha) ?? "?");
@@ -350,15 +353,15 @@ public partial class WhatsAnAiBridge
                     body.Append(']');
                 }
             }
-            u.ChipTipTitle = rs.Connected == 1 ? "1 agent on this HUD" : $"{rs.Connected} agents on this HUD";
+            u.ChipTipTitle = rs.Agents == 1 ? "1 agent on this HUD" : $"{rs.Agents} agents on this HUD";
             u.ChipTipBody = body.Length > 0 ? body.ToString() : null;
             u.ChipTipNote = rs.Granted is { } go
-                ? $"Restart: {ag.NameOf(go.Who)} is restarting the HUD now" + (go.Reason != null ? $" ({go.Reason})" : "")
+                ? $"Restart: {ag.NameOf(go.Session, go.Who)} is restarting the HUD now" + (go.Reason != null ? $" ({go.Reason})" : "")
                 : rs.Waiting is { } rr
                     ? rr.Blockers.Count > 0
-                        ? $"Restart: {ag.NameOf(rr.Who)} waits for " + string.Join(", ", rr.Blockers.Take(3).Select(b => b.Who != null ? $"{ag.NameOf(b.Who)}'s {b.Label}" : b.Label))
+                        ? $"Restart: {ag.NameOf(rr.Session, rr.Who)} waits for " + string.Join(", ", rr.Blockers.Take(3).Select(b => b.Who != null ? $"{ag.NameOf(b.Session, b.Who)}'s {b.Label}" : b.Label))
                           + (rr.Blockers.Count > 3 ? $" (+{rr.Blockers.Count - 3})" : "")
-                        : $"Restart: {ag.NameOf(rr.Who)} restarts the HUD in {(rr.HoldUntil is DateTime h ? Math.Max(0, (int)Math.Ceiling((h - utc).TotalSeconds)) : 0)}s - Not now is on the card"
+                        : $"Restart: {ag.NameOf(rr.Session, rr.Who)} restarts the HUD in {(rr.HoldUntil is DateTime h ? Math.Max(0, (int)Math.Ceiling((h - utc).TotalSeconds)) : 0)}s - Not now is on the card"
                     : null;
             u.ChipTipFoot = null;
             if (rs.Rollout is { } ro)
@@ -371,6 +374,7 @@ public partial class WhatsAnAiBridge
                 if (ro.Unsupervised.Length > 0) foot += $", {ro.Unsupervised.Length} need a session restart ({string.Join(", ", ro.Unsupervised.Select(l => ag.NameOf(l)))})";
                 u.ChipTipFoot = foot;
             }
+            if (infra != null) u.ChipTipFoot = (u.ChipTipFoot != null ? u.ChipTipFoot + "\n" : "") + "Shared server: " + infra;
         }
         GuideHover(u.ChipTipTitle, u.ChipTipBody, u.ChipTipNote, u.ChipTipFoot, tone);
     }
