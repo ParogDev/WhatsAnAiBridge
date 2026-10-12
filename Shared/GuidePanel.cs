@@ -100,6 +100,9 @@ public partial class WhatsAnAiBridge
         public float HoverTextW;
         // The message hover's "asked by" foot, composed only when the asker's name changes.
         public string? MsgFootName, MsgFoot;
+        // A timed step's countdown text ("1:42 left"), rebuilt only when the whole second changes.
+        public int CountdownSec = -1;
+        public string? CountdownText;
         // Several agents active (Sessions.cs AgentsView.Ambiguous): the title row names who asked, by its readable name
         // ("Claude - Experiment: stash"), composed only when that name or the title change.
         public bool ShowWho;
@@ -658,6 +661,16 @@ public partial class WhatsAnAiBridge
             dl.AddRect(min, max, U(GuideToastLine), 0f);
         // The stripe, flush on the left edge over the border, in the tone.
         dl.AddRectFilled(min, new Vector2(min.X + stripe, max.Y), U(look.Tone, urgent ? 0.6f + 0.4f * pulse : 1f), 0f);
+        // A timed step: a 3 px bar along the bottom edge, full at the start and draining to the left as time runs out,
+        // in the countdown's tone (accent, warn near the end, bad at the last seconds), over a faint track.
+        if (a.TimeLeftSec is double barLeft && a.LimitSec > 0 && !checking && !compact)
+        {
+            var frac = (float)Math.Clamp(barLeft / a.LimitSec, 0, 1);
+            var b0 = new Vector2(min.X + stripe, max.Y - 3f);
+            var bw = max.X - b0.X;
+            dl.AddRectFilled(b0, new Vector2(max.X, max.Y), U(GuideToastLine, 0.8f), 0f);
+            if (frac > 0) dl.AddRectFilled(b0, new Vector2(b0.X + bw * frac, max.Y), U(GuideCountdownTone(barLeft, a.LimitSec), 0.9f), 0f);
+        }
 
         // Title row, left: the flow's "now" badge (the same badge as the in-game highlight) or the status glyph,
         // then the status in caps (tracked, faux bold; in the tone when loud, else near-white).
@@ -716,7 +729,39 @@ public partial class WhatsAnAiBridge
                 "Takes Done back: the step waits for you again.", out var undo) + 8;
             if (undo && !AskClickGuarded(now)) GuideUnmarkDone();
         }
-        if (g.status is "waiting" or "failed" && g.instructionSince is DateTime since)
+        // A timed step (guide.set timeLimitSec): the time left takes the elapsed slot, as a pill in the countdown's tone,
+        // and a bar along the card's bottom edge drains with it. Hidden while checking (the user already said Done).
+        var timed = a.TimeLeftSec.HasValue && !checking && !compact;
+        if (timed)
+        {
+            var left = a.TimeLeftSec!.Value;
+            var tone = GuideCountdownTone(left, a.LimitSec);
+            var secs = (int)Math.Ceiling(left);
+            if (secs != _guideUi.CountdownSec || _guideUi.CountdownText == null)
+            {
+                _guideUi.CountdownSec = secs;
+                _guideUi.CountdownText = secs <= 0 ? "time's up" : $"{secs / 60}:{secs % 60:00} left";
+            }
+            var t = _guideUi.CountdownText;
+            var tw = ImGui.CalcTextSize(t).X * (small / f);
+            const float glyphW = 12f + 5f;
+            var pillW = tw + glyphW + 14;
+            var pillH = small + 6;
+            var pmin = new Vector2(rx - pillW, hy - pillH * 0.5f);
+            var pmax = pmin + new Vector2(pillW, pillH);
+            // The last 10 s breathe the fill at 1 Hz: noticed, never a throb.
+            var fill = left <= 10 && left > 0 ? 0.14f + 0.14f * (float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 2)) : 0.14f;
+            dl.AddRectFilled(pmin, pmax, U(tone, fill), 0f);
+            dl.AddRect(pmin, pmax, U(tone, 0.5f), 0f);
+            DrawQueueGlyph(dl, new Vector2(pmin.X + 6 + 6, hy), U(tone));
+            dl.AddText(font, small, new Vector2(pmin.X + 6 + glyphW, hy - small * 0.5f), U(tone), t);
+            ImGui.SetCursorScreenPos(pmin);
+            ImGui.InvisibleButton("##guide_countdown", pmax - pmin);
+            if (ImGui.IsItemHovered())
+                GuideTooltip($"Time left for this step. The agent stops waiting when it runs out ({(int)Math.Round(a.LimitSec)} s in all).");
+            rx -= pillW + 10;
+        }
+        else if (g.status is "waiting" or "failed" && g.instructionSince is DateTime since)
         {
             var t = GuideElapsed(utc - since);
             var tw = ImGui.CalcTextSize(t).X * (small / f);
@@ -1638,6 +1683,13 @@ public partial class WhatsAnAiBridge
         return lo <= 0 ? ".." : s[..lo].TrimEnd() + "..";
     }
 
+    /// <summary>The countdown's tone: accent while there is time, warn in the last quarter (or 15 s), bad in the last 5 s.</summary>
+    private static Vector4 GuideCountdownTone(double left, double limit) =>
+        left <= 5 ? ToneBad : left <= Math.Max(15, limit * 0.25) ? ToneWarn : ToneAccent;
+
+    /// <summary>A time limit as the countdown shows it: "2:00".</summary>
+    private static string GuideClock(int secs) => $"{secs / 60}:{secs % 60:00}";
+
     private static string GuideElapsed(TimeSpan t)
     {
         if (t < TimeSpan.Zero) t = TimeSpan.Zero;
@@ -1898,6 +1950,7 @@ public partial class WhatsAnAiBridge
         var who = string.IsNullOrWhiteSpace(s.By) ? "An agent" : s.By;
         var line = $"{who} asked {GuideElapsed(utc - s.QueuedAt)} ago";
         if (s.Repeats > 1) line += $" - do it {s.Repeats}x";
+        line += s.Repeats > 1 ? $" - {GuideClock(s.TimeoutMs / 1000)} for each" : $" - {GuideClock(s.TimeoutMs / 1000)} to do it";
         if (chainAfter > 0) line += chainAfter == 1 ? " - then 1 more starts by itself" : $" - then {chainAfter} more start by themselves";
         return line;
     }

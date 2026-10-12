@@ -321,7 +321,7 @@ public partial class WhatsAnAiBridge
                     ["title"] = step.Title ?? $"Experiment: {step.Experiment}", ["instruction"] = step.Instruction, ["status"] = "waiting",
                     ["step"] = step.Repeats > 1 ? run.Repeat : null, ["steps"] = step.Repeats > 1 ? step.Repeats : null,
                     ["detail"] = run.Repeat > 1 ? $"Again ({run.Repeat} of {step.Repeats}) - recording" : "Recording - do it now",
-                    ["stepId"] = run.GuideStep, ["offerDone"] = true, ["who"] = step.By,
+                    ["stepId"] = run.GuideStep, ["offerDone"] = true, ["who"] = step.By, ["timeLimitSec"] = step.TimeoutMs / 1000.0,
                 }, step.By);
                 return;
             }
@@ -372,7 +372,7 @@ public partial class WhatsAnAiBridge
                 run.Before = run.Last; run.BeforeKey = run.LastKey; run.PhaseStart = now;
                 // A new step id per repeat: the last repeat's Done must not end this one.
                 GuideSet(new JObject { ["status"] = "waiting", ["step"] = next, ["steps"] = step.Repeats, ["detail"] = $"Again ({next} of {step.Repeats}) - recording",
-                    ["stepId"] = run.GuideStep, ["offerDone"] = true }, step.By);
+                    ["stepId"] = run.GuideStep, ["offerDone"] = true, ["timeLimitSec"] = step.TimeoutMs / 1000.0 }, step.By);
                 return;
             }
             FinishQueued(step, "captured", $"Recorded {step.Repeats}x - Claude can read it any time");
