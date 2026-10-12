@@ -8,13 +8,21 @@ namespace WhatsAnAiBridge;
 /// <summary>
 /// Who is talking to this HUD, what each of them is doing, and who may restart it. Several agents (Claude Code sessions in
 /// worktrees, Claude Desktop, scripts) share one HUD; this is the one place that knows them apart.
-///   session.hello  {id, label, branch?, cwd?, pid?, kind?, mcp?}   tags this connection; every later request is "by" that session
+///   session.hello  {id, label, branch?, cwd?, pid?, kind?, role?, mcp?}   tags this connection; every later request is "by" that session
+///       role: agent (default) | infra. Infra is the shared HTTP server's own connections (its control center identity, the F8
+///       route-dispatcher): not an agent, so the chip doesn't count it (its hover names it on a dim line). Older MCP servers send
+///       no role: kind mcp-http with label "control center" or "route-dispatcher" is infra too.
+///   session.touch  {}                                         "still here": an MCP server sends it while a caller's call is open
+///       without bridge traffic (incident_wait, a long observe_wait), so the caller stays present (PresentLocked)
 ///       mcp {version, sha, mode: supervised|local|unsupervised, deployedVersion, deployedSha, workerPid}: which MCP server build
 ///       the session runs and what was deployed when it said hello (supervised = follows deployments, local = pinned to its own
 ///       checkout's build, unsupervised = an old launcher that needs a session restart to get a supervisor). Optional: old servers
 ///       don't send it. A hot swap connects a new worker that says hello with the SAME id: the session moves to the new connection,
 ///       the old one stays known (PrevClientId) until it closes, so its in-flight calls keep their "who" and its close disconnects nothing.
 ///   session.list   {}                                         sessions (with mcp), leases, blockers, restart requests, mcpRollout
+///       per session: present (counted on the chip), stale (connected but idle: an mcp-http caller with no call for
+///       McpHttpIdle), infra, idleSec, and doing: its blockers, attributed by session id (a label several sessions share,
+///       such as "main", names one of them, never all). agents: how many the chip counts.
 ///       mcpRollout {deployedVersion, deployedSha, total, onDeployed, behind, local, unsupervised}: the deployed build from the newest
 ///       hello that carried one, and the connected sessions that reported mcp sorted against it (behind = supervised, not on it yet).
 ///   lease.acquire  {kind: perf|pilot|record|reload|other, label, ttlSec?}  -> {id, until}; refused while a restart is granted
@@ -51,6 +59,9 @@ public partial class WhatsAnAiBridge
         public int Hue = -1;               // 0-5, the who-dot's colour (AttentionQueue.cs AttnPickHueLocked), stable for the HUD's lifetime
         public DateTime? DisconnectedAt;   // its cleanup runs after a grace (AttentionQueue.cs AttnTickLocked)
         public bool AttnCleaned;            // that cleanup ran (a reconnect resets it)
+        public string? Role;               // hello.role: agent | infra (null: an older server, see Infra)
+        /// <summary>The shared HTTP server's own connections, not an agent: by hello.role, else by the labels older servers use.</summary>
+        public bool Infra => Role == "infra" || (Role == null && Kind == "mcp-http" && Label is "control center" or "route-dispatcher");
     }
 
     /// <summary>
@@ -107,13 +118,16 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>One session as the panel sees it (an immutable copy; Name is what the player reads).</summary>
-    internal sealed record SessionView(string Id, string Label, string Name, string? Branch, string? Kind, bool Connected, DateTime LastSeen, SessionMcp? Mcp);
+    /// <remarks>Present: counted as an agent on this HUD (PresentLocked); Doing: its blockers' labels, by session id.</remarks>
+    internal sealed record SessionView(string Id, string Label, string Name, string? Branch, string? Kind, bool Connected, DateTime LastSeen, SessionMcp? Mcp,
+        bool Present, bool Infra, string[] Doing);
 
     /// <summary>
     /// What the guide panel shows about sessions this frame: taken under the lock by SessionsTick (4 Hz) and whenever the state
     /// changes (hello, a connection closing, a restart request, the user's Restart now / Not now), never per frame. Immutable.
+    /// Agents: the present sessions that are not infra (the chip's number).
     /// </summary>
-    internal sealed record SessionsView(SessionView[] Sessions, int Connected, RestartRequest? Waiting, RestartRequest? Granted, McpRollout? Rollout)
+    internal sealed record SessionsView(SessionView[] Sessions, int Agents, RestartRequest? Waiting, RestartRequest? Granted, McpRollout? Rollout)
     {
         public static readonly SessionsView Empty = new([], 0, null, null, null);
     }
@@ -147,7 +161,9 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>Something a restart would interrupt: what, whose, until when (when known), and whether it is the requester's own.</summary>
-    internal readonly record struct Blocker(string Kind, string Label, string? Who, DateTime? Until, bool Yours, string? LeaseId = null);
+    /// <remarks>Session: the owner's session id when known (a lease, the guide step, the attention floor); else the owner is
+    /// resolved from Who, its label, to one session (OwnerLocked).</remarks>
+    internal readonly record struct Blocker(string Kind, string Label, string? Who, DateTime? Until, bool Yours, string? LeaseId = null, string? Session = null);
 
     private readonly object _sessionLock = new();
     private readonly Dictionary<string, SessionInfo> _sessions = new(StringComparer.Ordinal);
@@ -155,11 +171,16 @@ public partial class WhatsAnAiBridge
     private readonly List<RestartRequest> _restarts = new();
     private int _leaseSeq, _restartSeq;
     private volatile AgentsView _agentsView = AgentsView.Empty;
+    private Dictionary<string, List<string>> _doingCache = new(StringComparer.Ordinal);   // per session id, by SessionsTick (under the lock)
     private long _reqClientId;                         // the connection of the request being served (set in DrainRequests)
     private DateTime _sessionsTickAt = DateTime.MinValue;
     private string? _attnTickError;                   // the last attention tick fault logged (SessionsTick): a repeat is not logged again
     private string? _mcpDeployedSha, _mcpDeployedVersion;   // the deployed MCP build, from the newest hello that carried one
     private volatile SessionsView _sessionsView = SessionsView.Empty;   // written under the lock, read by the panel every frame
+    // An mcp-http caller (a tools\mcp-call.ps1 label on the shared server) keeps its connection while that server lives, so
+    // "connected" says little about it: it is present while it calls (session.touch covers a long call) or did in the last
+    // McpHttpIdle, else stale (listed by session.list, left out of the chip and its hover).
+    internal static readonly TimeSpan McpHttpIdle = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan SessionForget = TimeSpan.FromMinutes(30), RestartGoExpiry = TimeSpan.FromMinutes(3), RestartKeep = TimeSpan.FromMinutes(20);
     private static readonly HashSet<string> LeaseKinds = new(StringComparer.Ordinal) { "perf", "pilot", "record", "reload", "other" };
     private const int LeaseTtlDefault = 120, LeaseTtlMax = 3600;
@@ -168,6 +189,7 @@ public partial class WhatsAnAiBridge
     {
         "session.hello" => SafeMemory(() => SessionHello(p)),
         "session.list" => SafeMemory(SessionList),
+        "session.touch" => SafeMemory(SessionTouchReply),
         "lease.acquire" => SafeMemory(() => LeaseAcquire(p)),
         "lease.renew" => SafeMemory(() => LeaseRenew(p)),
         "lease.release" => SafeMemory(() => LeaseRelease(p)),
@@ -204,6 +226,7 @@ public partial class WhatsAnAiBridge
             s.Branch = Clip(p?["branch"]?.ToString(), 80);
             s.Cwd = Clip(p?["cwd"]?.ToString(), 200);
             s.Kind = Clip(p?["kind"]?.ToString(), 20);
+            s.Role = Clip(p?["role"]?.ToString(), 20) is { Length: > 0 } role ? role : null;
             s.Pid = p?["pid"]?.Type == JTokenType.Integer ? p["pid"]!.Value<int>() : null;
             s.Mcp = ParseMcp(p?["mcp"] as JObject);
             if (s.Mcp?.DeployedSha != null) { _mcpDeployedSha = s.Mcp.DeployedSha; _mcpDeployedVersion = s.Mcp.DeployedVersion; }
@@ -224,7 +247,8 @@ public partial class WhatsAnAiBridge
                     o.Connected = false; o.PrevClientId = 0;
                 }
             RenameLocked();
-            var others = _sessions.Values.Count(o => o != s && o.Connected);
+            var now = DateTime.UtcNow;
+            var others = _sessions.Values.Count(o => o != s && !o.Infra && PresentLocked(o, now));
             SessionsPublishLocked();
             var reply = new JObject { ["ok"] = true, ["id"] = s.Id, ["label"] = s.Label, ["name"] = s.Name, ["hue"] = s.Hue, ["others"] = others, ["holdSec"] = Settings.RestartHoldSec.Value };
             if (McpRolloutLocked() is { } ro) reply["mcpRollout"] = ro.Json();
@@ -277,15 +301,63 @@ public partial class WhatsAnAiBridge
             foreach (var s in _sessions.Values) if ((s.ClientId == cid || s.PrevClientId == cid) && s.Connected) s.LastSeen = DateTime.UtcNow;
     }
 
-    /// <summary>The MCP rollout against the connected sessions that reported mcp; null until a hello carried a deployed build.</summary>
+    /// <summary>session.touch: the request itself refreshed LastSeen (DrainRequests calls SessionTouch); say whether it is known.</summary>
+    private JObject SessionTouchReply() =>
+        CurrentSession() is { } me ? new JObject { ["ok"] = true, ["id"] = me.Id } : Err("no_session", "Send session.hello on this connection first.");
+
+    /// <summary>
+    /// Whether a session counts as an agent on this HUD now: connected, and for an mcp-http caller also seen in the last
+    /// McpHttpIdle (session.touch keeps a long call fresh) or holding a lease (a test across several calls). A stdio server is
+    /// one session's own process: connected is present.
+    /// </summary>
+    private bool PresentLocked(SessionInfo s, DateTime now)
+    {
+        if (!s.Connected) return false;
+        if (s.Kind != "mcp-http" || now - s.LastSeen <= McpHttpIdle) return true;
+        foreach (var l in _leases) if (l.Session == s.Id && l.Until > now) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// The session a blocker belongs to: by its session id when it carries one (a lease, the guide step, the floor), else the
+    /// connected session with its label (the most recently seen, so a label several sessions share names one, never all).
+    /// An id that names no session (a queued step's "queue:&lt;step&gt;", a session forgotten since) falls back to the label.
+    /// Null: nobody with that label is connected (HUD-run work, a gone session).
+    /// </summary>
+    private SessionInfo? OwnerLocked(in Blocker b)
+    {
+        if (b.Session != null && _sessions.TryGetValue(b.Session, out var known)) return known;
+        if (b.Who == null) return null;
+        SessionInfo? best = null;
+        foreach (var s in _sessions.Values)
+            if (s.Connected && s.Label == b.Who && (best == null || s.LastSeen > best.LastSeen)) best = s;
+        return best;
+    }
+
+    /// <summary>What each session is doing (its blockers' labels, by OwnerLocked), keyed by session id.</summary>
+    private Dictionary<string, List<string>> DoingBySessionLocked(List<Blocker> blockers)
+    {
+        var map = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var b in blockers)
+            if (OwnerLocked(b) is { } o)
+            {
+                if (!map.TryGetValue(o.Id, out var l)) map[o.Id] = l = new List<string>();
+                if (!l.Contains(b.Label)) l.Add(b.Label);
+            }
+        return map;
+    }
+
+    /// <summary>The MCP rollout against the present sessions that reported mcp (a stale caller's old build is not "swapping":
+    /// its next call says hello from the new one); null until a hello carried a deployed build.</summary>
     private McpRollout? McpRolloutLocked()
     {
         if (_mcpDeployedSha == null) return null;
+        var now = DateTime.UtcNow;
         var total = 0; var on = 0;
         List<string>? behind = null, local = null, unsup = null;
         foreach (var s in _sessions.Values)
         {
-            if (!s.Connected || s.Mcp == null) continue;
+            if (s.Mcp == null || !PresentLocked(s, now)) continue;
             total++;
             if (s.Mcp.Local) (local ??= new()).Add(s.Label);
             else if (s.Mcp.Unsupervised) (unsup ??= new()).Add(s.Label);
@@ -306,18 +378,22 @@ public partial class WhatsAnAiBridge
             SessionsExpireLocked(now);
             AttnLoadLocked();
             var blockers = BlockersLocked(me?.Id);
+            var doing = DoingBySessionLocked(blockers);
             var holder = AttnHolderLocked();
             return new JObject
             {
                 ["ok"] = true,
                 ["you"] = me?.Id,
                 ["holdSec"] = Settings.RestartHoldSec.Value,
+                ["agents"] = _sessions.Values.Count(s => !s.Infra && PresentLocked(s, now)),
                 ["sessions"] = new JArray(_sessions.Values.OrderByDescending(s => s.Connected).ThenBy(s => s.HelloAt).Select(s => new JObject
                 {
                     ["id"] = s.Id, ["label"] = s.Label, ["name"] = DisplayNameLocked(s), ["hue"] = s.Hue, ["branch"] = s.Branch, ["cwd"] = s.Cwd, ["pid"] = s.Pid, ["kind"] = s.Kind,
-                    ["connected"] = s.Connected, ["helloAt"] = s.HelloAt.ToString("O"), ["lastSeen"] = s.LastSeen.ToString("O"),
+                    ["connected"] = s.Connected, ["present"] = PresentLocked(s, now), ["stale"] = s.Connected && !PresentLocked(s, now),
+                    ["infra"] = s.Infra, ["idleSec"] = (int)Math.Max(0, (now - s.LastSeen).TotalSeconds),
+                    ["helloAt"] = s.HelloAt.ToString("O"), ["lastSeen"] = s.LastSeen.ToString("O"),
                     ["leases"] = _leases.Count(l => l.Session == s.Id),
-                    ["doing"] = new JArray(blockers.Where(b => b.Who == s.Label).Select(b => b.Label)),
+                    ["doing"] = new JArray(doing.TryGetValue(s.Id, out var d) ? d : []),
                     ["mcp"] = s.Mcp?.Json(),
                     // Its attention items (AttentionQueue.cs): what it waits to show the player, and where it stands.
                     ["queued"] = AttnOfSessionLocked(s.Id, now),
@@ -414,11 +490,11 @@ public partial class WhatsAnAiBridge
     /// Rebuild the in-game view of the agents (SessionsTick, 4 Hz): the connected sessions with something going on,
     /// each with what it asks of the user (pilot blockers: a step, a question, a flow, a recording step) and what else
     /// it does. HUD-run work asking the user under a name no connected session has (a queued step "by Claude") is its
-    /// own entry. Blockers name sessions by label; a label two connected sessions share goes to the newest.
+    /// own entry. A blocker belongs to its session by id (OwnerLocked): a label several sessions share (every server started
+    /// in the main checkout reads "main") names one of them, never all. Stale callers and infra are not live agents.
     /// </summary>
-    private void AgentsViewRebuildLocked()
+    private void AgentsViewRebuildLocked(List<Blocker> blockers, DateTime now)
     {
-        var blockers = BlockersLocked(null);
         var names = new Dictionary<string, string>(StringComparer.Ordinal);
         var byId = new Dictionary<string, (string Name, int Hue)>(StringComparer.Ordinal);
         var hues = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -428,16 +504,19 @@ public partial class WhatsAnAiBridge
             byId[s.Id] = (DisplayNameLocked(s), s.Hue is >= 0 and < AttnHues ? s.Hue : AttnHueFallback);
             hues[s.Label] = byId[s.Id].Hue;
         }
-        var byLabel = _sessions.Values.Where(s => s.Connected).GroupBy(s => s.Label).ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.HelloAt).First());
         var list = new List<AgentView>();
-        foreach (var g in blockers.Where(b => b.Who != null).GroupBy(b => b.Who!))
+        foreach (var g in blockers.Where(b => b.Who != null || b.Session != null)
+                     .Select(b => (b, owner: OwnerLocked(b))).GroupBy(x => x.owner?.Id ?? "label:" + x.b.Who))
         {
-            var connected = byLabel.ContainsKey(g.Key);
-            var asks = g.Where(b => b.Kind == "pilot").Select(b => b.Label).Distinct().ToArray();
-            var doing = g.Where(b => b.Kind != "pilot").Select(b => b.Label).Distinct().ToArray();
+            var owner = g.First().owner;
+            var label = owner?.Label ?? g.First().b.Who ?? "";
+            var live = owner != null && !owner.Infra && PresentLocked(owner, now);
+            var asks = g.Where(x => x.b.Kind == "pilot").Select(x => x.b.Label).Distinct().ToArray();
+            var doing = g.Where(x => x.b.Kind != "pilot").Select(x => x.b.Label).Distinct().ToArray();
             // A gone session's own leases and measurements end by themselves; only what still asks the user is shown.
-            if (!connected && asks.Length == 0) continue;
-            list.Add(new AgentView(names.TryGetValue(g.Key, out var n) ? n : BaseDisplayName(g.Key, null), g.Key, asks, connected ? doing : []));
+            if (!live && asks.Length == 0) continue;
+            var name = owner != null ? DisplayNameLocked(owner) : names.TryGetValue(label, out var n) ? n : BaseDisplayName(label, null);
+            list.Add(new AgentView(name, label, asks, live ? doing : []));
         }
         // Agents that are asking come first, then by name: the strip and the hover list read in that order.
         var active = list.OrderByDescending(a => a.Asks.Length > 0).ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase).ToArray();
@@ -549,22 +628,24 @@ public partial class WhatsAnAiBridge
         if (run != null)
         {
             var step = Queue().FirstOrDefault(s => s.Id == run.Id);
-            list.Add(new Blocker("pilot", $"recording step '{step?.Label ?? run.Id}' for the user", step?.By, null, Yours(step?.By)));
+            list.Add(new Blocker("pilot", $"recording step '{step?.Label ?? run.Id}' for the user", step?.By, null, Yours(step?.By), Session: step?.Session));
         }
         lock (_flowLock)
             if (_flow.Status == "running") list.Add(new Blocker("pilot", $"guided flow: {_flow.Title ?? "untitled"}", _flow.Who, _flow.EndsAt, Yours(_flow.Who)));
         lock (_guideLock)
             if (_guide.Status is "waiting" or "detected" or "settling" && _guide.Instruction != null)
-                list.Add(new Blocker("pilot", $"waiting for the user: {_guide.Instruction}", _guide.Who, null, Yours(_guide.Who)));
+                list.Add(new Blocker("pilot", $"waiting for the user: {_guide.Instruction}", _guide.Who, null, Yours(_guide.Who), Session: _guide.Session));
         lock (_hlLock)
             foreach (var l in _hlLayers)
                 // Held question strips (the attention queue: not this session's turn yet) are not in front of the player: no
                 // blocker; nor are expired questions (#76: their strips are gone).
                 if (!l.AsksHeld && l.Targets.FirstOrDefault(t => t.Ask != null && t.Answer == null && !t.Expired) is { } asked)
-                    list.Add(new Blocker("pilot", $"question for the user: {asked.Ask}" + (l.Pending > 1 ? $" (+{l.Pending - 1})" : ""), l.Who, l.Until, Yours(l.Who)));
-        // The attention queue's floor holder (C8), unless what it shows is listed already (its card, flow, step or question).
-        if (AttnFloorBlockerLocked(requesterLabel) is { } floor && !list.Any(b => b.Kind == "pilot" && b.Who == floor.Who)) list.Add(floor);
-        foreach (var l in _leases) list.Add(new Blocker(l.Kind, l.Label, l.Who, l.Until, l.Session == requester, l.Id));
+                    list.Add(new Blocker("pilot", $"question for the user: {asked.Ask}" + (l.Pending > 1 ? $" (+{l.Pending - 1})" : ""), l.Who, l.Until, Yours(l.Who), Session: l.Session));
+        // The attention queue's floor holder (C8), unless what it shows is listed already (its card, flow, step or question):
+        // the same owner, by session id when both know it (two sessions labelled "main" are two owners), else by label.
+        if (AttnFloorBlockerLocked(requesterLabel) is { } floor
+            && !list.Any(b => b.Kind == "pilot" && (b.Session != null && floor.Session != null ? b.Session == floor.Session : b.Who == floor.Who))) list.Add(floor);
+        foreach (var l in _leases) list.Add(new Blocker(l.Kind, l.Label, l.Who, l.Until, l.Session == requester, l.Id, l.Session));
         return list;
     }
 
@@ -662,7 +743,7 @@ public partial class WhatsAnAiBridge
     }
 
     private string RestartBlockersText(RestartRequest req) =>
-        string.Join(", ", req.Blockers.Take(3).Select(b => b.Who != null ? $"{DisplayNameOfLocked(b.Who)}'s {b.Label}" : b.Label)) + (req.Blockers.Count > 3 ? $" (+{req.Blockers.Count - 3})" : "");
+        string.Join(", ", req.Blockers.Take(3).Select(b => b.Who != null ? $"{(OwnerLocked(b) is { } o ? DisplayNameLocked(o) : DisplayNameOfLocked(b.Who))}'s {b.Label}" : b.Label)) + (req.Blockers.Count > 3 ? $" (+{req.Blockers.Count - 3})" : "");
 
     private JObject RestartJsonLocked(RestartRequest r)
     {
@@ -750,7 +831,13 @@ public partial class WhatsAnAiBridge
                 var msg = $"[Attention] tick: {ex.GetType().Name}: {ex.Message}";
                 if (msg != _attnTickError) { _attnTickError = msg; LogError(msg + " " + ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim()); }
             }
-            AgentsViewRebuildLocked();   // after the queue moved: the floor holder is one of the asks
+            // After the queue moved: the floor holder is one of the asks. The blockers are read once per tick, here on the
+            // render thread (they enumerate render-owned state such as the step queue), for the agents view and for the
+            // per-session doing the published view carries (SessionsPublishLocked also runs on the TCP thread, so it
+            // reuses this copy instead of reading the blockers itself).
+            var tickBlockers = BlockersLocked(null);
+            _doingCache = DoingBySessionLocked(tickBlockers);
+            AgentsViewRebuildLocked(tickBlockers, now);
             SessionsPublishLocked();
         }
         AttnRun(effects);
@@ -766,13 +853,16 @@ public partial class WhatsAnAiBridge
     /// </summary>
     private void SessionsPublishLocked()
     {
-        var sessions = _sessions.Values.OrderByDescending(s => s.Connected).ThenBy(s => s.HelloAt)
-            .Select(s => new SessionView(s.Id, s.Label, DisplayNameLocked(s), s.Branch, s.Kind, s.Connected, s.LastSeen, s.Mcp)).ToArray();
-        var connected = 0;
-        foreach (var s in sessions) if (s.Connected) connected++;
+        var now = DateTime.UtcNow;
+        var doing = _doingCache;   // SessionsTick's copy (at most 250 ms old): this also runs on the TCP thread
+        var sessions =_sessions.Values.OrderByDescending(s => s.Connected).ThenBy(s => s.HelloAt)
+            .Select(s => new SessionView(s.Id, s.Label, DisplayNameLocked(s), s.Branch, s.Kind, s.Connected, s.LastSeen, s.Mcp,
+                PresentLocked(s, now), s.Infra, doing.TryGetValue(s.Id, out var d) ? d.ToArray() : [])).ToArray();
+        var agents = 0;
+        foreach (var s in sessions) if (s.Present && !s.Infra) agents++;
         var waiting = _restarts.Where(r => r.Status == "waiting").OrderBy(r => r.At).FirstOrDefault();
         var granted = _restarts.FirstOrDefault(r => r.Status == "go");
-        _sessionsView = new SessionsView(sessions, connected, RestartCopyLocked(waiting), RestartCopyLocked(granted), McpRolloutLocked());
+        _sessionsView = new SessionsView(sessions, agents,RestartCopyLocked(waiting), RestartCopyLocked(granted), McpRolloutLocked());
         AttnPublishLocked();   // and the attention queue's copies (the ask card, the next strip, the dot), when they changed
     }
 
