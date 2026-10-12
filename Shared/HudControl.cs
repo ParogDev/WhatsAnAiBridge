@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -161,6 +162,8 @@ public partial class WhatsAnAiBridge
     /// HUD's plugin loops (see the class summary).</summary>
     private void SchedulePendingReload()
     {
+        // The last reload isn't final until its plugin is seen running (CheckReloadedPlugin only reads the plugin list).
+        if (_reloadCheck != null) { CheckReloadedPlugin(); return; }
         if (_pendingReloads.IsEmpty || Interlocked.Exchange(ref _reloadScheduled, 1) == 1) return;
         new NextFrameTask().GetAwaiter().OnCompleted(() =>
         {
@@ -169,13 +172,21 @@ public partial class WhatsAnAiBridge
         });
     }
 
-    /// <summary>Performs at most one queued reload. Runs from the HUD's next-frame hook, never from Render.</summary>
+    /// <summary>
+    /// Performs at most one queued reload. Runs from the HUD's next-frame hook, never from Render. A compile that
+    /// succeeded is checked over the next frames (CheckReloadedPlugin) before the result is final.
+    /// </summary>
     private void RunPendingReload()
     {
-        if (!_pendingReloads.TryDequeue(out var r)) return;
+        if (_reloadCheck != null || !_pendingReloads.TryDequeue(out var r)) return;
         var result = new ReloadResultDto { Plugin = r.Folder, QueuedAt = r.QueuedAt, StartedAt = DateTime.UtcNow };
         _lastReload = result;
         var sw = Stopwatch.StartNew();
+        var old = PluginWrappersOf(r.Folder);
+        var check = new ReloadCheck(r, result, sw,
+            old.Select(w => (object)w.Plugin).ToHashSet(ReferenceEqualityComparer.Instance),
+            old.Select(w => w.Plugin.GetType().Assembly).ToHashSet(),
+            old.Count > 0 ? old.Any(w => w.IsEnable) : null);
         try
         {
             var pm = Core.Current?.pluginManager ?? throw new InvalidOperationException("plugin manager unavailable");
@@ -186,18 +197,38 @@ public partial class WhatsAnAiBridge
                 var asms = pm.Plugins.Where(w => string.Equals(w.PathOnDisk, r.CompiledPath, StringComparison.OrdinalIgnoreCase))
                     .Select(PluginObject).Where(o => o != null).Select(o => o!.GetType().Assembly).ToHashSet();
                 InstrDropPluginAssemblies(asms, $"cut: {r.Folder} was reloaded (hud.reload_plugin) mid-measurement");
-                var reload = pm.GetType().GetMethod("ReloadSourcePlugin", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
-                             ?? throw new MissingMethodException("PluginManager.ReloadSourcePlugin not found in this HUD build");
-                reload.Invoke(pm, new object?[] { r.CompiledPath, null });
+                Reload(pm).Invoke(pm, new object?[] { r.CompiledPath, null });
             }
             else
             {
-                pm.LoadFailedSourcePlugin(r.FailedSourceDir!);
+                // A plugin that failed to compile. The HUD's own rebuild (LoadFailedSourcePlugin, the menu's "Try to
+                // rebuild") adds the new plugin to the list but never calls Initialise/AreaChange/EntityAdded on it
+                // (seen on PoE2 2026-10-11, and so in ExileCore's source): it shows as loaded and never ticks.
+                // ReloadSourcePlugin runs the full load, so use it with the path the plugin compiles to
+                // (<temp plugins>\<folder>\x.dll; the HUD only uses the folder part and validates the rest).
+                result.Via = "rebuild";
+                var tempRoot = LoadedSourcePlugins().Select(p => Path.GetDirectoryName(Path.GetDirectoryName(p.CompiledPath))).FirstOrDefault(d => d != null);
+                var rebuilt = false;
+                if (tempRoot != null)
+                {
+                    pm.FailedSourcePlugins.TryRemove(r.FailedSourceDir!, out var previous);
+                    try
+                    {
+                        Reload(pm).Invoke(pm, new object?[] { Path.Combine(tempRoot, r.Folder, r.Folder + ".dll"), null });
+                        rebuilt = true;
+                    }
+                    catch (TargetInvocationException) when (FailureOf(pm, r.Folder) == null)
+                    {
+                        // Refused before compiling (a temp path the HUD doesn't accept): put the entry back, use the HUD's rebuild.
+                        if (previous != null) pm.FailedSourcePlugins.TryAdd(r.FailedSourceDir!, previous);
+                    }
+                }
+                if (!rebuilt)
+                {
+                    result.Via = "rebuild_failed_plugin";
+                    pm.LoadFailedSourcePlugin(r.FailedSourceDir!);
+                }
             }
-            // A failed compile is recorded in FailedSourcePlugins (and Errors.txt) rather than thrown.
-            var failure = pm.FailedSourcePlugins.FirstOrDefault(kv => string.Equals(Path.GetFileName(kv.Key.TrimEnd('\\', '/')), r.Folder, StringComparison.OrdinalIgnoreCase));
-            result.Ok = failure.Key == null;
-            if (failure.Key != null) result.Error = failure.Value.Length > 4000 ? failure.Value[..4000] + " ..." : failure.Value;
         }
         catch (Exception ex)
         {
@@ -205,12 +236,154 @@ public partial class WhatsAnAiBridge
             result.Ok = false;
             result.Error = inner.Message;
         }
-        result.DurationMs = sw.ElapsedMilliseconds;
+        // A failed compile is recorded in FailedSourcePlugins (and Errors.txt); ReloadSourcePlugin then also throws a
+        // bare "Unable to recompile", so the compiler's message wins.
+        var pmNow = Core.Current?.pluginManager;
+        if (pmNow != null && FailureOf(pmNow, r.Folder) is { } failure)
+        {
+            result.Ok = false;
+            result.Error = failure.Length > 4000 ? failure[..4000] + " ..." : failure;
+        }
+        if (result.Ok == false)
+        {
+            // The old instance is unloaded either way, but its PluginBridge methods still answer.
+            result.StaleBridgeMethods = StaleBridgeMethodNames(check.OldAssemblies);
+            FinishReload(check);
+            return;
+        }
+        check.CompiledAt = DateTime.UtcNow;
+        _reloadCheck = check;
+    }
+
+    private static MethodInfo Reload(PluginManager pm) =>
+        pm.GetType().GetMethod("ReloadSourcePlugin", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+        ?? throw new MissingMethodException("PluginManager.ReloadSourcePlugin not found in this HUD build");
+
+    private static string? FailureOf(PluginManager pm, string folder) =>
+        pm.FailedSourcePlugins.FirstOrDefault(kv => string.Equals(Path.GetFileName(kv.Key.TrimEnd('\\', '/')), folder, StringComparison.OrdinalIgnoreCase)).Value;
+
+    private static List<PluginWrapper> PluginWrappersOf(string folder) =>
+        (Core.Current?.pluginManager?.Plugins.ToList() ?? new())
+        .Where(w => w.Plugin != null && !string.IsNullOrEmpty(w.PathOnDisk)
+                    && string.Equals(Path.GetFileName(Path.GetDirectoryName(w.PathOnDisk)), folder, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    private sealed class ReloadCheck(ReloadRequest request, ReloadResultDto result, Stopwatch sw, HashSet<object> oldInstances, HashSet<Assembly> oldAssemblies, bool? wasEnabled)
+    {
+        public ReloadRequest Request { get; } = request;
+        public ReloadResultDto Result { get; } = result;
+        public Stopwatch Sw { get; } = sw;
+        public HashSet<object> OldInstances { get; } = oldInstances;
+        public HashSet<Assembly> OldAssemblies { get; } = oldAssemblies;
+        /// <summary>null: the plugin wasn't loaded before (it had failed to compile).</summary>
+        public bool? WasEnabled { get; } = wasEnabled;
+        public DateTime CompiledAt { get; set; }
+        public DateTime? SeenAt { get; set; }
+    }
+
+    private volatile ReloadCheck? _reloadCheck;
+    private static readonly TimeSpan ReloadLoadTimeout = TimeSpan.FromSeconds(10), ReloadInitGrace = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// A compile that succeeded isn't a running plugin yet: the HUD adds the new instance about 1 s later from a
+    /// coroutine, and one of its paths adds it without initialising it. Each frame until it settles: is there a new
+    /// instance, and is every enabled one Initialized? Reports the first link that broke instead of "ok".
+    /// </summary>
+    private void CheckReloadedPlugin()
+    {
+        var c = _reloadCheck!;
+        var r = c.Result;
+        var now = DateTime.UtcNow;
+        var fresh = PluginWrappersOf(c.Request.Folder).Where(w => !c.OldInstances.Contains(w.Plugin)).ToList();
+        if (fresh.Count == 0)
+        {
+            if (now - c.CompiledAt < ReloadLoadTimeout) return;
+            r.Ok = false;
+            r.Error = "not_loaded";
+            r.Message = $"{c.Request.Folder} compiled, but no new instance of it was loaded within {ReloadLoadTimeout.TotalSeconds:0} s: " +
+                        "the HUD's load step (its reload coroutine) didn't run, or found no IPlugin/ISettings class. Check hud_log; reload again or restart the HUD.";
+        }
+        else
+        {
+            c.SeenAt ??= now;
+            var uninitialised = fresh.Where(w => w.IsEnable && !w.Plugin.Initialized).ToList();
+            if (uninitialised.Count > 0 && now - c.SeenAt < ReloadInitGrace) return;
+            r.Instances = fresh.Count;
+            r.Initialized = fresh.All(w => w.Plugin.Initialized);
+            if (uninitialised.Count > 0)
+            {
+                r.Ok = false;
+                r.Error = "not_initialised";
+                r.Message = $"{c.Request.Folder} compiled and loaded, but the HUD never called Initialise on {string.Join(", ", uninitialised.Select(w => w.Name))}: " +
+                            "it is enabled yet won't Tick or Render" + (r.Via == "rebuild_failed_plugin"
+                                ? " (the HUD's rebuild of a plugin that had failed to compile skips Initialise). Call reload_plugin again: a reload of a loaded plugin initialises it."
+                                : ". Call reload_plugin again, or restart the HUD.");
+            }
+            else if (c.WasEnabled == true && fresh.All(w => !w.IsEnable && !w.Plugin.Initialized))
+            {
+                r.Ok = false;
+                r.Error = "init_failed";
+                r.Message = $"{c.Request.Folder} compiled and loaded, but its Initialise() returned false or threw, so the HUD turned it off. " +
+                            "See what it logged (hud_log), fix it, reload, and enable it again in the HUD menu.";
+            }
+            else
+            {
+                r.Ok = true;
+                if (fresh.All(w => !w.IsEnable)) r.Message = "Loaded but disabled in the HUD menu: it isn't initialised until it is enabled.";
+            }
+        }
+        // Methods the old instance registered and the new one didn't overwrite still point into the unloaded plugin.
+        r.StaleBridgeMethods = StaleBridgeMethodNames(c.OldAssemblies);
+        _reloadCheck = null;
+        FinishReload(c);
+    }
+
+    private void FinishReload(ReloadCheck c)
+    {
+        var result = c.Result;
+        var r = c.Request;
+        if (result.StaleBridgeMethods is { Count: 0 }) result.StaleBridgeMethods = null;
+        if (result.StaleBridgeMethods != null)
+            result.Warnings.Add($"PluginBridge methods registered by the unloaded instance still answer, with its stale state: {string.Join(", ", result.StaleBridgeMethods)}. " +
+                                (result.Ok == true
+                                    ? "The new instance doesn't register them (renamed or removed?): callers get the old plugin's delegates until a HUD restart."
+                                    : "Callers get the old plugin's delegates until the plugin loads again (it re-registers them) or the HUD restarts."));
+        result.DurationMs = c.Sw.ElapsedMilliseconds;
         result.FinishedAt = DateTime.UtcNow;
         _lastReload = result;
         ObsHud(new JObject { ["cause"] = "reload", ["plugin"] = r.Folder, ["ok"] = result.Ok, ["durationMs"] = result.DurationMs });
-        if (result.Ok == true) LogMessage($"[Reload] {r.Folder} recompiled and reloaded in {result.DurationMs} ms (requested over the bridge)");
-        else LogError($"[Reload] {r.Folder} failed: {result.Error}");
+        if (result.Ok == true) LogMessage($"[Reload] {r.Folder} recompiled, reloaded and initialised in {result.DurationMs} ms (requested over the bridge)");
+        else LogError($"[Reload] {r.Folder} failed: {result.Message ?? result.Error}");
+        foreach (var w in result.Warnings) LogError($"[Reload] {r.Folder}: {w}");
+    }
+
+    /// <summary>PluginBridge entries whose delegate lives in one of these plugin assemblies while no loaded plugin uses it.</summary>
+    private List<string> StaleBridgeMethodNames(HashSet<Assembly> assemblies)
+    {
+        if (assemblies.Count == 0) return new();
+        var bridge = GameController.PluginBridge;
+        if (bridge?.GetType().GetField("_methods", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(bridge) is not IDictionary dict) return new();
+        var live = LivePluginAssemblies() ?? new();
+        return dict.Cast<DictionaryEntry>()
+            .Where(e => e.Value is Delegate d && DelegateAssembly(d) is { } a && assemblies.Contains(a) && !live.Contains(a))
+            .Select(e => e.Key?.ToString() ?? "")
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static Assembly? DelegateAssembly(Delegate d) => d.Target?.GetType().Assembly ?? d.Method.DeclaringType?.Assembly;
+
+    /// <summary>
+    /// Why a PluginBridge delegate is stale, or null: it lives in a plugin assembly no loaded plugin uses any more (an
+    /// unloaded or reloaded instance), so it still answers, from that instance's state. HUD core delegates (the default
+    /// load context) never count; null too when the plugin list can't be read right now.
+    /// </summary>
+    private static string? StaleDelegateNote(Delegate d, HashSet<Assembly>? live)
+    {
+        if (live == null || DelegateAssembly(d) is not { } a || live.Contains(a)) return null;
+        if (System.Runtime.Loader.AssemblyLoadContext.GetLoadContext(a) is not { } ctx || ctx == System.Runtime.Loader.AssemblyLoadContext.Default) return null;
+        return $"registered by an instance of {a.GetName().Name} that is no longer loaded (it was reloaded or failed to compile): " +
+               "it answers from that old instance's state. The plugin re-registers it when it loads again; until then, or if it no longer registers it, it stays stale until a HUD restart.";
     }
 }
 
@@ -262,7 +435,18 @@ public class ReloadResultDto
     [JsonProperty("startedAt")] public DateTime StartedAt { get; set; }
     [JsonProperty("finishedAt", NullValueHandling = NullValueHandling.Ignore)] public DateTime? FinishedAt { get; set; }
     [JsonProperty("durationMs", NullValueHandling = NullValueHandling.Ignore)] public long? DurationMs { get; set; }
-    /// <summary>null while running.</summary>
+    /// <summary>null while running (compiling, then checking that the new instance loaded and initialised).</summary>
     [JsonProperty("ok", NullValueHandling = NullValueHandling.Ignore)] public bool? Ok { get; set; }
+    /// <summary>The compiler output, or after a good compile: not_loaded | not_initialised | init_failed (Message says what it means).</summary>
     [JsonProperty("error", NullValueHandling = NullValueHandling.Ignore)] public string? Error { get; set; }
+    [JsonProperty("message", NullValueHandling = NullValueHandling.Ignore)] public string? Message { get; set; }
+    /// <summary>For a plugin that had failed to compile: "rebuild" (through ReloadSourcePlugin) or "rebuild_failed_plugin" (the HUD's LoadFailedSourcePlugin, which skips Initialise).</summary>
+    [JsonProperty("via", NullValueHandling = NullValueHandling.Ignore)] public string? Via { get; set; }
+    /// <summary>New plugin instances found after the reload (one assembly can hold several plugins).</summary>
+    [JsonProperty("instances", NullValueHandling = NullValueHandling.Ignore)] public int? Instances { get; set; }
+    /// <summary>Every new instance's IPlugin.Initialized; false with ok=true means it is disabled in the HUD menu.</summary>
+    [JsonProperty("initialized", NullValueHandling = NullValueHandling.Ignore)] public bool? Initialized { get; set; }
+    /// <summary>PluginBridge methods that still point into the unloaded instance (stale delegates answering with its state).</summary>
+    [JsonProperty("staleBridgeMethods", NullValueHandling = NullValueHandling.Ignore)] public List<string>? StaleBridgeMethods { get; set; }
+    [JsonProperty("warnings")] public List<string> Warnings { get; set; } = new();
 }

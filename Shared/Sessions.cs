@@ -543,6 +543,7 @@ public partial class WhatsAnAiBridge
             foreach (var s in InstrSets.Values.Where(s => !list.Any(b => b.Kind == "perf" && b.Who == s.Who)))
                 list.Add(new Blocker("perf", $"patching the HUD for a {s.Kind} ({s.Label})", s.Who, s.ExpiresAt, Yours(s.Who)));
         foreach (var r in _pendingReloads) list.Add(new Blocker("reload", $"compiling {r.Folder}", r.Who, null, Yours(r.Who)));
+        if (_reloadCheck is { } rc) list.Add(new Blocker("reload", $"checking {rc.Request.Folder} loaded", rc.Request.Who, null, Yours(rc.Request.Who)));
         if (_isRecording) list.Add(new Blocker("record", "recording a gameplay session", _recordingWho, null, Yours(_recordingWho)));
         var run = _queueRun;
         if (run != null)
