@@ -39,6 +39,7 @@ public partial class WhatsAnAiBridge
         public double WashAt = -1e9, PopAt = -1e9, FillAt = -1e9;
         public bool FailWash;                                              // the wash runs in ToneBad (Failed)
         public string? RequestSrc; public string RequestCaps = "";
+        public float RequestSize = -1; public string RequestOut = "";      // RequestCaps clipped to WorkRequestMaxW at RequestSize
         public long ElapsedSecond = -1; public string ElapsedText = "";
         public string? TailSrc; public float TailW = -1; public string TailOut = "";
         public bool Seen;
@@ -54,7 +55,7 @@ public partial class WhatsAnAiBridge
         public double ChangedAt = -1e9;            // ImGui time of the last stage change or arrival (the 2 min quiet clock)
         public readonly WorkRowView?[] Strip = new WorkRowView?[WorkStripLines];
         public int StripCount, StripMore;
-        public string? MoreSrcN; public string MoreText = "";
+        public int MoreN; public string MoreText = "";
         // The board (GuidePanelBoard.cs): pinned by a click on the sessions chip, unpinned by the x, Esc, a second click, or
         // 30 min without any agent.
         public bool Pinned;
@@ -158,7 +159,7 @@ public partial class WhatsAnAiBridge
             var p = ImGui.GetCursorScreenPos();
             var min = new Vector2(p.X + GuideEdge, p.Y);
             var more = i == WorkStripLines - 1 ? u.StripMore : 0;
-            DrawWorkRow(dl, min, w, h, r, WorkRowUiOf(r), more, now, utc, true, 1f, "##work_row_" + i);
+            DrawWorkRow(dl, min, w, h, r, WorkRowUiOf(r), more, now, utc, true, 1f, WorkRowIds[i]);
             ImGui.SetCursorScreenPos(p);
             ImGui.Dummy(new Vector2(GuideWidth, h + (i < u.StripCount - 1 ? 3f : GuideEdge)));
         }
@@ -211,8 +212,9 @@ public partial class WhatsAnAiBridge
         x += WhoDotW;
         dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * alpha), r.Label);
         x += ImGui.CalcTextSize(r.Label).X * k + 8f;
-        if (!ReferenceEquals(ui.RequestSrc, r.Request)) { ui.RequestSrc = r.Request; ui.RequestCaps = GuideCaps(r.Request); }
-        var req = GuideClipTracked(ui.RequestCaps, font, small, GuideToastMsgTrack, WorkRequestMaxW);
+        if (!ReferenceEquals(ui.RequestSrc, r.Request)) { ui.RequestSrc = r.Request; ui.RequestCaps = GuideCaps(r.Request); ui.RequestSize = -1; }
+        if (ui.RequestSize != small) { ui.RequestSize = small; ui.RequestOut = GuideClipTracked(ui.RequestCaps, font, small, GuideToastMsgTrack, WorkRequestMaxW); }
+        var req = ui.RequestOut;
         GuideTrackedText(dl, font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastMuted, alpha), req, GuideToastMsgTrack);
         x += GuideTrackedWidth(font, small, req, GuideToastMsgTrack) + 14f;
         DrawWorkTrack(dl, new Vector2(x + WorkDotR, cy), r, ui, tone, now, alpha);
@@ -232,8 +234,7 @@ public partial class WhatsAnAiBridge
         if (more > 0)
         {
             var u = _workUi;
-            var moreKey = more.ToString();
-            if (u.MoreSrcN != moreKey) { u.MoreSrcN = moreKey; u.MoreText = "+" + moreKey + WorkMoreSuffix; }
+            if (u.MoreN != more) { u.MoreN = more; u.MoreText = "+" + more + WorkMoreSuffix; }
             var mw = ImGui.CalcTextSize(u.MoreText).X * k;
             dl.AddText(font, small, new Vector2(rx - mw, cy - small * 0.5f), U(GuideToastMuted, 0.85f * alpha), u.MoreText);
             rx -= mw + 10f;
@@ -324,6 +325,8 @@ public partial class WhatsAnAiBridge
         dl.AddCircleFilled(c, GuideDotR + 1.5f, U(GuideToastInk, 0.85f * alpha), 16);
         dl.AddCircleFilled(c, GuideDotR, U(ToneNeutral, 0.8f * alpha), 16);
     }
+
+    private static readonly string[] WorkRowIds = ["##work_row_0", "##work_row_1"];
 
     /// <summary>A 12 px spinner arc (a Task row working), turning at the card glyph's pace.</summary>
     private static void DrawWorkSpinner(ImDrawListPtr dl, Vector2 c, uint col, double now)
