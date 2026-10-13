@@ -63,14 +63,17 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>
-    /// A fault the player should notice: logged like <see cref="LogFault"/>, plus one error toast (title up to 40 chars,
-    /// text up to 200) the first time this load. <paramref name="holdSec"/> is how long the toast stays.
+    /// A fault the player should notice: logged like <see cref="LogFault"/>, plus one toast of <paramref name="kind"/>
+    /// (error | warn; title up to 40 chars, text up to 200) the first time this load. <paramref name="holdSec"/> is how
+    /// long the toast stays.
     /// </summary>
-    internal void ToastFault(string key, string title, string toast, string msg, double holdSec = 8)
+    internal void ToastFault(string key, string title, string toast, string msg, string kind = "error", double holdSec = 8)
     {
-        LogFault(msg, key);
+        LogFault(msg);   // keyed by its own text: two faults sharing one toast are both written
         if (!_faultToasted.TryAdd(key, 0)) return;
-        try { GuideLog(new Newtonsoft.Json.Linq.JObject { ["text"] = toast, ["kind"] = "error", ["title"] = title, ["holdSec"] = holdSec }); }
+        // One restart fixes both: when agents can't connect at all, the F8 toast would say the same thing twice.
+        if (key == "f8-register" && _faultToasted.ContainsKey("tcp-start")) return;
+        try { GuideLog(new Newtonsoft.Json.Linq.JObject { ["text"] = toast, ["kind"] = kind, ["title"] = title, ["holdSec"] = holdSec }); }
         catch (Exception ex) { LogFault($"[Toast] '{title}' could not be posted: {ex.GetType().Name}: {ex.Message}"); }
     }
 

@@ -94,8 +94,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         if (Settings.EnableTcp.Value)
             StartTcpServer();
         InstrStartup();   // patches a previous load of the bridge left in this HUD process (Instrumentation.cs)
-        try { PubRegister(); } catch (Exception ex) { ToastFault("f8-register", "F8 feedback is off", "Couldn't connect F8 to the agents. Restart the HUD to bring it back.", $"[PubSub] registering {PublishMethodName} / {SubscribeMethodName} on PluginBridge failed: {ex.Message}"); }
-        try { WorkRegister(); } catch (Exception ex) { ToastFault("f8-register", "F8 feedback is off", "Couldn't connect F8 to the agents. Restart the HUD to bring it back.", $"[Work] registering {WorkListMethodName} / {HighlightForMethodName} on PluginBridge failed: {ex.Message}"); }
+        try { PubRegister(); } catch (Exception ex) { ToastFault("f8-register", "F8 feedback is off", "F8 can't reach the agents. Restart the HUD to bring it back.", $"[PubSub] registering {PublishMethodName} / {SubscribeMethodName} on PluginBridge failed: {ex.Message}", "warn"); }
+        try { WorkRegister(); } catch (Exception ex) { ToastFault("f8-register", "F8 feedback is off", "F8 can't reach the agents. Restart the HUD to bring it back.", $"[Work] registering {WorkListMethodName} / {HighlightForMethodName} on PluginBridge failed: {ex.Message}", "warn"); }
 
         return true;
     }
@@ -115,7 +115,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         }
         catch (Exception ex)
         {
-            ToastFault("tcp-start", "Agents can't connect", "The AI bridge couldn't start. Restart the HUD to fix it.", $"[TCP] Failed to start server: {ex.Message}");
+            ToastFault("tcp-start", "Agents can't connect", "The agent link didn't start. Restart the HUD to fix it.", $"[TCP] Failed to start server: {ex.Message}");
         }
     }
 
