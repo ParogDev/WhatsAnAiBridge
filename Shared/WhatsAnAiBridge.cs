@@ -124,6 +124,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         InstrEndWhere(_ => true, "cut: the HUD is closing");
         InstrStopTimer();
         StopWatchdog();
+        HudLogStop();   // the repeat-count timer (HudLog.cs)
         PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
         WorkClose();  // and AIBridge.WorkList / AIBridge.HighlightFor (Work.cs)
         _tcpServer?.Dispose();
@@ -139,6 +140,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         InstrEndWhere(_ => true, "cut: the bridge is reloading");
         InstrStopTimer();
         StopWatchdog();
+        HudLogStop();   // the repeat-count timer (HudLog.cs)
         PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
         WorkClose();  // and AIBridge.WorkList / AIBridge.HighlightFor (Work.cs)
         _tcpServer?.Dispose();

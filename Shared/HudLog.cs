@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 
 namespace WhatsAnAiBridge;
 
@@ -11,31 +12,36 @@ namespace WhatsAnAiBridge;
 ///   - <see cref="LogQuiet"/>: routine diagnostics (connections, thread hand-overs, reloads that worked and their
 ///     warnings). HUD log file only, at Information; agents read it with MCP hud_log. Never drawn.
 ///   - <see cref="LogFault"/>: something broke. HUD log file at Error, full text (stack traces included), so hud_log
-///     level=error and hud_plugins' runtime error counts still find it (fail at the broken link). The same fault again
-///     within <see cref="FaultRepeatSec"/> (a per-frame exception) is counted and its count written with the next one,
-///     as DebugWindow collapsed repeats while a line was up. Never drawn.
+///     level=error and hud_plugins' runtime error counts still find it (fail at the broken link). A key is written at
+///     most once per <see cref="FaultRepeatSec"/>; repeats inside that window (a per-frame exception) are counted and
+///     a 1 s timer writes "(N more in the last 5 s)" with the last text once the window closes, so a burst that stops
+///     still reports its size. Never drawn.
 ///   - <see cref="ToastFault"/>: a fault the player should notice (agents can't reach the HUD, F8 feedback is off):
 ///     <see cref="LogFault"/> plus one toast on the guide card's toast stack, once per load and key.
 /// The file is written through the HUD's own Serilog logger (Core.Logger, the one DebugWindow writes to), found by
 /// reflection so the bridge needs no Serilog reference (the CI reference set has none). While that logger is not set
-/// yet (not now) a message falls back to the old on-screen line; when the link is broken (no such member, a write
-/// throws) the same fallback applies and the break is named once: nothing is swallowed.
+/// yet (not now) a message falls back to the old on-screen line. A missing member is broken for good; a write that
+/// throws (a sink mid-rotation) falls back for <see cref="FileRetrySec"/> and then tries again. Either break is named
+/// once on screen: nothing is swallowed. Lines only reach the file when Core.Logger lets Information through (both
+/// HUDs' loggers do, at Verbose).
 /// </summary>
 public partial class WhatsAnAiBridge
 {
-    private const double FaultRepeatSec = 5;
-    private const int FaultKeysMax = 256;
+    private const double FaultRepeatSec = 5, FileRetrySec = 30;
     private const string LogPrefix = "[Whats An AI Bridge] ";
 
     private static readonly object FileLogLock = new();
     private static object? _fileLogger;
     private static MethodInfo? _fileInfo, _fileError;
-    private static string? _fileLogBroken;
+    private static string? _fileLogBroken;        // why the file can't be written now (null = fine or not set yet)
+    private static bool _fileLogPermanent;        // the break is a missing member: never retried
+    private static DateTime _fileRetryAt;
     private static bool _fileLogBrokenShown;
 
     private readonly object _faultLock = new();
-    private readonly Dictionary<string, (DateTime at, int skipped)> _faultSeen = new();
+    private readonly Dictionary<string, (DateTime at, int skipped, string last)> _faultSeen = new();
     private readonly HashSet<string> _faultToasted = new();
+    private Timer? _faultFlushTimer;
 
     /// <summary>Routine diagnostics: the HUD log file only (hud_log), never the player's screen.</summary>
     internal void LogQuiet(string msg)
@@ -46,28 +52,67 @@ public partial class WhatsAnAiBridge
     /// <summary>
     /// Something broke: the HUD log file at Error (hud_log level=error), full text, never the player's screen.
     /// <paramref name="key"/> groups repeats (default: the message; pass a stable key when the text carries ids or
-    /// ports); a repeat within <see cref="FaultRepeatSec"/> is counted and reported with the next one written.
+    /// ports). See the class summary for how repeats are counted.
     /// </summary>
     internal void LogFault(string msg, string? key = null)
     {
         key ??= msg;
         var now = DateTime.UtcNow;
-        int skipped;
         lock (_faultLock)
         {
             if (_faultSeen.TryGetValue(key, out var seen) && (now - seen.at).TotalSeconds < FaultRepeatSec)
             {
-                _faultSeen[key] = (seen.at, seen.skipped + 1);
+                _faultSeen[key] = (seen.at, seen.skipped + 1, msg);
                 return;
             }
-            skipped = seen.skipped;
-            if (_faultSeen.Count >= FaultKeysMax)   // keys are message texts: drop the expired ones, never the live ones
-                foreach (var k in _faultSeen.Where(kv => (now - kv.Value.at).TotalSeconds >= FaultRepeatSec).Select(kv => kv.Key).ToList())
-                    _faultSeen.Remove(k);
-            _faultSeen[key] = (now, 0);
+            _faultSeen[key] = (now, 0, msg);
+            _faultFlushTimer ??= new Timer(_ => FlushFaultRepeats(), null, 1000, 1000);
         }
-        var text = skipped > 0 ? $"{msg} (after {skipped} more like it within {FaultRepeatSec:0} s of the previous one)" : msg;
-        if (!WriteLogFile(true, LogPrefix + text)) LogError(text);
+        if (!WriteLogFile(true, LogPrefix + msg)) LogError(msg);
+    }
+
+    /// <summary>Every second: write the count of repeats whose window closed, and forget closed windows.</summary>
+    private void FlushFaultRepeats()
+    {
+        try
+        {
+            List<(int n, string last)>? due = null;
+            var now = DateTime.UtcNow;
+            lock (_faultLock)
+            {
+                if (_faultSeen.Count == 0) return;
+                foreach (var k in _faultSeen.Keys.ToList())
+                {
+                    var e = _faultSeen[k];
+                    if ((now - e.at).TotalSeconds < FaultRepeatSec) continue;
+                    if (e.skipped > 0) (due ??= new()).Add((e.skipped, e.last));
+                    _faultSeen.Remove(k);
+                }
+            }
+            if (due == null) return;
+            foreach (var (n, last) in due)
+            {
+                var text = $"({n} more in the last {FaultRepeatSec:0} s) {last}";
+                if (!WriteLogFile(true, LogPrefix + text)) LogError(text);
+            }
+        }
+        catch { /* a timer thread must never throw; the faults themselves were written when they began */ }
+    }
+
+    /// <summary>OnClose: stop the repeat flush (the timer would keep an unloaded bridge alive).</summary>
+    private void HudLogStop()
+    {
+        Timer? t;
+        lock (_faultLock) { t = _faultFlushTimer; _faultFlushTimer = null; }
+        t?.Dispose();
+        FlushFaultRepeatsNow();
+    }
+
+    private void FlushFaultRepeatsNow()
+    {
+        lock (_faultLock)
+            foreach (var k in _faultSeen.Keys.ToList()) _faultSeen[k] = (DateTime.MinValue, _faultSeen[k].skipped, _faultSeen[k].last);
+        FlushFaultRepeats();
     }
 
     /// <summary>
@@ -100,9 +145,16 @@ public partial class WhatsAnAiBridge
     {
         object? logger;
         MethodInfo? write;
+        string? recovered = null;
         lock (FileLogLock)
         {
-            if (_fileLogger == null && _fileLogBroken == null) BindFileLogger();
+            if (_fileLogger == null && (_fileLogBroken == null || (!_fileLogPermanent && DateTime.UtcNow >= _fileRetryAt)))
+            {
+                var was = _fileLogBroken;
+                _fileLogBroken = null;
+                BindFileLogger();
+                if (was != null && _fileLogger != null) recovered = was;
+            }
             logger = _fileLogger;
             write = error ? _fileError : _fileInfo;
         }
@@ -111,13 +163,20 @@ public partial class WhatsAnAiBridge
             try
             {
                 // Template "{M:l}" with the text as its value: braces in the text are never parsed as a template.
+                if (recovered != null)
+                    _fileInfo!.Invoke(logger, new object[] { "{M:l}", new object[] { $"{LogPrefix}[Log] the HUD log file works again (it failed: {recovered})" } });
                 write.Invoke(logger, new object[] { "{M:l}", new object[] { text } });
                 return true;
             }
             catch (Exception ex)
             {
                 var inner = ex is TargetInvocationException { InnerException: { } ie } ? ie : ex;
-                lock (FileLogLock) { _fileLogBroken = $"writing to Core.Logger: {inner.GetType().Name}: {inner.Message}"; _fileLogger = null; }
+                lock (FileLogLock)
+                {
+                    _fileLogBroken = $"writing to Core.Logger: {inner.GetType().Name}: {inner.Message}";
+                    _fileLogger = null;
+                    _fileRetryAt = DateTime.UtcNow.AddSeconds(FileRetrySec);
+                }
             }
         }
         string? broken;
@@ -127,16 +186,17 @@ public partial class WhatsAnAiBridge
             if (broken == null || _fileLogBrokenShown) return false;   // not set yet (not now), or already named
             _fileLogBrokenShown = true;
         }
-        LogError($"[Log] the HUD log file can't be written ({broken}): bridge messages go to the screen instead");
+        LogError($"[Log] the HUD log file can't be written ({broken}): bridge messages go to the screen instead"
+            + (_fileLogPermanent ? "" : $", retried every {FileRetrySec:0} s"));
         return false;
     }
 
-    /// <summary>Find Core.Logger and its Information / Error(string, object[]). Sets _fileLogBroken naming the link
-    /// when one is missing; leaves everything null while the logger is just not set yet.</summary>
+    /// <summary>Find Core.Logger and its Information / Error(string, object[]). Sets _fileLogBroken (permanent) naming
+    /// the link when one is missing; leaves everything null while the logger is just not set yet.</summary>
     private static void BindFileLogger()
     {
         var prop = typeof(Core).GetProperties(BindingFlags.Public | BindingFlags.Static).FirstOrDefault(p => p.Name == "Logger");
-        if (prop == null) { _fileLogBroken = "Core.Logger: no such public static property in this HUD build"; return; }
+        if (prop == null) { _fileLogBroken = "Core.Logger: no such public static property in this HUD build"; _fileLogPermanent = true; return; }
         var logger = prop.GetValue(null);
         if (logger == null) return;
         var args = new[] { typeof(string), typeof(object[]) };
@@ -147,7 +207,12 @@ public partial class WhatsAnAiBridge
             info ??= t.GetMethod("Information", args);
             err ??= t.GetMethod("Error", args);
         }
-        if (info == null || err == null) { _fileLogBroken = $"{prop.PropertyType.FullName}: no Information/Error(string, object[])"; return; }
+        if (info == null || err == null)
+        {
+            _fileLogBroken = $"{prop.PropertyType.FullName}: no Information/Error(string, object[])";
+            _fileLogPermanent = true;
+            return;
+        }
         _fileInfo = info;
         _fileError = err;
         _fileLogger = logger;
