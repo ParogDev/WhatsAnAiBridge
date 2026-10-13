@@ -202,6 +202,10 @@ internal static class HudLinks
     private static Type? Loaded(string assembly, string type) =>
         AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == assembly)?.GetType(type);
 
+    /// <summary>The compile-time type of a GameController member (the lambda is never run): no lookup by name, so
+    /// it holds on PoE2, whose GameController.PluginBridge isn't found by GetProperty.</summary>
+    private static Type DeclaredTypeOf<T>(Func<GameController, T> member) => typeof(T);
+
     private static Type? ElementOf(HudLink link) => link.Field?.FieldType is { IsArray: true } a ? a.GetElementType() : null;
 
     // ── HUD memory backend (RawMemory.cs, PipelineTrace.cs) ──
@@ -228,7 +232,7 @@ internal static class HudLinks
 
     internal static readonly HudLink BridgeMethods = new("hud.plugin_bridge_methods", "plugin_bridge_methods / plugin_bridge_call, stale-method cleanup after reloads",
         "PluginBridge", "_methods", LinkKind.Field, BindingFlags.Instance | BindingFlags.NonPublic,
-        () => typeof(GameController).GetProperty("PluginBridge")?.PropertyType, valueType: typeof(IDictionary),
+        () => DeclaredTypeOf(g => g.PluginBridge), valueType: typeof(IDictionary),
         notNow: () => Core.Current?.GameController?.PluginBridge == null ? "GameController.PluginBridge is not created yet" : null);
 
     internal static readonly HudLink CoreLogger = new("hud.core_logger", "bridge lines in the HUD log file (HudLog)",
