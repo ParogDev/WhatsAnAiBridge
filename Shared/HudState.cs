@@ -118,6 +118,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 _hsLoadTs = 0;
                 _hsAreaHash = null;
                 Volatile.Write(ref _hsClosed, false);
+                Volatile.Write(ref _hsCloseDone, 0);
                 _hsDirtyVer++;
             }
             HudStateWrite();
@@ -191,6 +192,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 ev = new HudPhaseEvent { Phase = phase, Prev = _hs.PrevPhase, Since = now, InGame = _hs.InGame, Area = _hs.Area };
             }
             // The timer is stopped: nothing retries after this, so a failed final write gets one more try, then is logged.
+            _hsWriteError = null;   // judge only this write (a tick's earlier failure is not the final write's)
             HudStateWrite(final: true);
             if (_hsWriteError != null) { Thread.Sleep(50); HudStateWrite(final: true); }
             if (_hsWriteError != null) LogFault($"[HudState] close: the final {phase} write failed, hud-state.json keeps the last live phase: {_hsWriteError}");
@@ -215,6 +217,9 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
         try
         {
             var frames = new StackTrace(1, false).GetFrames();
+            // Shutdown wins wherever it is in the stack (a Reload* helper called under CloseAllPlugins is still a shutdown).
+            foreach (var f in frames)
+                if (f.GetMethod() is { Name: "CloseAllPlugins" } cm && cm.DeclaringType?.Name == "PluginManager") { via = "PluginManager.CloseAllPlugins"; return false; }
             var seen = new List<string>();
             foreach (var f in frames)
             {
