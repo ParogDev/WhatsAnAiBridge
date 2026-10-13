@@ -312,7 +312,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessTraceMethod(method, parameters) ?? ProcessTrackerMethod(method, parameters)
                          ?? ProcessLayoutMethod(method, parameters) ?? ProcessMotionMethod(method, parameters)
                          ?? ProcessLabMethod(method, parameters) ?? ProcessProfileMethod(method, parameters)
-                         ?? ProcessSelfPerfMethod(method, parameters) ?? ProcessGcPoolMethod(method, parameters) ?? ProcessPreflightMethod(method, parameters)
+                         ?? ProcessSelfPerfMethod(method, parameters) ?? ProcessGcPoolMethod(method, parameters) ?? ProcessPreflightMethod(method, parameters) ?? ProcessContractMethod(method, parameters)
                          ?? ProcessSettingsMethod(method, parameters) ?? ProcessFocusMethod(method, parameters)
                          ?? ProcessSessionMethod(method, parameters) ?? ProcessInstrumentMethod(method, parameters)
                          ?? ProcessPubSubMethod(method, parameters);
@@ -564,6 +564,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             InGame = GameController.InGame,
             Unsupported = UnsupportedFeatures.ToList(),
             Reflection = PreflightSummary(),
+            Contract = ContractSchema.Summary(),
         };
     }
 
