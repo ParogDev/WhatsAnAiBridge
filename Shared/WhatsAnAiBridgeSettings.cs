@@ -97,9 +97,11 @@ public class WhatsAnAiBridgeSettings : ISettings
 
     // Player-stats view state shared with the MCP App / agents (pins, filter, selection, sort).
     // Persisted here so it survives HUD restarts; Rev keeps increasing across restarts.
-    // In game only its PanelOpen flag is a row (a Custom row in WhatsAnAiBridgeSettingsUi, through the view's mutator).
+    // In game only its PanelOpen flag is a row (a Custom row in WhatsAnAiBridgeSettingsUi, through the view's mutator:
+    // SettingsMenu draws a registered Custom row even under [IgnoreMenu]). [IgnoreMenu] keeps the HUD's own settings
+    // parser from logging "StatsUiState is not a supported settings element" at every load.
     [Menu("Player stats panel", "In-game panel of the shared stats view: pins, filter and selection sync with the Claude app.")]
-    [MenuTab("Stats panel")]
+    [MenuTab("Stats panel"), IgnoreMenu]
     public StatsUiState StatsUi { get; set; } = new();
 
     // In-HUD stats panel (Shared\StatsPanel.cs): panel-only preferences, not part of the shared view.
