@@ -330,18 +330,33 @@ internal static class MemberIndex
     private static readonly object _typeIndexLock = new();
 
     /// <summary>
-    /// Rebuilds the type index when the process has loaded assemblies since it was built (a miss may be a type from
-    /// one of them). True when it was rebuilt. Costs one GetAssemblies() call when nothing changed.
+    /// Rebuilds the type index when indexable (non-collectible, non-dynamic) assemblies were loaded since it was built:
+    /// a miss may be a type from one of them. True when it was rebuilt. Checks at most once per 5 s, so repeated
+    /// misses (a typo, a plugin-only name) cost nothing; plugin reloads and Reflection.Emit don't trigger a rebuild.
     /// </summary>
     internal static bool RefreshTypes()
     {
-        var count = AppDomain.CurrentDomain.GetAssemblies().Length;
+        var now = Environment.TickCount64;
+        var last = Interlocked.Read(ref _lastRefreshCheck);
+        if (now - last < 5000 || Interlocked.CompareExchange(ref _lastRefreshCheck, now, last) != last) return false;
+        var count = IndexableCount(AppDomain.CurrentDomain.GetAssemblies());
         lock (_typeIndexLock)
         {
             if (_typeIndex != null && _typeIndex.AssemblyCount == count) return false;
             _typeIndex = new TypeIndex();
             return true;
         }
+    }
+
+    private static long _lastRefreshCheck = long.MinValue / 2;
+
+    private static bool Indexable(Assembly a) => !a.IsCollectible && !a.IsDynamic;
+
+    private static int IndexableCount(Assembly[] assemblies)
+    {
+        var n = 0;
+        foreach (var a in assemblies) if (Indexable(a)) n++;
+        return n;
     }
 
     internal sealed class TypeIndex
@@ -353,8 +368,10 @@ internal static class MemberIndex
         public readonly IReadOnlyList<string> Partial;
         public readonly int TypeCount;
         public readonly long BuildMs;
-        /// <summary>Assemblies loaded in the process when it was built (collectible ones included).</summary>
+        /// <summary>Indexable (non-collectible, non-dynamic) assemblies when it was built.</summary>
         public readonly int AssemblyCount;
+        /// <summary>Which build this is (1 = the first; a later one followed new assemblies).</summary>
+        public readonly int Build;
 
         internal TypeIndex()
         {
@@ -363,13 +380,13 @@ internal static class MemberIndex
             var simple = new Dictionary<string, List<Type>>(StringComparer.OrdinalIgnoreCase);
             var partial = new List<string>();
             var count = 0;
-            Interlocked.Increment(ref _typeIndexBuilds);
+            Build = Interlocked.Increment(ref _typeIndexBuilds);
             var assemblies = AppDomain.CurrentDomain.GetAssemblies();
-            AssemblyCount = assemblies.Length;
+            AssemblyCount = IndexableCount(assemblies);
             foreach (var asm in assemblies)
             {
                 // Collectible = a plugin's load context (this bridge included): indexing it would keep it alive after a reload.
-                if (asm.IsCollectible || asm.IsDynamic) continue;
+                if (!Indexable(asm)) continue;
                 Type?[] types;
                 try { types = asm.GetTypes(); }
                 catch (ReflectionTypeLoadException ex)

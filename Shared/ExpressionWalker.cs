@@ -235,7 +235,11 @@ public class ExpressionWalker
             var compType = ResolveComponentType(seg.GenericArg);
             if (compType == null)
             {
-                error = $"Could not resolve component type '{seg.GenericArg}' (looked in ExileCore*/GameOffsets* types of the HUD's own assemblies, not plugins')";
+                var ti = MemberIndex.Types;
+                var other = ti.Candidates(seg.GenericArg).Length;   // same name outside the HUD namespaces
+                error = $"Could not resolve component type '{seg.GenericArg}' (looked in ExileCore*/GameOffsets* types of the HUD's own "
+                        + $"{ti.AssemblyCount} assemblies, type index build {ti.Build}; plugin assemblies are not indexed"
+                        + (other > 0 ? $"; {other} type(s) of that name exist outside those namespaces" : "") + ")";
                 return null;
             }
 

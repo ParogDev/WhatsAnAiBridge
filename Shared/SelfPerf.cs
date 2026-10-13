@@ -24,7 +24,9 @@ public partial class WhatsAnAiBridge
     // one at a time under _requestLock. Key: the method, "query:<type>" for queries (eval, describe, entities...).
     private readonly Dictionary<string, long[]> _selfRequests = new(StringComparer.Ordinal);
 
-    private void SelfRequest(string method, JToken? p, (long t, long a) s)
+    private string? _selfRequestsBroken;   // why request accounting failed last (self_perf "requestsBroken")
+
+    private void SelfRequest(string method, JToken? p, (long t, long a) s, bool failed)
     {
         try
         {
@@ -41,11 +43,12 @@ public partial class WhatsAnAiBridge
             {
                 // Keys come from callers: past 64 kinds (nobody polled self_perf), the rest count as "other".
                 if (!_selfRequests.ContainsKey(key) && _selfRequests.Count >= 64) key = "other";
-                if (!_selfRequests.TryGetValue(key, out var row)) _selfRequests[key] = row = new long[3];
+                if (!_selfRequests.TryGetValue(key, out var row)) _selfRequests[key] = row = new long[4];
                 row[0]++; row[1] += ticks; row[2] += bytes;
+                if (failed) row[3]++;
             }
         }
-        catch { }   // accounting must never fail a request
+        catch (Exception ex) { _selfRequestsBroken = $"{method}: {ex.GetType().Name}: {ex.Message}"; }   // never fails a request; named in self_perf
     }
 
     private void SelfEnd(int step, (long t, long a) s)
@@ -77,15 +80,22 @@ public partial class WhatsAnAiBridge
         };
         lock (_selfRequests)
         {
-            // Bridge requests since the previous call (outside the per-frame steps): calls, average us and bytes per call.
-            o["requests"] = new JObject(_selfRequests.OrderByDescending(kv => kv.Value[1]).Select(kv => new JProperty(kv.Key, new JObject
+            // Bridge requests since the previous call (outside the per-frame steps): calls (those that threw counted in
+            // errors, their time included), average us and bytes per call.
+            o["requests"] = new JObject(_selfRequests.OrderByDescending(kv => kv.Value[1]).Select(kv =>
             {
-                ["calls"] = kv.Value[0],
-                ["usPerCall"] = Math.Round(kv.Value[1] * 1e6 / Stopwatch.Frequency / kv.Value[0], 1),
-                ["bytesPerCall"] = kv.Value[2] / kv.Value[0],
-            })));
+                var r = new JObject
+                {
+                    ["calls"] = kv.Value[0],
+                    ["usPerCall"] = Math.Round(kv.Value[1] * 1e6 / Stopwatch.Frequency / kv.Value[0], 1),
+                    ["bytesPerCall"] = kv.Value[2] / kv.Value[0],
+                };
+                if (kv.Value[3] > 0) r["errors"] = kv.Value[3];
+                return new JProperty(kv.Key, r);
+            }));
             _selfRequests.Clear();
         }
+        if (_selfRequestsBroken != null) o["requestsBroken"] = _selfRequestsBroken;
         o["memberIndex"] = MemberIndex.Status();   // the reflection core (MemberIndex.cs): compiled getters, failures, type index
         Array.Clear(_selfTicks); Array.Clear(_selfBytes); _selfFrames = 0; _selfSince = Stopwatch.GetTimestamp();
         return o.ToString(Newtonsoft.Json.Formatting.None);
