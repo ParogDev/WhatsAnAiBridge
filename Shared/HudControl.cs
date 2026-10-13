@@ -367,7 +367,7 @@ public partial class WhatsAnAiBridge
         ObsHud(new JObject { ["cause"] = "reload", ["plugin"] = r.Folder, ["ok"] = result.Ok, ["durationMs"] = result.DurationMs });
         if (result.Ok == true) LogQuiet($"[Reload] {r.Folder} recompiled, reloaded and initialised in {result.DurationMs} ms (requested over the bridge)");
         else LogFault($"[Reload] {r.Folder} failed: {result.Message ?? result.Error}");
-        foreach (var w in result.Warnings) LogFault($"[Reload] {r.Folder}: {w}");
+        foreach (var w in result.Warnings) LogQuiet($"[Reload] {r.Folder} warning: {w}");   // also in the reload result
     }
 
     /// <summary>PluginBridge entries whose delegate lives in one of these plugin assemblies while no loaded plugin uses it.</summary>
