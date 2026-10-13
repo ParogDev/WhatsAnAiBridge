@@ -79,11 +79,19 @@ internal sealed class SettingsMenu
     /// <summary>Hint in the filter box.</summary>
     public string FilterHint { get; set; } = "Filter settings...";
 
-    // Bridge copy: the template's DebugWindow.LogError calls go here instead (the bridge never writes the HUD's
-    // top-left lines, see Shared\HudLog.cs); the plugin points it at LogFault. Shared files also take the HUD
+    // Bridge copy: the template's DebugWindow.LogError calls go to the sink this menu was built with instead (the
+    // bridge never writes the HUD's top-left lines, see Shared\HudLog.cs; the plugin passes LogFault). Owned by the
+    // instance, so it lives and dies with the plugin load that built the menu. Shared files also take the HUD
     // namespaces from the per-game GlobalUsings, so the template's `using <HUD>...` lines are dropped.
-    public static Action<string>? FaultSink { get; set; }
-    private static void Fault(string message) => FaultSink?.Invoke(message);
+    private readonly Action<string>? _fault;
+    private void Fault(string message) => _fault?.Invoke(message);
+
+    /// <param name="fault">Where faults go (the template writes DebugWindow.LogError); null drops them.</param>
+    public SettingsMenu(Action<string>? fault = null)
+    {
+        _fault = fault;
+        if (PackColorError != null) Fault(PackColorError);   // the static build ran before any menu (and sink) existed
+    }
 
     private readonly List<(string name, Action body, bool first)> _customTabs = new();
     private readonly Dictionary<string, Action> _custom = new(StringComparer.Ordinal);
@@ -1421,7 +1429,7 @@ internal sealed class SettingsMenu
 
     private static object? ValueOf(object node) => Accessor(node.GetType())?.get(node);
 
-    private static void SetValue(object node, object? value)
+    private void SetValue(object node, object? value)
     {
         var a = Accessor(node.GetType());
         if (a?.set == null || value == null) return;
@@ -1516,6 +1524,7 @@ internal sealed class SettingsMenu
     /// different Color in the other, so R/G/B/A are read as property or field by name. Null when the type has no
     /// such members (then colours never show "changed").</summary>
     private static readonly Func<object, uint>? PackColor = BuildPackColor();
+    private static string? PackColorError;   // no initializer: BuildPackColor (PackColor's initializer) sets it
 
     private static Func<object, uint>? BuildPackColor()
     {
@@ -1549,7 +1558,7 @@ internal sealed class SettingsMenu
         }
         catch (Exception ex)
         {
-            Fault($"[SettingsMenu] ColorNode.Value has no R/G/B/A to compare ({ex.GetType().Name}: {ex.Message}): colour rows never show changed-from-default");
+            PackColorError = $"[SettingsMenu] ColorNode.Value has no R/G/B/A to compare ({ex.GetType().Name}: {ex.Message}): colour rows never show changed-from-default";
             return null;
         }
     }

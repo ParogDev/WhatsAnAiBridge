@@ -18,12 +18,19 @@ namespace WhatsAnAiBridge;
 internal sealed class SettingPermissionAttribute : Attribute { }
 
 /// <summary>
+/// Marks a settings property settings.describe leaves out (panel-own state or a legacy key kept for old saves, which the
+/// control center and hud_settings should not offer as a setting); settings.set still reaches it by path. Matched by type
+/// name like [SettingPermission]. The HUD's [IgnoreMenu] alone does not hide a node from describe.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
+internal sealed class HiddenFromDescribeAttribute : Attribute { }
+
+/// <summary>
 /// Settings of every loaded plugin, described and changed by reflection: no per-plugin code. A node is recognised by
 /// shape (ToggleNode, RangeNode&lt;T&gt;, TextNode, ListNode, ColorNode, HotkeyNode*, ButtonNode); labels and tooltips
 /// come from the HUD's own [Menu] attribute, the group from a nested settings object's label, else from the property's
 /// [MenuTab] (the SettingsMenu renderer's tab), [SettingPermission] marks a permission setting and [MenuReadOnly] a
-/// read-only one, and a property with the HUD's [IgnoreMenu] (hidden in game: legacy or panel-own state) is left out
-/// of describe too (settings.set still reaches it by path); the bridge's own settings use the same attributes
+/// read-only one, and [HiddenFromDescribe] leaves a property out of describe (settings.set still reaches it by path); the bridge's own settings use the same attributes
 /// (Shared\WhatsAnAiBridgeSettings.cs). The
 /// renderer's attributes are copied per plugin, so they are matched by type name, never by type.
 ///   settings.describe {plugin?}                        -> {game, plugins: [{plugin, enabled, settings: [node]}]}
@@ -86,7 +93,7 @@ public partial class WhatsAnAiBridge
             if (v == null) continue;
             var path = prefix + prop.Name;
             var menu = MenuOf(prop.Property!);
-            if (menu.Ignore) continue;   // [IgnoreMenu]: hidden in game (legacy or panel-own state), so not offered as a setting either
+            if (menu.Hidden) continue;   // [HiddenFromDescribe]: not offered as a setting
             if (IsNode(v.GetType()))
             {
                 into.Add(Describe(prop.Name, path, v, group ?? menu.Tab, menu));
@@ -120,7 +127,7 @@ public partial class WhatsAnAiBridge
     private static string BaseName(Type t) => t.Name.Contains('`') ? t.Name[..t.Name.IndexOf('`')] : t.Name;
 
     /// <summary>What a settings property's attributes say about it: label and description, tab, permission, read-only.</summary>
-    private readonly record struct MenuInfo(string? Name, string? Tooltip, string? Tab, bool Permission, bool ReadOnly, string? ReadOnlyNote, bool Ignore);
+    private readonly record struct MenuInfo(string? Name, string? Tooltip, string? Tab, bool Permission, bool ReadOnly, string? ReadOnlyNote, bool Hidden);
 
     /// <summary>
     /// The attributes on a settings property, by type name: the HUD's [Menu(name, tooltip)] (MenuName / Tooltip on both
@@ -130,7 +137,7 @@ public partial class WhatsAnAiBridge
     private static MenuInfo MenuOf(PropertyInfo p)
     {
         string? name = null, tooltip = null, tab = null, roNote = null;
-        bool permission = false, readOnly = false, ignore = false;
+        bool permission = false, readOnly = false, hidden = false;
         foreach (var a in p.GetCustomAttributes(true))
         {
             switch (a.GetType().Name)
@@ -142,10 +149,10 @@ public partial class WhatsAnAiBridge
                 case "MenuTabAttribute": tab = MemberIndex.TryGet(a, "Tab") as string; break;
                 case "MenuReadOnlyAttribute": readOnly = true; roNote = MemberIndex.TryGet(a, "Note") as string; break;
                 case "SettingPermissionAttribute": permission = true; break;
-                case "IgnoreMenuAttribute": ignore = true; break;
+                case "HiddenFromDescribeAttribute": hidden = true; break;
             }
         }
-        return new MenuInfo(name, string.IsNullOrWhiteSpace(tooltip) ? null : tooltip, string.IsNullOrWhiteSpace(tab) ? null : tab.Trim(), permission, readOnly, roNote, ignore);
+        return new MenuInfo(name, string.IsNullOrWhiteSpace(tooltip) ? null : tooltip, string.IsNullOrWhiteSpace(tab) ? null : tab.Trim(), permission, readOnly, roNote, hidden);
     }
 
     private static string Words(string name) => System.Text.RegularExpressions.Regex.Replace(name, "(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ");

@@ -30,8 +30,8 @@ public class WhatsAnAiBridgeSettingsUi
     private string _bridgeDir = "";
 
     // Saved recordings, listed at most every 2 s (the old panel listed the folder every frame); strings formatted then.
-    private (string name, string size, string written)[] _recordings = [];
-    private string? _recordingsNote;
+    private volatile RecordingsListing? _recordingsList;   // set by the pool listing, read by the draw
+    private int _recordingsBusy;
     private DateTime _recordingsAt;
 
     // Recent-query rows, formatted once per log change (count + newest entry), not per frame.
@@ -46,9 +46,10 @@ public class WhatsAnAiBridgeSettingsUi
     /// </summary>
     public Action<bool>? SetStatsPanelOpen { get; set; }
 
-    public WhatsAnAiBridgeSettingsUi()
+    /// <param name="fault">Where the menu reports faults (the plugin passes LogFault).</param>
+    public WhatsAnAiBridgeSettingsUi(Action<string>? fault)
     {
-        _menu = new SettingsMenu { Accent = Accent, RootTabName = "Bridge" }
+        _menu = new SettingsMenu(fault) { Accent = Accent, RootTabName = "Bridge" }
             .Tab("Bridge", DrawStatus, first: true)
             .Tab("Recording", DrawRecording, first: true)
             .Tab("Queries", DrawQueries)
@@ -122,8 +123,10 @@ public class WhatsAnAiBridgeSettingsUi
 
         _menu.SectionHeader("Saved recordings", "Files in <bridge folder>\\recordings (record:start / record:stop).");
         RefreshRecordings();
-        if (_recordingsNote != null) SettingsMenu.Dim(_recordingsNote);
-        foreach (var (name, size, written) in _recordings)
+        var listing = _recordingsList;
+        if (listing == null) SettingsMenu.Dim("Listing the recordings folder...");
+        else if (listing.Note != null) SettingsMenu.Dim(listing.Note);
+        foreach (var (name, size, written) in listing?.Rows ?? [])
         {
             SettingsMenu.Text(Accent, name);
             ImGui.SameLine(Math.Max(ValueColumn + 60f, ImGui.GetContentRegionAvail().X * 0.55f));
@@ -134,22 +137,43 @@ public class WhatsAnAiBridgeSettingsUi
         ImGui.Spacing();
     }
 
+    /// <summary>
+    /// Starts a listing of the recordings folder on a pool thread at most every 2 s (never on the render thread: a large
+    /// or slow folder would stall the frame); the draw reads the last finished listing, newest 50 files.
+    /// </summary>
     private void RefreshRecordings()
     {
         if (DateTime.UtcNow - _recordingsAt < TimeSpan.FromSeconds(2)) return;
+        if (System.Threading.Interlocked.CompareExchange(ref _recordingsBusy, 1, 0) != 0) return;
         _recordingsAt = DateTime.UtcNow;
+        // The folder the recorder writes (record:start in ProcessRecordingCommand: Path.Combine(_bridgeDir, "recordings")).
+        var dir = Path.Combine(_bridgeDir, "recordings");
+        System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { _recordingsList = ListRecordings(dir); }
+            finally { System.Threading.Volatile.Write(ref _recordingsBusy, 0); }
+        });
+    }
+
+    private const int RecordingsShown = 50;
+
+    private static RecordingsListing ListRecordings(string dir)
+    {
         try
         {
-            // The folder the recorder writes (record:start in ProcessRecordingCommand: Path.Combine(_bridgeDir, "recordings")).
-            var dir = Path.Combine(_bridgeDir, "recordings");
-            if (!Directory.Exists(dir)) { _recordings = []; _recordingsNote = $"No recordings folder yet ({Path.GetFullPath(dir)})."; return; }
-            _recordings = Directory.GetFiles(dir, "*.jsonl").OrderByDescending(f => f)
+            if (!Directory.Exists(dir)) return new([], $"No recordings folder yet ({Path.GetFullPath(dir)}).");
+            var files = Directory.GetFiles(dir, "*.jsonl");
+            var rows = files.OrderByDescending(f => f, StringComparer.OrdinalIgnoreCase).Take(RecordingsShown)
                 .Select(f => new FileInfo(f))
                 .Select(fi => (fi.Name, FormatBytes(fi.Length), fi.LastWriteTime.ToString("yyyy-MM-dd HH:mm"))).ToArray();
-            _recordingsNote = _recordings.Length == 0 ? "No recordings yet. Use record:start to begin." : null;
+            string? note = files.Length == 0 ? "No recordings yet. Use record:start to begin."
+                : files.Length > RecordingsShown ? $"Newest {RecordingsShown} of {files.Length} (recording:list has them all)." : null;
+            return new(rows, note);
         }
-        catch (Exception ex) { _recordings = []; _recordingsNote = $"Can't list the recordings folder: {ex.GetType().Name}: {ex.Message}"; }
+        catch (Exception ex) { return new([], $"Can't list the recordings folder {dir}: {ex.GetType().Name}: {ex.Message}"); }
     }
+
+    private sealed record RecordingsListing((string name, string size, string written)[] Rows, string? Note);
 
     // ---- Stats panel tab: the shared view's PanelOpen flag ----
 

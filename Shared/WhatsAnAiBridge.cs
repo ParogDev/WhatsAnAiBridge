@@ -98,7 +98,6 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             StartTcpServer();
         InstrStartup();   // patches a previous load of the bridge left in this HUD process (Instrumentation.cs)
         try { PubRegister(); } catch (Exception ex) { ToastF8RegisterFailed($"[PubSub] queueing the pub/sub log read failed: {ex.Message}"); }
-        WorkRegister();
         RegisterBridgeExports();
 
         HudStateAfterInit();   // listener-side hud.state, the 4 Hz phase tracker, a user restart adopted from the board (HudState.cs, Outage.cs)
@@ -109,13 +108,28 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
     }
 
     /// <summary>
+    /// The delegate type other plugins pass to GetMethod&lt;T&gt; for each export (README / CLAUDE.md "Plugin pub/sub" and
+    /// "Work items"). A new [BridgeExport] needs its row here, else RegisterBridgeExports names it as unchecked.
+    /// </summary>
+    private static readonly Dictionary<string, Type> BridgeExportTypes = new(StringComparer.Ordinal)
+    {
+        [PublishMethodName] = typeof(Func<string, string, string>),
+        [SubscribeMethodName] = typeof(Func<string, string, Action<string>, string>),
+        [WorkListMethodName] = typeof(Func<string>),
+        [HighlightForMethodName] = typeof(Func<string, string, string>),
+    };
+
+    /// <summary>
     /// The PluginBridge methods other plugins call ([BridgeExport] in PubSub.cs, Work.cs; the registrar is generated at
-    /// compile time). The generated Register saves all four in one call, so it is followed by the lookup each consumer
-    /// does, typed as the consumers type it: every export a consumer's GetMethod&lt;T&gt; would miss (not saved, another
-    /// delegate type, still an earlier load's delegate) is named on its own, whatever happened to the others.
+    /// compile time). The generated Register saves every export in one call, so it is followed by the lookup each
+    /// consumer does, typed as the consumers type it (BridgeExportTypes): every export a consumer's GetMethod&lt;T&gt;
+    /// would miss (not saved, another delegate type, still an earlier load's delegate: the generated accessors bind
+    /// `new Func&lt;...&gt;(self.Method)`, so Target is this load's plugin) is named on its own, whatever happened to the
+    /// others; an export without an expected type is named as unchecked.
     /// </summary>
     private void RegisterBridgeExports()
     {
+        _workClosed = false;   // this load's AIBridge.WorkList / HighlightFor answer again (WorkClose set it on the last close)
         var bridge = GameController.PluginBridge;
         if (bridge == null)
         {
@@ -127,23 +141,22 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         catch (Exception ex) { registerError = $"{ex.GetType().Name}: {ex.Message}"; }
 
         var failed = new List<string>(0);
-        void Check<T>(string name) where T : Delegate
+        foreach (var name in BridgeExports.All)
         {
+            if (!BridgeExportTypes.TryGetValue(name, out var expected)) { failed.Add($"{name} (unchecked: no expected type in BridgeExportTypes)"); continue; }
             object? saved;
             try { saved = bridge.GetMethod<object>(name); }
-            catch (Exception ex) { failed.Add($"{name} (lookup threw {ex.GetType().Name}: {ex.Message})"); return; }
+            catch (Exception ex) { failed.Add($"{name} (lookup threw {ex.GetType().Name}: {ex.Message})"); continue; }
             if (saved == null) failed.Add($"{name} (not saved)");
-            else if (saved is not T typed) failed.Add($"{name} (saved as {saved.GetType().Name}, consumers ask for {typeof(T).Name})");
-            else if (!ReferenceEquals(typed.Target, this)) failed.Add($"{name} (still the delegate of an earlier bridge load)");
+            else if (!expected.IsInstanceOfType(saved)) failed.Add($"{name} (saved as {saved.GetType().Name}, consumers ask for {expected.Name})");
+            else if (!ReferenceEquals(((Delegate)saved).Target, this)) failed.Add($"{name} (still the delegate of an earlier bridge load)");
         }
-        // The types other plugins pass to GetMethod<T> (README / CLAUDE.md "Plugin pub/sub" and "Work items").
-        Check<Func<string, string, string>>(PublishMethodName);
-        Check<Func<string, string, Action<string>?, string>>(SubscribeMethodName);
-        Check<Func<string>>(WorkListMethodName);
-        Check<Func<string, string, string>>(HighlightForMethodName);
+        foreach (var name in BridgeExportTypes.Keys)
+            if (!BridgeExports.All.Contains(name)) failed.Add($"{name} (expected but no [BridgeExport] carries it)");
         if (failed.Count > 0 || registerError != null)
-            ToastF8RegisterFailed($"[PluginBridge] {failed.Count} of 4 exports unusable: {(failed.Count > 0 ? string.Join("; ", failed) : "none")}"
+            ToastF8RegisterFailed($"[PluginBridge] {failed.Count} of {BridgeExports.All.Count} exports unusable: {(failed.Count > 0 ? string.Join("; ", failed) : "none")}"
                 + (registerError != null ? $" (BridgeExports.Register threw {registerError})" : ""));
+        else LogQuiet($"[PluginBridge] {BridgeExports.All.Count} exports registered and checked: {string.Join(", ", BridgeExports.All)}");
     }
 
     private void StartTcpServer()
@@ -174,7 +187,6 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         HudLogStop();   // the repeat-count timer (HudLog.cs)
         PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
         WorkClose();  // and AIBridge.WorkList / AIBridge.HighlightFor (Work.cs)
-        SettingsMenu.FaultSink = null;   // a static holding this load's LogFault; DrawSettings sets it again
         _tcpServer?.Dispose();
         _tcpServer = null;
         RecordingCut("hud_closing");
@@ -192,7 +204,6 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         HudLogStop();   // the repeat-count timer (HudLog.cs)
         PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
         WorkClose();  // and AIBridge.WorkList / AIBridge.HighlightFor (Work.cs)
-        SettingsMenu.FaultSink = null;
         _tcpServer?.Dispose();
         _tcpServer = null;
         RecordingCut("bridge_reload");
@@ -515,9 +526,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void DrawSettings()
     {
-        // Checked every draw, not only when the UI is created: OnClose clears the static so it never pins this load.
-        SettingsMenu.FaultSink ??= msg => LogFault(msg, "settings-menu");   // never the HUD's top-left lines
-        _settingsUi ??= new WhatsAnAiBridgeSettingsUi { SetStatsPanelOpen = open => SetStatsView(null, null, open) };
+        // The menu owns its fault sink (never the HUD's top-left lines): it lives and dies with this load.
+        _settingsUi ??= new WhatsAnAiBridgeSettingsUi(msg => LogFault(msg, "settings-menu")) { SetStatsPanelOpen = open => SetStatsView(null, null, open) };
         _settingsUi.Draw(Settings, _status, _queryLog, _bridgeDir);
     }
 

@@ -235,7 +235,7 @@ public partial class WhatsAnAiBridge
 
     // ── PluginBridge ─────────────────────────────────────────────────
 
-    #pragma warning disable HXB007 // spans the method name (where HXB007 is reported); "AIBridge.*" predates the PluginName.Method convention, other plugins look it up by this string
+    #pragma warning disable HXB007 // legacy AIBridge.* name: see the HXB007 note in WhatsAnAiBridge.csproj
     [BridgeExport(PublishMethodName)]
     private string PubPublishFromPlugin(string kind, string json)
     #pragma warning restore HXB007
@@ -252,7 +252,7 @@ public partial class WhatsAnAiBridge
         catch (Exception ex) { return Err("publish_failed", ex.Message).ToString(Formatting.None); }
     }
 
-    #pragma warning disable HXB007 // spans the method name (where HXB007 is reported); "AIBridge.*" predates the PluginName.Method convention, other plugins look it up by this string
+    #pragma warning disable HXB007 // legacy AIBridge.* name: see the HXB007 note in WhatsAnAiBridge.csproj
     [BridgeExport(SubscribeMethodName)]
     private string PubSubscribeLocal(string subscriber, string kindsCsv, Action<string>? handler)
     #pragma warning restore HXB007

@@ -107,15 +107,15 @@ public class WhatsAnAiBridgeSettings : ISettings
     // In-HUD stats panel (Shared\StatsPanel.cs): panel-only preferences, not part of the shared view.
     // The section collapse states are the panel's own clicks: not drawn in the settings panel.
     [Menu("Stats panel: vitals open", "Whether the panel's vitals section is open.")]
-    [MenuTab("Stats panel"), IgnoreMenu]
+    [MenuTab("Stats panel"), IgnoreMenu, HiddenFromDescribe]
     public ToggleNode StatsPanelVitalsOpen { get; set; } = new(true);
 
     [Menu("Stats panel: resistances open", "Whether the panel's resistances section is open.")]
-    [MenuTab("Stats panel"), IgnoreMenu]
+    [MenuTab("Stats panel"), IgnoreMenu, HiddenFromDescribe]
     public ToggleNode StatsPanelResistsOpen { get; set; } = new(true);
 
     [Menu("Stats panel: pinned open", "Whether the panel's pinned section is open.")]
-    [MenuTab("Stats panel"), IgnoreMenu]
+    [MenuTab("Stats panel"), IgnoreMenu, HiddenFromDescribe]
     public ToggleNode StatsPanelPinnedOpen { get; set; } = new(true);
 
     [Menu("Stats panel: show keys", "Show Stats.dat keys instead of the in-game text in the panel's table.")]
@@ -129,7 +129,7 @@ public class WhatsAnAiBridgeSettings : ISettings
 
     // Kept for old saves; unused (the log is a toast stack plus the hotkey's sheet now).
     [Menu("Guide log open", "Unused: kept for old saves.")]
-    [MenuTab("Agent guide"), IgnoreMenu]
+    [MenuTab("Agent guide"), IgnoreMenu, HiddenFromDescribe]
     public ToggleNode GuideLogOpen { get; set; } = new(true);
 
     // Toggles the agent log sheet under the guide card (GuidePanel.cs). None by default: the log then only shows as
