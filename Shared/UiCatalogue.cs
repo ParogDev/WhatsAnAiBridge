@@ -103,7 +103,9 @@ public partial class WhatsAnAiBridge
     private const int UcMaxChildren = 300;
     private readonly Dictionary<long, UcOpen> _ucOpen = new();
     private UiCatalogueFile? _uc;
-    private bool _ucDirty, _ucMouseWasDown, _ucWarmed;
+    private volatile bool _ucDirty;   // set by merges (main thread), cleared and restored by the writer
+    private bool _ucMouseWasDown, _ucWarmed;
+    private int _ucWarmTries;
     private double _ucWarmUs;
     private double _ucLastUs, _ucMaxUs, _ucMaxFrameUs, _ucFirstFrameUs;
     private long _ucLastBytes, _ucMaxBytes;
@@ -118,6 +120,14 @@ public partial class WhatsAnAiBridge
         UiCatalogueFile loaded;
         try { loaded = File.Exists(UcPath) ? JsonConvert.DeserializeObject<UiCatalogueFile>(File.ReadAllText(UcPath)) ?? new() : new(); }
         catch (Exception ex) { _ucLastError = $"catalogue load failed ({UcPath}): {ex.Message}"; loaded = new(); }
+        // A hand-edited or partial file may hold nulls: never let them reach a merge.
+        loaded.Entries = (loaded.Entries ?? []).Where(x => x != null && !string.IsNullOrEmpty(x.Key)).ToList();
+        foreach (var x in loaded.Entries)
+        {
+            x.Recognise ??= []; x.Areas ??= []; x.ViewHashes ??= [];
+            x.Options = (x.Options ?? []).Where(op => op != null && op.Text != null).ToList();
+            foreach (var op in x.Options) { op.Child ??= []; op.Highlight ??= new(); }
+        }
         lock (_ucLock) _uc ??= loaded;
         return _uc;
     }
@@ -140,17 +150,11 @@ public partial class WhatsAnAiBridge
             foreach (var m in typeof(UiElement).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public))
                 if (m.Name is "get_Text" or "get_Children" or "GetClientRect" or "get_IsVisibleLocal" or "HasFlag" or "get_Address"
                     && !m.ContainsGenericParameters)
-                    try { System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(m.MethodHandle); } catch { }
-            var q = new Queue<(UiElement e, int[] path, bool parentHovers)>();
-            int[] p0 = [];
-            q.Enqueue((null!, [.. p0, 0], false));
-            var (_, p1, _) = q.Dequeue();
-            var w = new UcWalk();
-            w.Found.Add(("warm", p1, [0f, 0f, 1f, 1f], false));
+                    System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(m.MethodHandle);
             var o = new UcOpen { E = null!, OpenedAt = DateTime.UtcNow };
             UcMerge(new UiCatalogueFile(), null, o, [("warm", [0], [0f, 0f, 1f, 1f], false), ("up", [1], null, true), ("up", [2], null, false)]);
         }
-        catch { }
+        catch (Exception ex) { _ucLastError = $"warm-up (pool thread) failed: {ex.GetType().Name}: {ex.Message}"; }
     }
     private bool UcGameInFront()
     {
@@ -175,9 +179,11 @@ public partial class WhatsAnAiBridge
             // short real walk of IngameUi on this thread JIT-compiles the HUD element calls the walk makes. Measured live,
             // leaving that to the first capture cost one 6.5-8.5 ms frame while playing; pool-thread warm-ups that touch
             // no UI only got part of it, and a walk off the render thread races the HUD's element caches.
-            _ucWarmed = true;
+            // Retried on the next ticks while IngameUi is not there yet or the walk throws (3 tries, then the first
+            // capture pays the JIT). Per bridge load: a reload is a new instance and warms again.
             _ucLoading ??= System.Threading.Tasks.Task.Run(() => { UcPrepare(); Uc(); });
             var sw0 = Stopwatch.StartNew();
+            _ucWarmTries++;
             try
             {
                 if (GameController?.IngameState?.IngameUi is UiElement ui)
@@ -185,10 +191,13 @@ public partial class WhatsAnAiBridge
                     var wo = new UcOpen { E = ui, OpenedAt = DateTime.UtcNow, Walk = new UcWalk() };
                     wo.Walk.Queue.Enqueue((ui, [], false));
                     UcStep(wo, sw0, 3000);
+                    _ucWarmed = true;
                 }
+                else _ucLastError = "warm-up: GameController.IngameState.IngameUi is null";
             }
-            catch { }
-            _ucWarmUs = sw0.Elapsed.TotalMilliseconds * 1000;
+            catch (Exception ex) { _ucLastError = $"warm-up walk failed: {ex.GetType().Name}: {ex.Message}"; }
+            if (_ucWarmTries >= 3) _ucWarmed = true;
+            _ucWarmUs = Math.Max(_ucWarmUs, sw0.Elapsed.TotalMilliseconds * 1000);
             return;
         }
         if (_ucOpen.Count == 0) { _ucMouseWasDown = false; return; }
@@ -220,7 +229,9 @@ public partial class WhatsAnAiBridge
             (addr, o) = (dueAddr, due);
             o.DueAt = o.Captures == 0 ? now.AddMilliseconds(1200) : null;   // a second look once it has settled
             o.Captures++;
-            if (!o.E.IsVisibleLocal) { _ucOpen.Remove(addr); return; }
+            // Not visible right now (fading in, rebuilt): the observer reports only changes, so look again shortly
+            // rather than dropping it; its close removes it.
+            if (!o.E.IsVisibleLocal) { if (o.Captures < UcMaxCaptures) o.DueAt = now.AddMilliseconds(500); return; }
             try { o.Rect = o.E.GetClientRect(); } catch { }
             o.Walk = new UcWalk();
             o.Walk.Queue.Enqueue((o.E, [], false));
@@ -353,6 +364,14 @@ public partial class WhatsAnAiBridge
         // Mapped panels: within by walker path (exact); unmapped: within by the title text.
         var within = o.Mapped != null ? $"GameController.IngameState.IngameUi.{o.Mapped}" : title;
         var counts = found.GroupBy(f => f.text, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+        // A text repeated in this view makes any option stored with it as unique ambiguous: a text target would hit
+        // several elements now, so those fall back to panel + child too.
+        foreach (var op in entry.Options)
+            if (op.Unique && counts.TryGetValue(op.Text, out var n) && n > 1)
+            {
+                op.Unique = false;
+                op.Highlight = new UiHighlightRecipe { Panel = title, Child = op.Child };
+            }
         foreach (var (text, path, rect, hover) in found)
         {
             var unique = counts[text] == 1;
