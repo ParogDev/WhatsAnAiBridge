@@ -981,6 +981,10 @@ public class HelloDto
     /// <summary>The HUD-update drift preflight of this load: counts and the links that aren't ok (Preflight.cs).</summary>
     [JsonProperty("reflection", NullValueHandling = NullValueHandling.Ignore)]
     public ReflectionPreflightDto? Reflection { get; set; }
+
+    /// <summary>The DTO contract's hash (Shared/ContractSchema.cs): the MCP fetches contract.schema only when it differs from its snapshot.</summary>
+    [JsonProperty("contract", NullValueHandling = NullValueHandling.Ignore)]
+    public ContractSummaryDto? Contract { get; set; }
 }
 
 // ── object.find / object.snapshot (Shared/ObjectSearch.cs) ───────────────
