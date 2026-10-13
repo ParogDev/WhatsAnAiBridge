@@ -26,20 +26,26 @@ public partial class WhatsAnAiBridge
 
     private void SelfRequest(string method, JToken? p, (long t, long a) s)
     {
-        var ticks = Stopwatch.GetTimestamp() - s.t;
-        var bytes = GC.GetAllocatedBytesForCurrentThread() - s.a;
-        var key = method;
-        if (method == "query" && p?["type"]?.Type == JTokenType.String)
+        try
         {
-            var type = p["type"]!.Value<string>()!;
-            var colon = type.IndexOf(':');
-            key = "query:" + (colon < 0 ? type : type[..colon]);
+            var ticks = Stopwatch.GetTimestamp() - s.t;
+            var bytes = GC.GetAllocatedBytesForCurrentThread() - s.a;
+            var key = method;
+            if (method == "query" && p is JObject o && o["type"] is JValue { Type: JTokenType.String } t)
+            {
+                var type = (string)t!;
+                var colon = type.IndexOf(':');
+                key = "query:" + (colon < 0 ? type : type[..colon]);
+            }
+            lock (_selfRequests)
+            {
+                // Keys come from callers: past 64 kinds (nobody polled self_perf), the rest count as "other".
+                if (!_selfRequests.ContainsKey(key) && _selfRequests.Count >= 64) key = "other";
+                if (!_selfRequests.TryGetValue(key, out var row)) _selfRequests[key] = row = new long[3];
+                row[0]++; row[1] += ticks; row[2] += bytes;
+            }
         }
-        lock (_selfRequests)
-        {
-            if (!_selfRequests.TryGetValue(key, out var row)) _selfRequests[key] = row = new long[3];
-            row[0]++; row[1] += ticks; row[2] += bytes;
-        }
+        catch { }   // accounting must never fail a request
     }
 
     private void SelfEnd(int step, (long t, long a) s)

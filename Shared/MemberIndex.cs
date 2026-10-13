@@ -24,8 +24,9 @@ namespace WhatsAnAiBridge;
 /// - **Compiled getters.** <see cref="Member.Get"/> reads through PropertyInfo/FieldInfo.GetValue for the first
 ///   <see cref="CompileAfterReads"/> reads of a member, then compiles an expression-tree getter (so one-off reads in explore never
 ///   pay for a compile). A getter that fails to compile stays on reflection for good (<see cref="Member.CompileError"/>
-///   says why). Exceptions thrown by a compiled getter are wrapped in TargetInvocationException, exactly like
-///   PropertyInfo.GetValue, so callers' error texts don't change.
+///   says why). Exceptions thrown by a getter are wrapped in TargetInvocationException like PropertyInfo.GetValue,
+///   so callers' error texts don't change. Not identical for misuse: a target of the wrong type is a TargetException
+///   from reflection but a wrapped InvalidCastException from a compiled getter (callers pass the member's own type).
 /// - **Types by name** (<see cref="Types"/>): one index over the non-collectible loaded assemblies, built once, by full
 ///   name and by simple name (case-insensitive), keeping every candidate: two types named "Player" are both listed and
 ///   the caller chooses (ExpressionWalker.ResolveComponentType prefers the Component subclass).
@@ -171,11 +172,12 @@ internal static class MemberIndex
     {
         var o = new Newtonsoft.Json.Linq.JObject { ["compiledGetters"] = _compiledCount, ["compileFailures"] = _compileFailures };
         if (_lastCompileError != null) o["lastCompileError"] = _lastCompileError;
-        if (_typeIndex.IsValueCreated)
-        {
-            var ti = _typeIndex.Value;
-            o["typeIndex"] = new Newtonsoft.Json.Linq.JObject { ["types"] = ti.TypeCount, ["buildMs"] = ti.BuildMs, ["partialAssemblies"] = new Newtonsoft.Json.Linq.JArray(ti.Partial) };
-        }
+        if (_typeIndex is { } ti)
+            o["typeIndex"] = new Newtonsoft.Json.Linq.JObject
+            {
+                ["types"] = ti.TypeCount, ["buildMs"] = ti.BuildMs, ["assemblies"] = ti.AssemblyCount, ["builds"] = _typeIndexBuilds,
+                ["partialAssemblies"] = new Newtonsoft.Json.Linq.JArray(ti.Partial),
+            };
         return o;
     }
 
@@ -191,8 +193,13 @@ internal static class MemberIndex
         var tm = Of(type);
         var key = (name, flags, kinds);
         if (tm.ByName.TryGetValue(key, out var hit)) return hit;
-        return tm.ByName.GetOrAdd(key, static (k, t) => Lookup(t, k.name, k.flags, k.kinds), type);   // no closure on the hit path
+        var found = Lookup(type, name, flags, kinds);
+        // Misses are cached only up to a bound: names come from agents' paths, and typos must not grow it forever.
+        if (found == null && tm.ByName.Count >= MaxCachedNamesPerType) return null;
+        return tm.ByName.GetOrAdd(key, found);
     }
+
+    private const int MaxCachedNamesPerType = 1024;
 
     /// <summary>The non-indexer property called <paramref name="name"/> (most-derived), or null.</summary>
     internal static PropertyInfo? Property(Type type, string name, BindingFlags flags = PublicInstance)
@@ -304,10 +311,38 @@ internal static class MemberIndex
 
     // ── Types by name ────────────────────────────────────────────────
 
-    /// <summary>One index over the types of every non-collectible loaded assembly (HUD core, game offsets, BCL).</summary>
-    internal static TypeIndex Types => _typeIndex.Value;
+    /// <summary>
+    /// One index over the types of every non-collectible loaded assembly (HUD core, game offsets, BCL). Built once;
+    /// <see cref="RefreshTypes"/> rebuilds it when assemblies were loaded since (callers do that on a miss).
+    /// </summary>
+    internal static TypeIndex Types
+    {
+        get
+        {
+            var ti = _typeIndex;
+            if (ti != null) return ti;
+            lock (_typeIndexLock) return _typeIndex ??= new TypeIndex();
+        }
+    }
 
-    private static readonly Lazy<TypeIndex> _typeIndex = new(() => new TypeIndex(), LazyThreadSafetyMode.ExecutionAndPublication);
+    private static volatile TypeIndex? _typeIndex;
+    private static int _typeIndexBuilds;
+    private static readonly object _typeIndexLock = new();
+
+    /// <summary>
+    /// Rebuilds the type index when the process has loaded assemblies since it was built (a miss may be a type from
+    /// one of them). True when it was rebuilt. Costs one GetAssemblies() call when nothing changed.
+    /// </summary>
+    internal static bool RefreshTypes()
+    {
+        var count = AppDomain.CurrentDomain.GetAssemblies().Length;
+        lock (_typeIndexLock)
+        {
+            if (_typeIndex != null && _typeIndex.AssemblyCount == count) return false;
+            _typeIndex = new TypeIndex();
+            return true;
+        }
+    }
 
     internal sealed class TypeIndex
     {
@@ -318,6 +353,8 @@ internal static class MemberIndex
         public readonly IReadOnlyList<string> Partial;
         public readonly int TypeCount;
         public readonly long BuildMs;
+        /// <summary>Assemblies loaded in the process when it was built (collectible ones included).</summary>
+        public readonly int AssemblyCount;
 
         internal TypeIndex()
         {
@@ -326,7 +363,10 @@ internal static class MemberIndex
             var simple = new Dictionary<string, List<Type>>(StringComparer.OrdinalIgnoreCase);
             var partial = new List<string>();
             var count = 0;
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            Interlocked.Increment(ref _typeIndexBuilds);
+            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            AssemblyCount = assemblies.Length;
+            foreach (var asm in assemblies)
             {
                 // Collectible = a plugin's load context (this bridge included): indexing it would keep it alive after a reload.
                 if (asm.IsCollectible || asm.IsDynamic) continue;

@@ -235,7 +235,7 @@ public class ExpressionWalker
             var compType = ResolveComponentType(seg.GenericArg);
             if (compType == null)
             {
-                error = $"Could not resolve component type '{seg.GenericArg}'";
+                error = $"Could not resolve component type '{seg.GenericArg}' (looked in ExileCore*/GameOffsets* types of the HUD's own assemblies, not plugins')";
                 return null;
             }
 
@@ -283,7 +283,9 @@ public class ExpressionWalker
     /// *.Components namespace; the old cache kept whichever loaded last.
     /// </summary>
     internal static Type? ResolveComponentType(string typeName)
-        => MemberIndex.Types.Resolve(typeName, IsHudType, ComponentRank);
+        => MemberIndex.Types.Resolve(typeName, IsHudType, ComponentRank)
+           // A miss may be a HUD assembly loaded after the index was built: rebuild once per assembly-count change.
+           ?? (MemberIndex.RefreshTypes() ? MemberIndex.Types.Resolve(typeName, IsHudType, ComponentRank) : null);
 
     private static bool IsHudType(Type t)
         => t.Namespace?.StartsWith("ExileCore", StringComparison.Ordinal) == true
@@ -343,17 +345,20 @@ public class ExpressionWalker
 
         // Enum-keyed indexers (generic dictionaries, InventoryElement[InventoryIndex]); a type may have several
         // indexers (InventoryElement: this[InventoryIndex] and Element's this[int]), most-derived first.
+        // Two passes: a defined value first (Enum.TryParse also accepts any number, which would bind [1] to whichever
+        // enum indexer comes first), then any value that parses, as before.
         List<string>? enumKeys = null;
-        foreach (var indexerProp in MemberIndex.Indexers(type))
-        {
-            var ps = indexerProp.GetIndexParameters();
-            if (ps.Length != 1 || !indexerProp.CanRead) continue;
-            var keyType = ps[0].ParameterType;
-            if (!keyType.IsEnum) continue;
-            if (Enum.TryParse(keyType, indexValue, true, out var enumKey))
-                return indexerProp.GetValue(collection, [enumKey]);
-            (enumKeys ??= []).Add(keyType.Name);
-        }
+        for (var pass = 0; pass < 2; pass++)
+            foreach (var indexerProp in MemberIndex.Indexers(type))
+            {
+                var ps = indexerProp.GetIndexParameters();
+                if (ps.Length != 1 || !indexerProp.CanRead) continue;
+                var keyType = ps[0].ParameterType;
+                if (!keyType.IsEnum) continue;
+                if (Enum.TryParse(keyType, indexValue, true, out var enumKey) && (pass == 1 || Enum.IsDefined(keyType, enumKey!)))
+                    return indexerProp.GetValue(collection, [enumKey]);
+                if (pass == 1) (enumKeys ??= []).Add(keyType.Name);
+            }
 
         // Name the link: the type has an enum indexer, the key just isn't one of its values (e.g. a PoE1 name on PoE2).
         error = enumKeys != null

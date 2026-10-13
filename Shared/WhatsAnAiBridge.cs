@@ -266,13 +266,12 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         {
             processed++;
             if (!request.TryClaimRun()) continue;   // answered from the listener already (-32010 hud_loading / timeout, HudState.cs)
+            var perf = SelfStart();
             try
             {
                 _reqClientId = request.ClientId;   // who is asking (Sessions.cs); requests run one at a time under _requestLock
                 SessionTouch();
-                var perf = SelfStart();
                 var result = ProcessTcpRequest(request.Method, request.Params);
-                SelfRequest(request.Method, request.Params, perf);   // bridge.self_perf "requests"
                 request.Response.TrySetResult(result);
 
                 _status.TotalQueries++;
@@ -287,7 +286,11 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                 request.Response.TrySetResult(Serialize(new ErrorResponse { Error = ex.Message }));
                 _status.LastError = ex.Message;
             }
-            finally { _reqClientId = 0; }
+            finally
+            {
+                _reqClientId = 0;
+                SelfRequest(request.Method, request.Params, perf);   // bridge.self_perf "requests" (never throws)
+            }
         }
     }
 
