@@ -44,6 +44,7 @@ public partial class WhatsAnAiBridge
             ["totalBytesPerFrame"] = _selfBytes.Sum() / frames,
             ["steps"] = steps,
             ["statsRawCheck"] = JObject.FromObject(StatsRawStatus()),
+            ["hudState"] = HudStateSelfPerf(),   // the phase tracker (HudState.cs): reads, writes, the broken link
         };
         Array.Clear(_selfTicks); Array.Clear(_selfBytes); _selfFrames = 0; _selfSince = Stopwatch.GetTimestamp();
         return o.ToString(Newtonsoft.Json.Formatting.None);

@@ -90,12 +90,15 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         Name = "Whats An AI Bridge";
         Force = true;
         UpdatePaths();
+        HudStateStart();   // hud-state.json phase starting, as early as possible (HudState.cs)
 
         if (Settings.EnableTcp.Value)
             StartTcpServer();
         InstrStartup();   // patches a previous load of the bridge left in this HUD process (Instrumentation.cs)
         try { PubRegister(); } catch (Exception ex) { ToastF8RegisterFailed($"[PubSub] registering {PublishMethodName} / {SubscribeMethodName} on PluginBridge failed: {ex.Message}"); }
         try { WorkRegister(); } catch (Exception ex) { ToastF8RegisterFailed($"[Work] registering {WorkListMethodName} / {HighlightForMethodName} on PluginBridge failed: {ex.Message}"); }
+
+        HudStateAfterInit();   // listener-side hud.state, the 4 Hz phase tracker, a user restart adopted from the board (HudState.cs, Outage.cs)
 
         return true;
     }
@@ -121,6 +124,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void OnClose()
     {
+        HudStateClose();   // hud-state.json phase restarting | user-restart | closed (HudState.cs)
         InstrEndWhere(_ => true, "cut: the HUD is closing");
         InstrStopTimer();
         StopWatchdog();
@@ -136,6 +140,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void OnPluginDestroyForHotReload()
     {
+        HudStateStopTimer();
         // The next load of the bridge can't see this load's sets: end them now (its startup sweep catches what remains).
         InstrEndWhere(_ => true, "cut: the bridge is reloading");
         InstrStopTimer();
@@ -235,6 +240,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
     private void ProcessPendingRequests()
     {
         _lastTickTimestamp = Stopwatch.GetTimestamp();
+        HudStateMainTick();
         var server = _tcpServer;
         if (server == null) return;
         lock (_requestLock)
@@ -257,6 +263,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         while (processed < 5 && sw.ElapsedMilliseconds < 150 && server.PendingRequests.TryDequeue(out var request))
         {
             processed++;
+            if (request.Abandoned) continue;   // answered from the listener already (-32010 hud_loading, HudState.cs)
             try
             {
                 _reqClientId = request.ClientId;   // who is asking (Sessions.cs); requests run one at a time under _requestLock
@@ -340,6 +347,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         // Plugin reloads requested over the bridge are scheduled here and run at the next frame's start,
         // outside the HUD's plugin loops (HudControl.cs).
         _selfFrames++;
+        HudStateMainTick();   // tickAt in hud-state.json (HudState.cs)
         RunMainActions();   // settings changes (SettingsControl.cs) and other main-thread work queued by bridge clients
         var sp = SelfStart(); SchedulePendingReload(); SelfEnd(0, sp);
         sp = SelfStart(); RunPendingScript(); SelfEnd(1, sp);
