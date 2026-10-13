@@ -273,7 +273,7 @@ public partial class WhatsAnAiBridge
             case "range":
             {
                 var d = value.Value<double>();
-                double Lim(string n) => Convert.ToDouble(NodeMember(node, n), CultureInfo.InvariantCulture);
+                double Lim(string n) => Convert.ToDouble(NodeMember(node, n) ?? throw new InvalidOperationException($"{node.GetType().Name}.{n} can't be read, so the range can't be checked"), CultureInfo.InvariantCulture);
                 if (d < Lim("Min") || d > Lim("Max")) throw new ArgumentOutOfRangeException(nameof(value), $"{d} is outside {Lim("Min")}-{Lim("Max")}");
                 return Convert.ChangeType(target == typeof(int) ? Math.Round(d) : d, target, CultureInfo.InvariantCulture);
             }

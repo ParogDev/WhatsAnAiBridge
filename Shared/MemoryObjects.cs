@@ -16,9 +16,9 @@ namespace WhatsAnAiBridge;
 internal static class MemoryObjects
 {
     /// <summary>The object's public long Address, or null when it has none or the getter throws.</summary>
-    internal static long? Address(object obj)
+    internal static long? Address(object? obj)
     {
-        if (MemberIndex.Find(obj.GetType(), "Address", kinds: MemberIndex.Kinds.Property) is not { CanRead: true } p || p.Type != typeof(long)) return null;
+        if (obj == null || MemberIndex.Find(obj.GetType(), "Address", kinds: MemberIndex.Kinds.Property) is not { CanRead: true } p || p.Type != typeof(long)) return null;
         try { return (long?)p.Get(obj); } catch { return null; }
     }
 
@@ -67,7 +67,7 @@ internal static class MemoryObjects
     {
         for (var g = ft; g != null && g != typeof(object); g = g.BaseType)
             if (g.IsGenericType && g.Name.Contains("Cache", StringComparison.Ordinal) && g.GetGenericArguments() is [var arg]
-                && arg.IsValueType && !arg.IsPrimitive)
+                && arg.IsValueType && !arg.IsPrimitive && !arg.IsEnum)
                 return arg;
         return null;
     }
@@ -88,9 +88,8 @@ internal static class MemoryObjects
         return (null, null);
     }
 
-    private static bool IsGameType(Type t) =>
-        t.Assembly.GetName().Name?.StartsWith("GameOffsets", StringComparison.Ordinal) == true
-        || t.Namespace?.StartsWith("GameOffsets", StringComparison.Ordinal) == true;
+    /// <summary>A type from a GameOffsets* assembly (the HUD's offsets structs; on PoE2 the real obfuscated ones live there too).</summary>
+    private static bool IsGameType(Type t) => t.Assembly.GetName().Name?.StartsWith("GameOffsets", StringComparison.Ordinal) == true;
 
     private static int MarshalSize(Type t) { try { return Marshal.SizeOf(t); } catch { return 0; } }
 
@@ -98,14 +97,17 @@ internal static class MemoryObjects
 
     /// <summary>
     /// A loaded struct (non-primitive value type) by full or simple name, case-insensitive (<see cref="MemberIndex.Types"/>):
-    /// GameOffsets types first, then the HUD core's (ExileCore*), then any; the first loaded on a tie. Null when none.
+    /// GameOffsets types first, then the HUD core's (ExileCore*), then any; the first loaded on a tie. The index skips
+    /// plugin (collectible) assemblies, so an exact full name is then looked up in those too. Null when none.
     /// </summary>
     internal static Type? StructType(string name)
     {
         static bool IsStruct(Type t) => t.IsValueType && !t.IsPrimitive && !t.IsEnum;
         static int Rank(Type t) => IsGameType(t) ? 2 : t.Assembly.GetName().Name?.StartsWith("ExileCore", StringComparison.Ordinal) == true ? 1 : 0;
         return MemberIndex.Types.Resolve(name, IsStruct, Rank)
-               ?? (MemberIndex.RefreshTypes() ? MemberIndex.Types.Resolve(name, IsStruct, Rank) : null);
+               ?? (MemberIndex.RefreshTypes() ? MemberIndex.Types.Resolve(name, IsStruct, Rank) : null)
+               ?? AppDomain.CurrentDomain.GetAssemblies().Where(a => a.IsCollectible && !a.IsDynamic)
+                   .Select(a => a.GetType(name, false)).FirstOrDefault(t => t != null && IsStruct(t));
     }
 
     private static readonly ConditionalWeakTable<Type, StrongBox<int>> _sizes = new();

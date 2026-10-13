@@ -417,7 +417,8 @@ public partial class WhatsAnAiBridge
     private static string Preview(object item)
     {
         foreach (var m in MemoryObjects.NamingMembers(item.GetType()))
-            if (m.Get(item) is string s && s.Length > 0) return s.Length > 80 ? s[..80] : s;
+            try { if (m.Get(item) is string s && s.Length > 0) return s.Length > 80 ? s[..80] : s; }
+            catch { }   // a getter that throws (a disposed entity's RenderName) names nothing; the next one may
         return item.GetType().Name;
     }
 
