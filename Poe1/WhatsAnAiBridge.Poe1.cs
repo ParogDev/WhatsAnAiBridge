@@ -26,6 +26,9 @@ public partial class WhatsAnAiBridge
 
     // ── Mechanical API differences ───────────────────────────────────
 
+    /// <summary>ExileCore's Element has no HasFlag: hover detection (UI catalogue "clickable") is not read on PoE1 yet.</summary>
+    internal static bool UiDetectsHover(UiElement e) => false;
+
     private static Color Rgba(int r, int g, int b, int a = 255) => new(r, g, b, a);
 
     private static float[] GridXY(Entity e) => [MathF.Round(e.GridPosNum.X), MathF.Round(e.GridPosNum.Y)];

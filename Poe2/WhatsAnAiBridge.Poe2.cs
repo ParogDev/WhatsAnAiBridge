@@ -33,6 +33,12 @@ public partial class WhatsAnAiBridge
 
     // ── Mechanical API differences ───────────────────────────────────
 
+    /// <summary>The element reacts to the mouse (ElementFlags.DetectsHover, bit 18): buttons, dialogue options, list rows.</summary>
+    internal static bool UiDetectsHover(UiElement e)
+    {
+        try { return e.HasFlag(GameOffsets2.ElementFlags.DetectsHover); } catch { return false; }
+    }
+
     private static Color Rgba(int r, int g, int b, int a = 255) => Color.FromArgb(a, r, g, b);
 
     private static float[] GridXY(Entity e) => [MathF.Round(e.GridPos.X), MathF.Round(e.GridPos.Y)];
