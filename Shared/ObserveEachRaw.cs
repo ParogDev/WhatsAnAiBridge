@@ -16,14 +16,27 @@ namespace WhatsAnAiBridge;
 /// every 5 s, and each listing re-checks the raw values of the first items against reflection: a mismatch turns the raw
 /// path off for that prop and says which link broke (layer status rawPaths). A sub-path that can't be compiled stays on
 /// reflection, with the reason.
+/// When every prop shares its pointers, each item also keeps where they led (followed again at every listing) and the
+/// last bytes read there with the values boxed from them: a quiet tick is one read per item and allocates nothing, and a
+/// byte that differs is confirmed through the whole pointer chain before it counts as a change.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
     private sealed class RawStep { public bool Ptr; public int Off; public Type? ValueType; }
 
+    /// <summary>One listed item: its key, address, unit names, and the last raw block with the values decoded from it.</summary>
+    private sealed class EachItem
+    {
+        public object Key = null!; public long Address; public object Item = null!;
+        public string[] Units = [];
+        public byte[]? Prev;          // the block last read (shared-pointer path), null before the first
+        public long Target;           // where the shared pointers led last time (0 = follow them again)
+        public object?[] Vals = [];   // the values boxed from Prev: reused while the bytes don't change
+    }
+
     private sealed class EachCache
     {
-        public List<(object key, long address, object item)> Items = [];
+        public List<EachItem> Items = [];
         public DateTime ListedAt = DateTime.MinValue;
         public RawStep[]?[]? Plans;                 // per prop: raw steps, or null = reflection
         public string[] PlanNotes = [];              // per prop: "raw" or why not
@@ -41,31 +54,62 @@ public partial class WhatsAnAiBridge
         if ((DateTime.UtcNow - c.ListedAt).TotalSeconds >= EachRelistSeconds)
         {
             c.ListedAt = DateTime.UtcNow;
+            // An item listed again at the same address keeps its unit names and last block (so its boxes are reused).
+            var old = new Dictionary<object, EachItem>();
+            foreach (var it in c.Items) old.TryAdd(it.Key, it);
             c.Items.Clear();
             var n = 0;
             foreach (var item in items)
             {
                 if (item == null || ++n > 2000) continue;
-                c.Items.Add((SubPath(l, item, l.Spec.Key ?? "Address") ?? n, MemoryObjects.Address(item) ?? 0, item));
+                var key = SubPath(l, item, l.Spec.Key ?? "Address") ?? n;
+                var address = MemoryObjects.Address(item) ?? 0;
+                if (old.TryGetValue(key, out var was) && was.Address == address) { was.Item = item; was.Target = 0; c.Items.Add(was); continue; }
+                c.Items.Add(new EachItem
+                {
+                    Key = key, Address = address, Item = item, Vals = new object?[props.Count],
+                    Units = props.Select(p => $"{Text(key)}.{p}").ToArray(),
+                });
             }
             if (c.Plans == null && c.Items.Count > 0) CompileEach(l, c);
             if (c.Plans != null) CheckEach(l, c);
+            var wasShared = c.Shared;
             c.Shared = c.Plans != null && c.Plans.All(p => p != null) ? SharedPrefix(c.Plans!) : -1;
+            if (c.Shared != wasShared) foreach (var it in c.Items) it.Prev = null;   // a plan turned off: old blocks mean nothing
         }
         var shared = c.Shared;
         for (var j = 0; j < c.Items.Count; j++)
         {
-            var (key, address, item) = c.Items[j];
+            var it = c.Items[j];
+            var address = it.Address;
             // All props behind the same pointers (Inventory.Hash, Inventory.ItemCount): follow them once and read the
-            // span holding every value in one call, 2 reads per item instead of 4.
-            var block = shared >= 0 && address != 0 ? ReadBlock(c, address, shared) : -1;
-            for (var i = 0; i < props.Count; i++)
+            // span holding every value in one call, 2 reads per item instead of 4. Unchanged bytes since the last tick
+            // give the same values: the boxes from then are reused, so a quiet tick allocates nothing.
+            // The end of the shared pointers is kept per item (followed again at every listing): a quiet tick is one read
+            // per item. Any byte that differs there is confirmed through the whole chain before it counts as a change.
+            if (shared >= 0 && it.Target != 0 && it.Prev != null && ReadBlockAt(c, it.Target) > 0 && it.Prev.AsSpan().SequenceEqual(c.Block))
             {
-                if (!l.EachUnits.TryGetValue((key, i), out var unit)) l.EachUnits[(key, i)] = unit = $"{Text(key)}.{props[i]}";
-                into[unit] = block > 0 ? Decode(c.Plans![i]![^1], c.Block.AsSpan((int)(c.Plans[i]![^1].Off - c.BlockFrom)))
-                    : block == 0 ? null
-                    : c.Plans?[i] is { } plan && address != 0 ? RawValue(plan, address) : SubPath(l, item, props[i]);
+                for (var i = 0; i < props.Count; i++) into[it.Units[i]] = it.Vals[i];
+                continue;
             }
+            var block = shared >= 0 && address != 0 ? ReadBlock(c, address, shared, out it.Target) : -1;
+            if (block > 0)
+            {
+                if (it.Prev != null && it.Prev.AsSpan().SequenceEqual(c.Block))
+                {
+                    for (var i = 0; i < props.Count; i++) into[it.Units[i]] = it.Vals[i];
+                    continue;
+                }
+                for (var i = 0; i < props.Count; i++)
+                    into[it.Units[i]] = it.Vals[i] = Decode(c.Plans![i]![^1], c.Block.AsSpan((int)(c.Plans[i]![^1].Off - c.BlockFrom)));
+                if (it.Prev == null || it.Prev.Length != c.Block.Length) it.Prev = new byte[c.Block.Length];
+                c.Block.CopyTo(it.Prev, 0);
+                continue;
+            }
+            it.Prev = null;
+            for (var i = 0; i < props.Count; i++)
+                into[it.Units[i]] = block == 0 ? null
+                    : c.Plans?[i] is { } plan && address != 0 ? RawValue(plan, address) : SubPath(l, it.Item, props[i]);
         }
     }
 
@@ -84,16 +128,25 @@ public partial class WhatsAnAiBridge
     }
 
     /// <summary>Follows the shared pointers and reads the values' span into c.Block: 1 = read, 0 = null pointer, -1 = failed.</summary>
-    private int ReadBlock(EachCache c, long address, int prefix)
+    private int ReadBlock(EachCache c, long address, int prefix, out long target)
     {
         var plan = c.Plans![0]!;
+        target = 0;
         for (var k = 0; k < prefix; k++) { address = RawRead<long>(address + plan[k].Off); if (address == 0) return 0; }
+        target = address;
+        return ReadBlockAt(c, address);
+    }
+
+    /// <summary>Reads the values' span of the object at <paramref name="target"/> (the end of the shared pointers) into c.Block.</summary>
+    private int ReadBlockAt(EachCache c, long target)
+    {
         if (c.Block.Length == 0)
         {
-            c.BlockFrom = c.Plans.Min(p => p![^1].Off);
-            c.Block = new byte[c.Plans.Max(p => p![^1].Off) + 8 - c.BlockFrom];
+            var plans = c.Plans!;
+            c.BlockFrom = plans.Min(p => p![^1].Off);
+            c.Block = new byte[plans.Max(p => p![^1].Off) + 8 - c.BlockFrom];
         }
-        if (RawReader() is not { } read || !read(new IntPtr(address + c.BlockFrom), c.Block)) return -1;
+        if (RawReader() is not { } read || !read(new IntPtr(target + c.BlockFrom), c.Block)) return -1;
         return 1;
     }
 
@@ -115,7 +168,7 @@ public partial class WhatsAnAiBridge
         c.PlanNotes = new string[props.Count];
         for (var i = 0; i < props.Count; i++)
         {
-            try { c.Plans[i] = CompileRaw(l, c.Items[0].item, props[i], out c.PlanNotes[i]); }
+            try { c.Plans[i] = CompileRaw(l, c.Items[0].Item, props[i], out c.PlanNotes[i]); }
             catch (Exception ex) { c.PlanNotes[i] = $"reflection: {ex.Message}"; }
         }
     }
@@ -186,8 +239,9 @@ public partial class WhatsAnAiBridge
         for (var i = 0; i < props.Count; i++)
         {
             if (c.Plans![i] is not { } plan) continue;
-            foreach (var (key, address, item) in c.Items.Take(3))
+            foreach (var it in c.Items.Take(3))
             {
+                var (key, address, item) = (it.Key, it.Address, it.Item);
                 if (Equals(RawValue(plan, address), SubPath(l, item, props[i]))) continue;
                 var raw = RawValue(plan, address); var hud = SubPath(l, item, props[i]);   // once more: it may have changed in between
                 if (Equals(raw, hud)) continue;

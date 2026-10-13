@@ -297,6 +297,64 @@ internal static class MemberIndex
         return tm.Methods.GetOrAdd(key, closed);
     }
 
+    /// <summary>
+    /// Calls a public parameterless instance method (e.g. a closed GetComponent&lt;T&gt;) on <paramref name="target"/>:
+    /// MethodInfo.Invoke for its first <see cref="CompileAfterReads"/> calls, then a compiled delegate (the walker's
+    /// per-tick paths of observer layers, flows and watches call the same few methods several times a second).
+    /// Throws like MethodInfo.Invoke (the method's exception wrapped in TargetInvocationException).
+    /// </summary>
+    internal static object? Call(MethodInfo method, object target)
+    {
+        var inv = _invokers.GetValue(method, m => new Invoker(m));
+        var c = inv.Compiled;
+        if (c == null && !inv.NoCompile && Interlocked.Increment(ref inv.Calls) > CompileAfterReads) c = inv.Compile();
+        if (c == null) return method.Invoke(target, null);
+        try { return c(target); }
+        catch (Exception ex) { throw new TargetInvocationException(ex); }
+    }
+
+    private sealed class Invoker
+    {
+        private readonly MethodInfo _m;
+        public volatile Func<object, object?>? Compiled;
+        public volatile bool NoCompile;
+        public int Calls;
+
+        public Invoker(MethodInfo m)
+        {
+            _m = m;
+            NoCompile = m.IsStatic || m.GetParameters().Length != 0 || m.ContainsGenericParameters || m.DeclaringType == null
+                        || m.ReturnType.IsByRef || m.ReturnType.IsPointer || m.ReturnType.IsByRefLike;
+        }
+
+        public Func<object, object?>? Compile()
+        {
+            lock (this)
+            {
+                if (Compiled != null || NoCompile) return Compiled;
+                try
+                {
+                    var o = Expression.Parameter(typeof(object), "o");
+                    Expression call = Expression.Call(Expression.Convert(o, _m.DeclaringType!), _m);
+                    call = _m.ReturnType == typeof(void)
+                        ? Expression.Block(call, Expression.Constant(null, typeof(object)))
+                        : Expression.Convert(call, typeof(object));
+                    Compiled = Expression.Lambda<Func<object, object?>>(call, o).Compile();
+                    Interlocked.Increment(ref _compiledCount);
+                }
+                catch (Exception ex)
+                {
+                    NoCompile = true;
+                    Interlocked.Increment(ref _compileFailures);
+                    _lastCompileError = $"{_m.DeclaringType?.Name}.{_m.Name}(): {ex.GetType().Name}: {ex.Message}";
+                }
+                return Compiled;
+            }
+        }
+    }
+
+    private static readonly ConditionalWeakTable<MethodInfo, Invoker> _invokers = new();
+
     private static string Signature(Type[] types) => types.Length switch
     {
         0 => "",
