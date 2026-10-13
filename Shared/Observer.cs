@@ -131,6 +131,7 @@ public partial class WhatsAnAiBridge
                 s.Enabled = on;
                 s.Since = on ? DateTime.UtcNow : null;
                 _obsVisible = null;   // re-baseline: what is open now is not an event
+                _ucOpen.Clear();
                 SaveObs();
             }
         }

@@ -119,7 +119,15 @@ public partial class WhatsAnAiBridge
         if (_uc != null) return _uc;
         UiCatalogueFile loaded;
         try { loaded = File.Exists(UcPath) ? JsonConvert.DeserializeObject<UiCatalogueFile>(File.ReadAllText(UcPath)) ?? new() : new(); }
-        catch (Exception ex) { _ucLastError = $"catalogue load failed ({UcPath}): {ex.Message}"; loaded = new(); }
+        catch (Exception ex)
+        {
+            // Never let the next write replace a catalogue that failed to load: keep it aside, start a new one.
+            string? kept = null;
+            try { kept = UcPath + $".bad-{DateTime.UtcNow:yyyyMMddHHmmss}"; File.Move(UcPath, kept); } catch { kept = null; }
+            _ucLastError = $"catalogue load failed ({UcPath}): {ex.Message}; " + (kept != null ? $"kept as {kept}, starting a new one" : "could not move it aside: writes are off");
+            if (kept == null) _ucNoWrite = true;
+            loaded = new();
+        }
         // A hand-edited or partial file may hold nulls: never let them reach a merge.
         loaded.Entries = (loaded.Entries ?? []).Where(x => x != null && !string.IsNullOrEmpty(x.Key)).ToList();
         foreach (var x in loaded.Entries)
@@ -375,7 +383,9 @@ public partial class WhatsAnAiBridge
         foreach (var (text, path, rect, hover) in found)
         {
             var unique = counts[text] == 1;
-            var opt = entry.Options.FirstOrDefault(x => x.Text == text && (unique || x.Child.SequenceEqual(path)));
+            // Same element: same text and path, or (both unique) the same text wherever it moved.
+            var opt = entry.Options.FirstOrDefault(x => x.Text == text && x.Child.SequenceEqual(path))
+                      ?? (unique ? entry.Options.FirstOrDefault(x => x.Text == text && x.Unique) : null);
             if (opt == null)
             {
                 if (entry.Options.Count >= UcMaxOptions) entry.Options.Remove(entry.Options.OrderBy(x => x.LastSeen).First());
@@ -398,7 +408,7 @@ public partial class WhatsAnAiBridge
     /// <summary>From ObsFlush: writes the catalogue when it changed (at most every 500 ms).</summary>
     private void UcFlush()
     {
-        if (!_ucDirty || _uc == null || _ucWriting) return;
+        if (!_ucDirty || _uc == null || _ucWriting || _ucNoWrite) return;
         _ucDirty = false;
         _ucWriting = true;
         // Serialized and written on a pool thread (400 entries are a few hundred KB of JSON: not in a frame).
@@ -418,7 +428,7 @@ public partial class WhatsAnAiBridge
         });
     }
 
-    private volatile bool _ucWriting;
+    private volatile bool _ucWriting, _ucNoWrite;
 
     /// <summary>observe.ui_catalogue {query?, key?, options?}: the catalogued interfaces; query matches key, title, NPC,
     /// area or an option's text; options=false leaves the option lists out.</summary>
