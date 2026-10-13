@@ -385,7 +385,7 @@ public partial class WhatsAnAiBridge
             seen++;
             if (where != null && !where.Properties().All(p => string.Equals(LabelValue(item, p.Name)?.ToString(), p.Value.ToString(), StringComparison.OrdinalIgnoreCase)))
                 continue;
-            if (ReadAddress(item) is not { } addr || addr == 0) return Fail($"memory: matching {item.GetType().Name} has no address");
+            if (MemoryObjects.Address(item) is not { } addr || addr == 0) return Fail($"memory: matching {item.GetType().Name} has no address");
             var size = m["size"]?.Value<int>() ?? 4;
             var off = m["offset"]?.Value<long>() ?? 0;
             ulong raw = size switch

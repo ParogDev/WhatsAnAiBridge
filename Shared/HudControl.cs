@@ -374,8 +374,7 @@ public partial class WhatsAnAiBridge
     private List<string> StaleBridgeMethodNames(HashSet<Assembly> assemblies)
     {
         if (assemblies.Count == 0) return new();
-        var bridge = GameController.PluginBridge;
-        if (bridge?.GetType().GetField("_methods", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(bridge) is not IDictionary dict) return new();
+        if (BridgeRegistry() is not IDictionary dict) return new();
         var live = LivePluginAssemblies() ?? new();
         // foreach over IDictionary uses its IDictionaryEnumerator; Cast<DictionaryEntry>() would go through the plain
         // IEnumerable, which yields KeyValuePairs for the generic dictionary behind PluginBridge (InvalidCastException).

@@ -74,9 +74,8 @@ public partial class WhatsAnAiBridge
         public Dictionary<string, string>? PrevValues;                 // list
         public Dictionary<object, object?>? ValuesA, ValuesB;          // props / dict (swapped)
         public readonly Dictionary<object, string> KeyNames = new();
-        public Dictionary<Type, PropertyInfo[]> PropCache = new();
+        public Dictionary<Type, MemberIndex.Member[]> PropCache = new();
         public HashSet<string> SlowProps = new();
-        public readonly Dictionary<(Type, string), PropertyInfo?> SubProps = new();   // each: sub-path segments
         public readonly Dictionary<(object, int), string> EachUnits = new();           // each: (item key, prop) -> unit
         // noise and map
         public readonly Dictionary<string, (int count, double windowStart)> Rate = new();
@@ -169,7 +168,7 @@ public partial class WhatsAnAiBridge
     /// <summary>Why obj can't be watched in mode, or null.</summary>
     private static string? ModeMismatch(string mode, object obj) => mode switch
     {
-        "struct" => FindOffsetsStruct(obj).value == null ? $"{obj.GetType().Name} holds no cached offsets struct (struct mode needs one; try props)" : null,
+        "struct" => MemoryObjects.CachedStruct(obj).value == null ? $"{obj.GetType().Name} holds no cached offsets struct (struct mode needs one; try props)" : null,
         "dict" => obj is IDictionary ? null : $"{obj.GetType().Name} is not a dictionary (IDictionary)",
         "list" or "each" => obj is IEnumerable && obj is not string ? null : $"{obj.GetType().Name} is not a collection",
         _ => null,
@@ -231,11 +230,11 @@ public partial class WhatsAnAiBridge
 
     private void StructTick(LayerRun l, object obj, double t)
     {
-        var address = obj.GetType().GetProperty("Address")?.GetValue(obj) as long? ?? 0;
+        var address = MemoryObjects.Address(obj) ?? 0;
         if (address == 0) { l.NotNow = "Address is 0 right now"; return; }
         if (address != l.Address || l.Size == 0)
         {
-            var (structValue, _) = FindOffsetsStruct(obj);
+            var (structValue, _) = MemoryObjects.CachedStruct(obj);
             if (structValue == null) { l.Broken = $"{obj.GetType().Name} holds no cached offsets struct"; return; }
             l.Size = Math.Min(System.Runtime.InteropServices.Marshal.SizeOf(structValue.GetType()), LayerMaxStructBytes);
             l.Address = address;
@@ -324,14 +323,13 @@ public partial class WhatsAnAiBridge
     {
         var type = obj.GetType();
         if (!l.PropCache.TryGetValue(type, out var props))
-            l.PropCache[type] = props = type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
-                .Where(p => p.GetIndexParameters().Length == 0 && p.CanRead && IsScalar(p.PropertyType) && p.Name is not ("Address" or "M"))
-                .ToArray();
+            l.PropCache[type] = props = MemberIndex.ReadableProperties(type)
+                .Where(p => IsScalar(p.Type) && p.Name is not ("Address" or "M")).ToArray();
         foreach (var p in props)
         {
             if (l.SlowProps.Contains(p.Name)) continue;
             var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            try { into[p.Name] = p.GetValue(obj); } catch { continue; }
+            try { into[p.Name] = p.Get(obj); } catch { continue; }
             if (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds > 1) l.SlowProps.Add(p.Name);   // skipped from now on
         }
     }
@@ -385,11 +383,9 @@ public partial class WhatsAnAiBridge
         foreach (var seg in path.Split('.'))
         {
             if (cur == null) return null;
-            var type = cur.GetType();
-            if (!l.SubProps.TryGetValue((type, seg), out var prop))
-                l.SubProps[(type, seg)] = prop = type.GetProperty(seg, BindingFlags.Instance | BindingFlags.Public);
-            if (prop == null) throw new MissingMemberException($"{type.Name} has no public property '{seg}' (in '{path}')");
-            cur = prop.GetValue(cur);
+            var prop = MemberIndex.Find(cur.GetType(), seg, kinds: MemberIndex.Kinds.Property);
+            if (prop is not { CanRead: true }) throw new MissingMemberException($"{cur.GetType().Name} has no public property '{seg}' (in '{path}')");
+            cur = prop.Get(cur);
         }
         return cur;
     }
@@ -404,7 +400,7 @@ public partial class WhatsAnAiBridge
         foreach (var item in items)
         {
             if (item == null || ++n > 5000) continue;
-            var id = Text(item.GetType().GetProperty(keyProp)?.GetValue(item) ?? item);
+            var id = Text(MemberIndex.Find(item.GetType(), keyProp, kinds: MemberIndex.Kinds.Property)?.Get(item) ?? item);
             now[id] = Preview(item);
         }
         var prev = l.PrevValues;
@@ -420,8 +416,8 @@ public partial class WhatsAnAiBridge
 
     private static string Preview(object item)
     {
-        foreach (var name in new[] { "Path", "Name", "RenderName", "Text" })
-            if (item.GetType().GetProperty(name)?.GetValue(item) is string s && s.Length > 0) return s.Length > 80 ? s[..80] : s;
+        foreach (var m in MemoryObjects.NamingMembers(item.GetType()))
+            if (m.Get(item) is string s && s.Length > 0) return s.Length > 80 ? s[..80] : s;
         return item.GetType().Name;
     }
 
