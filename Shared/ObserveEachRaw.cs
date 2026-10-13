@@ -46,7 +46,7 @@ public partial class WhatsAnAiBridge
             foreach (var item in items)
             {
                 if (item == null || ++n > 2000) continue;
-                c.Items.Add((SubPath(l, item, l.Spec.Key ?? "Address") ?? n, ItemAddress(item), item));
+                c.Items.Add((SubPath(l, item, l.Spec.Key ?? "Address") ?? n, MemoryObjects.Address(item) ?? 0, item));
             }
             if (c.Plans == null && c.Items.Count > 0) CompileEach(l, c);
             if (c.Plans != null) CheckEach(l, c);
@@ -108,8 +108,6 @@ public partial class WhatsAnAiBridge
         return t.IsEnum ? Enum.ToObject(t, v) : v;
     }
 
-    private static long ItemAddress(object item) => item.GetType().GetProperty("Address")?.GetValue(item) as long? ?? 0;
-
     private void CompileEach(LayerRun l, EachCache c)
     {
         var props = l.Spec.Props!;
@@ -128,17 +126,17 @@ public partial class WhatsAnAiBridge
         var segs = path.Split('.');
         var steps = new List<RawStep>();
         object cur = item;
-        var addr = ItemAddress(item);
+        var addr = MemoryObjects.Address(item) ?? 0;
         var walk = $"{l.Spec.Path}[0]";
         for (var k = 0; k < segs.Length; k++)
         {
             if (addr == 0) { note = $"reflection: '{(k == 0 ? "item" : segs[k - 1])}' has no Address"; return null; }
-            var prop = cur.GetType().GetProperty(segs[k]);
-            var v = prop?.GetValue(cur);
+            var prop = MemberIndex.Find(cur.GetType(), segs[k], kinds: MemberIndex.Kinds.Property);
+            var v = prop is { CanRead: true } ? prop.Get(cur) : null;
             if (prop == null || v == null) { note = $"reflection: '{segs[k]}' is null on item 0"; return null; }
             if (k < segs.Length - 1)
             {
-                var child = ItemAddress(v);
+                var child = MemoryObjects.Address(v) ?? 0;
                 var hits = Enumerable.Range(0, 0x200 / 8).Where(o => RawRead<long>(addr + o * 8) == child).ToList();
                 if (child == 0 || hits.Count != 1) { note = $"reflection: {hits.Count} pointers to '{segs[k]}' in the first 0x200 bytes of {cur.GetType().Name}"; return null; }
                 steps.Add(new RawStep { Ptr = true, Off = hits[0] * 8 });
@@ -146,7 +144,7 @@ public partial class WhatsAnAiBridge
                 cur = v; addr = child;
                 continue;
             }
-            var t = prop.PropertyType;
+            var t = prop.Type;
             var raw = t.IsEnum ? Enum.GetUnderlyingType(t) : t;
             if (raw != typeof(long) && raw != typeof(int) && raw != typeof(short) && raw != typeof(byte) && raw != typeof(ulong)
                 && raw != typeof(uint) && raw != typeof(ushort) && raw != typeof(sbyte) && raw != typeof(bool))

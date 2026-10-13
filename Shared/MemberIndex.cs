@@ -31,8 +31,8 @@ namespace WhatsAnAiBridge;
 ///   name and by simple name (case-insensitive), keeping every candidate: two types named "Player" are both listed and
 ///   the caller chooses (ExpressionWalker.ResolveComponentType prefers the Component subclass).
 ///
-/// TODO(A2): move MemoryInspector, ObserveLayers/ObserveEachRaw, SettingsControl, RuntimeLayout and HudIntrospection onto
-/// this (Find/Property/Field with NonPublic flags, Readable for "public scalar props", Types for type-by-name scans).
+/// Helpers for memory objects built on it (Address, the cached offsets struct, struct types by name, naming
+/// properties) are in MemoryObjects.cs.
 /// </summary>
 internal static class MemberIndex
 {
@@ -130,6 +130,7 @@ internal static class MemberIndex
         private FieldInfo[]? _allFields;
         private Member[]? _readable;
         private PropertyInfo[]? _indexers;
+        private Member[]? _readableProperties;
         internal readonly ConcurrentDictionary<(string name, BindingFlags flags, Kinds kinds), Member?> ByName = new();
         internal readonly ConcurrentDictionary<(string name, Type? typeArg, string signature), MethodInfo?> Methods = new();
 
@@ -150,6 +151,13 @@ internal static class MemberIndex
         /// <summary>Public instance indexers (any parameter count), most-derived first.</summary>
         public PropertyInfo[] Indexers => _indexers ??= AllProperties.Where(p => p.GetIndexParameters().Length > 0)
             .OrderByDescending(p => Depth(p.DeclaringType)).ToArray();
+
+        /// <summary>
+        /// Public instance properties with a getter (no indexers) in reflection's own order, for walkers that show an
+        /// object's properties in that order (settings, props layers). Hidden duplicates stay, as GetProperties gives them.
+        /// </summary>
+        public Member[] ReadableProperties => _readableProperties ??= AllProperties
+            .Where(p => p.GetIndexParameters().Length == 0 && p.GetMethod != null).Select(For).ToArray();
 
         private Member[] BuildReadable()
         {
@@ -234,6 +242,25 @@ internal static class MemberIndex
 
     /// <summary>Public instance members you can read (see <see cref="TypeMembers.Readable"/>), sorted by name.</summary>
     internal static Member[] Readable(Type type) => Of(type).Readable;
+
+    /// <summary>Public instance properties with a getter (no indexers) in reflection's order (<see cref="TypeMembers.ReadableProperties"/>).</summary>
+    internal static Member[] ReadableProperties(Type type) => Of(type).ReadableProperties;
+
+    /// <summary>The value of the property or field <paramref name="name"/> on <paramref name="target"/>, or null when it has none or its getter throws.</summary>
+    internal static object? TryGet(object? target, string name, BindingFlags flags = PublicInstance, Kinds kinds = Kinds.Both)
+    {
+        if (target == null || Find(target.GetType(), name, flags, kinds) is not { CanRead: true } m) return null;
+        try { return m.Get(target); } catch { return null; }
+    }
+
+    /// <summary>A public static method by exact parameter types (cached), or null.</summary>
+    internal static MethodInfo? StaticMethod(Type type, string name, params Type[] parameterTypes)
+    {
+        var key = ("static " + name, (Type?)null, Signature(parameterTypes));
+        var tm = Of(type);
+        if (tm.Methods.TryGetValue(key, out var hit)) return hit;
+        return tm.Methods.GetOrAdd(key, type.GetMethod(name, BindingFlags.Public | BindingFlags.Static, parameterTypes));
+    }
 
     /// <summary>A public instance method by exact parameter types (cached; most-derived on a tie), or null.</summary>
     internal static MethodInfo? Method(Type type, string name, params Type[] parameterTypes)

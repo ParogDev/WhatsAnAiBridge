@@ -106,14 +106,11 @@ public partial class WhatsAnAiBridge
     private static void Walk(object obj, string prefix, string? group, bool isBridge, JArray into, int depth)
     {
         if (depth > 4) return;
-        foreach (var prop in obj.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        foreach (var (prop, v) in SettingsMembers(obj))
         {
-            if (prop.GetIndexParameters().Length > 0) continue;
-            object? v;
-            try { v = prop.GetValue(obj); } catch { continue; }
             if (v == null) continue;
             var path = prefix + prop.Name;
-            var (menuName, tooltip) = MenuOf(prop);
+            var (menuName, tooltip) = MenuOf(prop.Property!);
             if (IsNode(v.GetType()))
             {
                 into.Add(Describe(prop.Name, path, v, group, menuName, tooltip, isBridge));
@@ -121,10 +118,27 @@ public partial class WhatsAnAiBridge
             }
             // A nested settings object (a class holding nodes): its nodes go into a group named after it.
             var t = v.GetType();
-            if (t.IsClass && t != typeof(string) && v is not IEnumerable && t.GetProperties().Any(pp => IsNode(pp.PropertyType)))
+            if (t.IsClass && t != typeof(string) && v is not IEnumerable && MemberIndex.Of(t).AllProperties.Any(pp => IsNode(pp.PropertyType)))
                 Walk(v, path + ".", menuName ?? Words(prop.Name), isBridge, into, depth + 1);
         }
     }
+
+    /// <summary>
+    /// The one walk over a settings object, shared by settings.describe and hud.plugin_settings: its public readable
+    /// properties in declaration order with their values (a getter that throws is skipped).
+    /// </summary>
+    private static IEnumerable<(MemberIndex.Member member, object? value)> SettingsMembers(object obj)
+    {
+        foreach (var m in MemberIndex.ReadableProperties(obj.GetType()))
+        {
+            object? v;
+            try { v = m.Get(obj); } catch { continue; }
+            yield return (m, v);
+        }
+    }
+
+    /// <summary>A settings node's property (Value, Min, Max, Values...), or null when it has none or the getter throws.</summary>
+    private static object? NodeMember(object node, string name) => MemberIndex.TryGet(node, name, kinds: MemberIndex.Kinds.Property);
 
     private static bool IsNode(Type t) => BaseName(t).EndsWith("Node", StringComparison.Ordinal);
     private static string BaseName(Type t) => t.Name.Contains('`') ? t.Name[..t.Name.IndexOf('`')] : t.Name;
@@ -134,8 +148,7 @@ public partial class WhatsAnAiBridge
     {
         var a = p.GetCustomAttributes(true).FirstOrDefault(x => x.GetType().Name == "MenuAttribute");
         if (a == null) return (null, null);
-        string? F(string n) => a.GetType().GetField(n)?.GetValue(a) as string ?? a.GetType().GetProperty(n)?.GetValue(a) as string;
-        return (F("MenuName"), F("Tooltip"));
+        return (MemberIndex.TryGet(a, "MenuName") as string, MemberIndex.TryGet(a, "Tooltip") as string);
     }
 
     private static string Words(string name) => System.Text.RegularExpressions.Regex.Replace(name, "(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ");
@@ -160,8 +173,7 @@ public partial class WhatsAnAiBridge
             ["permission"] = meta.permission,
             ["readOnly"] = kind is "hotkey" or "button" or "unknown",
         };
-        object? value = null;
-        try { value = t.GetProperty("Value")?.GetValue(node); } catch { }
+        var value = NodeMember(node, "Value");
         o["value"] = value switch
         {
             null => JValue.CreateNull(),
@@ -174,10 +186,10 @@ public partial class WhatsAnAiBridge
         };
         if (kind == "range")
         {
-            try { o["min"] = Num(t.GetProperty("Min")?.GetValue(node)); } catch { }
-            try { o["max"] = Num(t.GetProperty("Max")?.GetValue(node)); } catch { }
+            try { o["min"] = Num(NodeMember(node, "Min")); } catch { }
+            try { o["max"] = Num(NodeMember(node, "Max")); } catch { }
         }
-        if (kind == "list" && t.GetProperty("Values")?.GetValue(node) is IEnumerable vals)
+        if (kind == "list" && NodeMember(node, "Values") is IEnumerable vals)
             o["options"] = new JArray(vals.Cast<object>().Take(200).Select(x => x?.ToString()));
         if (kind == "text" && IsSecret(name, value)) o["description"] = ((o["description"]?.ToString() ?? "") + " (write-only: the value is never shown)").Trim();
         return o;
@@ -189,7 +201,7 @@ public partial class WhatsAnAiBridge
     /// <summary>#RRGGBBAA from System.Drawing.Color (PoE2) or SharpDX.Color (PoE1): both expose R, G, B, A.</summary>
     private static string ColorHex(object c)
     {
-        int B(string n) => Convert.ToInt32(c.GetType().GetProperty(n)?.GetValue(c) ?? c.GetType().GetField(n)?.GetValue(c) ?? 0, CultureInfo.InvariantCulture);
+        int B(string n) => Convert.ToInt32(MemberIndex.TryGet(c, n) ?? 0, CultureInfo.InvariantCulture);
         return $"#{B("R"):X2}{B("G"):X2}{B("B"):X2}{B("A"):X2}";
     }
 
@@ -223,24 +235,24 @@ public partial class WhatsAnAiBridge
         if (w == null) return Err("unknown_plugin", $"No loaded plugin '{plugin}'.");
         var isBridge = ReferenceEquals(Prop(w, "Plugin"), this);
         object? owner = Prop(Prop(w, "Plugin"), "_Settings");
-        PropertyInfo? prop = null;
+        MemberIndex.Member? prop = null;
         var parts = path.Split('.');
         for (var i = 0; i < parts.Length && owner != null; i++)
         {
-            prop = owner.GetType().GetProperty(parts[i], BindingFlags.Public | BindingFlags.Instance);
-            if (prop == null) return Err("unknown_setting", $"'{parts[i]}' is not a setting of {w.Name} (at {string.Join('.', parts.Take(i))}).");
-            if (i < parts.Length - 1) owner = prop.GetValue(owner);
+            prop = MemberIndex.Find(owner.GetType(), parts[i], kinds: MemberIndex.Kinds.Property);
+            if (prop is not { CanRead: true }) return Err("unknown_setting", $"'{parts[i]}' is not a setting of {w.Name} (at {string.Join('.', parts.Take(i))}).");
+            if (i < parts.Length - 1) owner = prop.Get(owner);
         }
-        var node = prop?.GetValue(owner);
+        var node = owner == null ? null : prop?.Get(owner);
         if (node == null || !IsNode(node.GetType())) return Err("unknown_setting", $"{path} of {w.Name} is not a settings node.");
-        var (menuName, tooltip) = MenuOf(prop!);
-        var before = Describe(prop!.Name, path, node, null, menuName, tooltip, isBridge);
+        var (menuName, tooltip) = MenuOf(prop!.Property!);
+        var before = Describe(prop.Name, path, node, null, menuName, tooltip, isBridge);
         if (before["permission"]?.Value<bool>() == true && !allowPermission)
             return Err("permission_setting", $"{before["label"]} gives bridge clients power, so it can't be changed through MCP tools. Change it in game or in the Hexile control center (it asks you to confirm).");
         if (before["readOnly"]?.Value<bool>() == true)
             return Err("read_only", $"{before["label"]} ({before["kind"]}) can only be changed in game.");
 
-        var vp = node.GetType().GetProperty("Value");
+        var vp = MemberIndex.Property(node.GetType(), "Value");
         if (vp == null || !vp.CanWrite) return Err("read_only", $"{path} has no writable Value.");
         object? v;
         try { v = Coerce(before["kind"]!.ToString(), value, vp.PropertyType, node); }
@@ -261,8 +273,7 @@ public partial class WhatsAnAiBridge
             case "range":
             {
                 var d = value.Value<double>();
-                var t = node.GetType();
-                double Lim(string n) => Convert.ToDouble(t.GetProperty(n)?.GetValue(node), CultureInfo.InvariantCulture);
+                double Lim(string n) => Convert.ToDouble(NodeMember(node, n) ?? throw new InvalidOperationException($"{node.GetType().Name}.{n} can't be read, so the range can't be checked"), CultureInfo.InvariantCulture);
                 if (d < Lim("Min") || d > Lim("Max")) throw new ArgumentOutOfRangeException(nameof(value), $"{d} is outside {Lim("Min")}-{Lim("Max")}");
                 return Convert.ChangeType(target == typeof(int) ? Math.Round(d) : d, target, CultureInfo.InvariantCulture);
             }
@@ -273,7 +284,7 @@ public partial class WhatsAnAiBridge
             case "list":
             {
                 var s = value.ToString();
-                if (node.GetType().GetProperty("Values")?.GetValue(node) is IEnumerable vals && !vals.Cast<object>().Any(x => x?.ToString() == s))
+                if (NodeMember(node, "Values") is IEnumerable vals && !vals.Cast<object>().Any(x => x?.ToString() == s))
                     throw new ArgumentException($"'{s}' is not one of the choices");
                 return s;
             }
@@ -289,7 +300,7 @@ public partial class WhatsAnAiBridge
         if (h.Length is not (6 or 8)) throw new FormatException("colour must be #RRGGBB or #RRGGBBAA");
         byte P(int i) => byte.Parse(h.Substring(i, 2), NumberStyles.HexNumber);
         byte r = P(0), g = P(2), b = P(4), a = h.Length == 8 ? P(6) : (byte)255;
-        var fromArgb = target.GetMethod("FromArgb", [typeof(int), typeof(int), typeof(int), typeof(int)]);
+        var fromArgb = MemberIndex.StaticMethod(target, "FromArgb", typeof(int), typeof(int), typeof(int), typeof(int));
         if (fromArgb != null) return fromArgb.Invoke(null, [(int)a, (int)r, (int)g, (int)b])!;
         var ctor = target.GetConstructor([typeof(byte), typeof(byte), typeof(byte), typeof(byte)]);
         if (ctor != null) return ctor.Invoke([r, g, b, a]);

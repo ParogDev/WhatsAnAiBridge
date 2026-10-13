@@ -42,18 +42,15 @@ public partial class WhatsAnAiBridge
             obj = new ExpressionWalker(GameController).Resolve(path, out var error);
             if (error != null) return Err("resolve_failed", $"{path}: {error}");
             if (obj == null) return Err("null", $"{path} is null right now");
-            (structValue, via) = FindOffsetsStruct(obj);
+            (structValue, via) = MemoryObjects.CachedStruct(obj);
             if (structValue == null)
                 return Err("no_struct_cache", $"{obj.GetType().Name} holds no cached offsets struct (no CachedValue<T>/FrameCache<T> field or offsets-typed property)");
             structType = structValue.GetType();
         }
         else if (!string.IsNullOrWhiteSpace(typeName))
         {
-            structType = AppDomain.CurrentDomain.GetAssemblies()
-                .Where(a => a.GetName().Name is { } n && (n.StartsWith("GameOffsets", StringComparison.Ordinal) || n.StartsWith("ExileCore", StringComparison.Ordinal)))
-                .SelectMany(a => { try { return a.GetTypes(); } catch { return []; } })
-                .FirstOrDefault(t => t.IsValueType && (t.FullName == typeName || t.Name == typeName));
-            if (structType == null) return Err("type_not_found", $"No struct '{typeName}' in GameOffsets*/ExileCore*");
+            structType = MemoryObjects.StructType(typeName);
+            if (structType == null) return Err("type_not_found", $"No loaded struct named '{typeName}' (GameOffsets* first, then ExileCore*)");
         }
         else return Err("bad_request", "Pass path (a memory object) or type (an offsets struct).");
 
@@ -82,7 +79,7 @@ public partial class WhatsAnAiBridge
 
         o["path"] = path; o["object"] = obj.GetType().Name; o["structVia"] = via;
         // Is the struct a copy of the memory at Address? Compare the whole struct with fresh bytes.
-        var address = obj.GetType().GetProperty("Address")?.GetValue(obj) as long? ?? 0;
+        var address = MemoryObjects.Address(obj) ?? 0;
         byte[]? live = null;
         if (address != 0)
         {
@@ -93,15 +90,15 @@ public partial class WhatsAnAiBridge
         }
         // Property -> field by value (unique, non-zero, equal), then field -> fresh memory.
         var props = new JArray();
-        foreach (var prop in obj.GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public))
+        foreach (var prop in MemberIndex.ReadableProperties(obj.GetType()))
         {
-            if (prop.GetIndexParameters().Length > 0 || !IsComparable(prop.PropertyType) || prop.Name == "Address") continue;
+            if (!IsComparable(prop.Type) || prop.Name == "Address") continue;
             object? pv;
-            try { pv = prop.GetValue(obj); } catch { continue; }
+            try { pv = prop.Get(obj); } catch { continue; }
             if (pv == null || IsZero(pv)) continue;
-            var hits = fields.Where(x => x.Type == prop.PropertyType && Equals(ChainGet(x.Chain, structValue!), pv)).ToList();
+            var hits = fields.Where(x => x.Type == prop.Type && Equals(ChainGet(x.Chain, structValue!), pv)).ToList();
             if (hits.Count == 0) continue;
-            var e = new JObject { ["property"] = prop.Name, ["type"] = prop.PropertyType.Name };
+            var e = new JObject { ["property"] = prop.Name, ["type"] = prop.Type.Name };
             // Overlapping fields at one offset (obfuscators add decoy fields over real ones) are the same memory: not ambiguous.
             if (hits.Select(h => h.Off).Distinct().Count() > 1) { e["ambiguous"] = new JArray(hits.Select(h => $"{h.Name}@0x{h.Off:X}")); props.Add(e); continue; }
             var hit = hits.OrderBy(h => h.Name.Length).First();
@@ -112,34 +109,6 @@ public partial class WhatsAnAiBridge
         }
         o["properties"] = props;
         return o;
-    }
-
-    /// <summary>The offsets struct a memory object caches: a CachedValue&lt;T&gt;/FrameCache&lt;T&gt; field's Value, or a property typed as a GameOffsets struct.</summary>
-    private static (object? value, string? via) FindOffsetsStruct(object obj)
-    {
-        // Candidates: CachedValue<T>/FrameCache<T> field values and GameOffsets-typed properties. An object can cache
-        // several (IngameState caches a Vector2 too): prefer GameOffsets types, then the largest struct.
-        var found = new List<(object v, string via, bool game, int size)>();
-        static int Size(Type t) { try { return Marshal.SizeOf(t); } catch { return 0; } }
-        static bool Game(Type t) => t.Assembly.GetName().Name?.StartsWith("GameOffsets", StringComparison.Ordinal) == true;
-        for (var t = obj.GetType(); t != null && t != typeof(object); t = t.BaseType)
-            foreach (var f in t.GetFields(LayoutFlags | BindingFlags.DeclaredOnly))
-            {
-                if (f.FieldType is not { IsGenericType: true } ft || !ft.Name.Contains("Cache", StringComparison.Ordinal)) continue;
-                var arg = ft.GetGenericArguments()[0];
-                if (!arg.IsValueType || arg.IsPrimitive) continue;
-                try
-                {
-                    var cache = f.GetValue(obj);
-                    if (cache?.GetType().GetProperty("Value")?.GetValue(cache) is { } v) found.Add((v, $"{t.Name}.{f.Name}.Value", Game(arg), Size(arg)));
-                }
-                catch { }
-            }
-        foreach (var prop in obj.GetType().GetProperties(LayoutFlags))
-            if (prop.PropertyType is { IsValueType: true, IsPrimitive: false } pt && Game(pt) && prop.GetIndexParameters().Length == 0)
-                try { if (prop.GetValue(obj) is { } v) found.Add((v, $"{obj.GetType().Name}.{prop.Name}", true, Size(pt))); } catch { }
-        var best = found.OrderByDescending(x => x.game).ThenByDescending(x => x.size).FirstOrDefault();
-        return best.v == null ? (null, null) : (best.v, best.via);
     }
 
     private sealed record LayoutField(string Name, Type Type, int Off, int Len, int? Meta, FieldInfo[] Chain);

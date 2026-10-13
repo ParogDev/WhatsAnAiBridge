@@ -262,15 +262,14 @@ public partial class WhatsAnAiBridge
     private static string ObjectPreview(object v, Type t)
     {
         var sb = new StringBuilder(t.Name);
-        foreach (var name in PreviewNames)
+        foreach (var p in MemoryObjects.NamingMembers(t))
         {
-            var p = MemberIndex.Find(t, name, kinds: MemberIndex.Kinds.Property);
-            if (p == null || !p.CanRead || !(p.Type == typeof(string) || p.Type.IsPrimitive)) continue;
+            if (!(p.Type == typeof(string) || p.Type.IsPrimitive)) continue;
             try
             {
                 var val = p.Get(v);
                 if (val is string s && s.Length == 0) continue;
-                if (val != null) { sb.Append(' ').Append(name).Append('=').Append(val is string str ? Quote(str) : Number(val)); break; }
+                if (val != null) { sb.Append(' ').Append(p.Name).Append('=').Append(val is string str ? Quote(str) : Number(val)); break; }
             }
             catch { }
         }
@@ -278,8 +277,6 @@ public partial class WhatsAnAiBridge
             try { sb.Append((bool)vis.Get(v)! ? " visible" : " hidden"); } catch { }
         return sb.ToString();
     }
-
-    private static readonly string[] PreviewNames = ["RenderName", "Name", "Text", "Path", "Id"];
 
     // ── C# accessors ─────────────────────────────────────────────────
 

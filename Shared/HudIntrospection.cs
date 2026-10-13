@@ -104,11 +104,9 @@ public partial class WhatsAnAiBridge
     {
         if (depth > 4 || !seen.Add(obj)) return "[...]";
         var o = new JObject();
-        foreach (var prop in obj.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        foreach (var (prop, v) in SettingsMembers(obj))
         {
-            if (prop.GetIndexParameters().Length > 0 || o.Count >= 150) continue;
-            object? v;
-            try { v = prop.GetValue(obj); } catch { continue; }
+            if (o.Count >= 150) break;
             if (v == null) { o[prop.Name] = JValue.CreateNull(); continue; }
             // SettingValue redacts string values under secret-looking names (bools, numbers, enums stay).
             o[prop.Name] = SettingValue(prop.Name, v, depth, seen);
@@ -123,14 +121,12 @@ public partial class WhatsAnAiBridge
         if (t.IsPrimitive || v is string || v is decimal || t.IsEnum)
             return IsSecret(name, v) && v is string ? "[redacted]" : JToken.FromObject(t.IsEnum ? v.ToString()! : v);
 
-        var baseName = t.Name.Contains('`') ? t.Name[..t.Name.IndexOf('`')] : t.Name; // RangeNode`1 -> RangeNode
-        var valueProp = t.GetProperty("Value", BindingFlags.Public | BindingFlags.Instance);
-        if (baseName.EndsWith("Node", StringComparison.Ordinal) && (valueProp == null || valueProp.GetIndexParameters().Length > 0))
-            return new JObject { ["node"] = baseName }; // ButtonNode and other value-less nodes
-        if (valueProp != null && valueProp.GetIndexParameters().Length == 0 && baseName.EndsWith("Node", StringComparison.Ordinal))
+        var baseName = BaseName(t); // RangeNode`1 -> RangeNode
+        if (IsNode(t))
         {
-            object? inner;
-            try { inner = valueProp.GetValue(v); } catch { inner = null; }
+            if (MemberIndex.Find(t, "Value", kinds: MemberIndex.Kinds.Property) == null)
+                return new JObject { ["node"] = baseName }; // ButtonNode and other value-less nodes
+            var inner = NodeMember(v, "Value");
             var node = new JObject { ["node"] = baseName };
             node["value"] = inner == null ? JValue.CreateNull()
                 : IsSecret(name, inner) && inner is string ? "[redacted]"
@@ -138,11 +134,10 @@ public partial class WhatsAnAiBridge
                 : inner.ToString();
             foreach (var extra in new[] { "Min", "Max", "Values" })
             {
-                var ep = t.GetProperty(extra, BindingFlags.Public | BindingFlags.Instance);
-                if (ep == null) continue;
+                if (MemberIndex.Find(t, extra, kinds: MemberIndex.Kinds.Property) is not { CanRead: true } ep) continue;
                 try
                 {
-                    var ev = ep.GetValue(v);
+                    var ev = ep.Get(v);
                     if (ev is IEnumerable e && ev is not string) node[extra.ToLowerInvariant()] = new JArray(e.Cast<object>().Take(50).Select(x => x?.ToString()));
                     else if (ev != null) node[extra.ToLowerInvariant()] = JToken.FromObject(ev is IConvertible ? ev : ev.ToString()!);
                 }
@@ -162,13 +157,9 @@ public partial class WhatsAnAiBridge
 
     // ── PluginBridge registry ────────────────────────────────────────
 
-    /// <summary>PluginBridge's private registry, or null when this HUD build has no _methods dictionary.</summary>
-    private IDictionary? BridgeRegistry()
-    {
-        var bridge = GameController.PluginBridge;
-        var field = bridge?.GetType().GetField("_methods", BindingFlags.NonPublic | BindingFlags.Instance);
-        return field?.GetValue(bridge) as IDictionary;
-    }
+    /// <summary>PluginBridge's private registry, or null when this HUD build has no _methods dictionary (the one accessor: listing, calls, stale cleanup).</summary>
+    private IDictionary? BridgeRegistry() =>
+        MemberIndex.TryGet(GameController.PluginBridge, "_methods", BindingFlags.NonPublic | BindingFlags.Instance, MemberIndex.Kinds.Field) as IDictionary;
 
     private static JObject BridgeUnavailable() =>
         new() { ["error"] = "unavailable", ["message"] = "PluginBridge._methods not found in this HUD build (check with hud_type)." };
@@ -301,10 +292,5 @@ public partial class WhatsAnAiBridge
         return $"{n}<{string.Join(", ", t.GetGenericArguments().Select(TypeName))}>";
     }
 
-    private static object? Prop(object? obj, string name)
-    {
-        if (obj == null) return null;
-        try { return obj.GetType().GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(obj); }
-        catch { return null; }
-    }
+    private static object? Prop(object? obj, string name) => MemberIndex.TryGet(obj, name, MemberIndex.AnyInstance, MemberIndex.Kinds.Property);
 }

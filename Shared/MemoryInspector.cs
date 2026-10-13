@@ -109,11 +109,11 @@ public partial class WhatsAnAiBridge
         {
             index++;
             if (rows.Count >= limit || sw.ElapsedMilliseconds > 120) break;
-            if (item == null || ReadAddress(item) is not { } addr || addr == 0) continue;
+            if (item == null || MemoryObjects.Address(item) is not { } addr || addr == 0) continue;
             if (size <= 0)
             {
-                structType ??= CachedStructType(item.GetType(), out _);
-                size = structType != null ? SizeOf(structType) : 64;
+                structType ??= MemoryObjects.StructSources(item.GetType()).FirstOrDefault()?.StructType;
+                size = structType != null ? MemoryObjects.SizeOf(structType) : 64;
             }
             size = Math.Clamp(size, 1, 1024);
             var bytes = ctx.Read(addr + offset, size);
@@ -143,14 +143,8 @@ public partial class WhatsAnAiBridge
         foreach (var part in memberPath.Split('.'))
         {
             if (cur == null) return JValue.CreateNull();
-            var t = cur.GetType();
-            var prop = t.GetProperty(part, BindingFlags.Public | BindingFlags.Instance);
-            try
-            {
-                if (prop != null && prop.GetIndexParameters().Length == 0) cur = prop.GetValue(cur);
-                else if (t.GetField(part, BindingFlags.Public | BindingFlags.Instance) is { } f) cur = f.GetValue(cur);
-                else return $"[no member {part}]";
-            }
+            if (MemberIndex.Find(cur.GetType(), part) is not { CanRead: true } m) return $"[no member {part}]";
+            try { cur = m.Get(cur); }
             catch (Exception ex) { return $"[error: {(ex as TargetInvocationException)?.InnerException?.Message ?? ex.Message}]"; }
         }
         return cur switch
@@ -180,7 +174,7 @@ public partial class WhatsAnAiBridge
             target = new ExpressionWalker(GameController).Resolve(path, out var error);
             if (error != null) return Err("resolve_failed", error);
             if (target == null) return Err("null", $"'{path}' is null.");
-            if (ReadAddress(target) is not { } a || a == 0) return Err("no_address", $"'{path}' ({target.GetType().Name}) has no Address: it isn't a memory object.");
+            if (MemoryObjects.Address(target) is not { } a || a == 0) return Err("no_address", $"'{path}' ({target.GetType().Name}) has no Address: it isn't a memory object.");
             address = a;
             how = "path";
         }
@@ -189,18 +183,19 @@ public partial class WhatsAnAiBridge
 
         if (typeName != null)
         {
-            structType = FindType(typeName);
+            structType = MemoryObjects.StructType(typeName);
             if (structType == null) return Err("unknown_type", $"No loaded type named '{typeName}' (use hud_find_types).");
         }
         else if (target != null)
         {
-            structType = CachedStructType(target.GetType(), out var field);
-            how = field != null ? $"{target.GetType().Name}.{field} (the struct the HUD reads)" : how;
+            var source = MemoryObjects.StructSources(target.GetType()).FirstOrDefault();
+            structType = source?.StructType;
+            how = source != null ? $"{target.GetType().Name}.{source.Member.Name} (the struct the HUD reads)" : how;
         }
         if (structType == null)
             return Err("no_struct", "This object caches no offsets struct; pass type (a struct with [FieldOffset] fields, see hud_type).");
 
-        var structSize = SizeOf(structType);
+        var structSize = MemoryObjects.SizeOf(structType);
         // extend: also read past the declared end - patches often append members the HUD doesn't know yet.
         var readSize = Math.Clamp(structSize + Math.Clamp(p?["extend"]?.Value<int>() ?? 0, 0, MaxReadBytes), 8, MaxReadBytes);
         var bytes = ctx.Read(address, readSize);
@@ -257,7 +252,7 @@ public partial class WhatsAnAiBridge
                 Flatten(ft, off, name + ".", bytes, ctx, into, depth + 1);
                 continue;
             }
-            int size = Math.Max(1, SizeOf(ft));
+            int size = Math.Max(1, MemoryObjects.SizeOf(ft));
             var row = new JObject { ["off"] = off, ["size"] = size, ["name"] = name, ["type"] = ExpressionWalker.FormatTypeName(ft) };
             if (off + size > bytes.Length) { row["check"] = "unread"; into.Add(row); continue; }
             row["bytes"] = BitConverter.ToString(bytes, off, Math.Min(size, 32)).Replace("-", " ");
@@ -463,15 +458,9 @@ public partial class WhatsAnAiBridge
         var obj = new ExpressionWalker(GameController).Resolve(path, out var error);
         if (error != null) return (0, "", Err("resolve_failed", error));
         if (obj == null) return (0, "", Err("null", $"'{path}' is null."));
-        if (ReadAddress(obj) is not { } addr || addr == 0)
+        if (MemoryObjects.Address(obj) is not { } addr || addr == 0)
             return (0, "", Err("no_address", $"'{path}' ({obj.GetType().Name}) has no Address; pass a path to a memory object or an address."));
         return (addr, $"{path}.Address", null);
-    }
-
-    private static long? ReadAddress(object obj)
-    {
-        var p = obj.GetType().GetProperty("Address", BindingFlags.Public | BindingFlags.Instance);
-        try { return p?.GetValue(obj) is long l ? l : null; } catch { return null; }
     }
 
     internal static long? ParseAddress(JToken? t)
@@ -482,48 +471,6 @@ public partial class WhatsAnAiBridge
         if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
         else if (long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var dec)) return dec;
         return long.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var h) ? h : null;
-    }
-
-    /// <summary>The T of the first private CachedValue&lt;T&gt; / FrameCache&lt;T&gt; field (on the type or a base) whose T is a struct.</summary>
-    private static Type? CachedStructType(Type t, out string? field)
-    {
-        for (var cur = t; cur != null && cur != typeof(object); cur = cur.BaseType)
-            foreach (var f in cur.GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.DeclaredOnly))
-            {
-                var ft = f.FieldType;
-                for (var g = ft; g != null && g != typeof(object); g = g.BaseType)
-                    if (g.IsGenericType && g.GetGenericArguments() is [var arg] && arg.IsValueType && !arg.IsPrimitive
-                        && (g.Name.StartsWith("CachedValue", StringComparison.Ordinal) || g.Name.StartsWith("FrameCache", StringComparison.Ordinal)))
-                    { field = f.Name; return arg; }
-            }
-        field = null;
-        return null;
-    }
-
-    private static Type? FindType(string name)
-    {
-        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-        {
-            if (asm.IsDynamic) continue;
-            var t = asm.GetType(name, false);
-            if (t != null) return t;
-        }
-        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-        {
-            if (asm.IsDynamic) continue;
-            Type[] types;
-            try { types = asm.GetTypes(); } catch (ReflectionTypeLoadException e) { types = e.Types.Where(x => x != null).ToArray()!; }
-            var hit = types.FirstOrDefault(x => x.IsValueType && x.Name == name && (x.Namespace?.StartsWith("GameOffsets", StringComparison.Ordinal) ?? false))
-                      ?? types.FirstOrDefault(x => x.IsValueType && x.Name == name);
-            if (hit != null) return hit;
-        }
-        return null;
-    }
-
-    private static int SizeOf(Type t)
-    {
-        try { return (int)typeof(System.Runtime.CompilerServices.Unsafe).GetMethod("SizeOf")!.MakeGenericMethod(t).Invoke(null, null)!; }
-        catch { try { return Marshal.SizeOf(t); } catch { return 8; } }
     }
 
     internal static string Hex(long v) => "0x" + v.ToString("X", CultureInfo.InvariantCulture);
