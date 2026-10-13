@@ -171,7 +171,7 @@ public partial class WhatsAnAiBridge
             var f = _flow;
             var same = _flowStepsPub.Length == f.Steps.Count;
             for (var i = 0; same && i < f.Steps.Count; i++)
-                same = ReferenceEquals(_flowStepsPub[i].label, f.Steps[i].Label) && ReferenceEquals(_flowStepsPub[i].state, FlowStepState(f, i));
+                same = string.Equals(_flowStepsPub[i].label, f.Steps[i].Label, StringComparison.Ordinal) && string.Equals(_flowStepsPub[i].state, FlowStepState(f, i), StringComparison.Ordinal);
             if (!same)
             {
                 var built = new (string label, string state)[f.Steps.Count];

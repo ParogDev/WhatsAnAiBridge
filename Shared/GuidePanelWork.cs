@@ -212,7 +212,7 @@ public partial class WhatsAnAiBridge
         x += WhoDotW;
         dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * alpha), r.Label);
         x += ImGui.CalcTextSize(r.Label).X * k + 8f;
-        if (!ReferenceEquals(ui.RequestSrc, r.Request)) { ui.RequestSrc = r.Request; ui.RequestCaps = GuideCaps(r.Request); ui.RequestSize = -1; }
+        if (!GuideSame(ui.RequestSrc, r.Request)) { ui.RequestSrc = r.Request; ui.RequestCaps = GuideCaps(r.Request); ui.RequestSize = -1; }
         if (ui.RequestSize != small) { ui.RequestSize = small; ui.RequestOut = GuideClipTracked(ui.RequestCaps, font, small, GuideToastMsgTrack, WorkRequestMaxW); }
         var req = ui.RequestOut;
         GuideTrackedText(dl, font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastMuted, alpha), req, GuideToastMsgTrack);
@@ -326,7 +326,7 @@ public partial class WhatsAnAiBridge
         dl.AddCircleFilled(c, GuideDotR, U(ToneNeutral, 0.8f * alpha), 16);
     }
 
-    private static readonly string[] WorkRowIds = ["##work_row_0", "##work_row_1"];
+    private static readonly string[] WorkRowIds = System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Select(System.Linq.Enumerable.Range(0, WorkStripLines), i => "##work_row_" + i));   // one id per strip line
 
     /// <summary>A 12 px spinner arc (a Task row working), turning at the card glyph's pace.</summary>
     private static void DrawWorkSpinner(ImDrawListPtr dl, Vector2 c, uint col, double now)
