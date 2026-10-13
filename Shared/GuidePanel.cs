@@ -87,6 +87,8 @@ public partial class WhatsAnAiBridge
         public double FlowDoneAt = -1e9;
         public bool FlowUndo;              // the last done-count change was a step coming back
         public double FlowEndedAt = -1e9;  // ImGui time the flow left "running"
+        public (string label, string state)[]? FlowDoneSrc; public string[] FlowDone = [];   // the done labels, rebuilt when FlowSnapshot's checklist changes
+        public readonly List<QueuedStep> QueueOpen = new();                                    // QueueSnapshotInto's list, reused every frame
         // Per-frame allocation guards for the card: the message's and the third line's wraps and the title's caps form,
         // rebuilt only when their source string, size or width changes.
         public readonly GuideWrapCache MsgWrap = new(), SubWrap = new();
@@ -95,6 +97,7 @@ public partial class WhatsAnAiBridge
         // sheet - or above the card when there is no room), and its wrapped content, rebuilt only when the texts change.
         public float HoverX, HoverBelowY, HoverAboveY;
         public string? HoverTitleSrc, HoverBodySrc, HoverNoteSrc, HoverFootSrc, HoverTitleCaps;
+        public string? HoverTitleClipSrc; public float HoverTitleClipW = -1, HoverTitleClipF = -1; public string HoverTitleClip = "";   // the caps title clipped to the panel
         public readonly List<string> HoverLines = new();
         public readonly List<byte> HoverKinds = new();   // per line: 0 body, 1 note, 2 foot
         public float HoverTextW;
@@ -131,17 +134,22 @@ public partial class WhatsAnAiBridge
 
     private static QueueView QueueViewOf(List<QueuedStep> open)
     {
-        var next = open.FirstOrDefault(s => s.Status == "queued");
-        var running = open.FirstOrDefault(s => s.Status == "running");
-        var chain = 0;
-        if (next != null)
-            foreach (var s in open.Where(s => s.Status == "queued").SkipWhile(s => s != next).Skip(1))
-            {
-                if (!s.Chain || s.Experiment != next.Experiment) break;
-                chain++;
-            }
+        // One pass, no LINQ (per frame): the first queued step is Next, the queued ones right after it that chain to its
+        // experiment count until the first that doesn't.
+        QueuedStep? next = null, running = null;
+        int queued = 0, chain = 0;
+        var chaining = false;
+        foreach (var s in open)
+        {
+            if (s.Status == "running") { running ??= s; continue; }
+            if (s.Status != "queued") continue;
+            queued++;
+            if (next == null) { next = s; chaining = true; }
+            else if (chaining && s.Chain && s.Experiment == next.Experiment) chain++;
+            else chaining = false;
+        }
         var auto = running != null && next is { Chain: true } && next.Experiment == running.Experiment;
-        return new QueueView(next, running, open.Count(s => s.Status == "queued"), chain, auto);
+        return new QueueView(next, running, queued, chain, auto);
     }
 
     private readonly GuideUiState _guideUi = new();
@@ -188,7 +196,7 @@ public partial class WhatsAnAiBridge
         // The Done side of the card (AgentGuide.cs): whether Done is offered, the user's mark, the "can't see it" clock.
         var a = GuideAskSnapshot();
         // Once per frame: it takes the queue lock. Open steps only, in queue order.
-        var q = QueueViewOf(QueueSnapshot());
+        var q = QueueViewOf(QueueSnapshotInto(_guideUi.QueueOpen));
         var fl = FlowSnapshot();
         var plan = fl.status == "running" ? FlowPlan() : [];
         // Who is connected, whether one of them waits to restart the HUD and the MCP rollout (SessionsView), and which
@@ -212,9 +220,10 @@ public partial class WhatsAnAiBridge
         _guideUi.ShowWho = GuideShowWho(ag, queue, g.who ?? (ask != null ? ask.Whos[0] : null));
         if (rs.Waiting?.Id != _guideUi.SeenRestart) { _guideUi.SeenRestart = rs.Waiting?.Id; if (rs.Waiting != null) _guideUi.RestartArrivedAt = now; }
         var th = PanelTheme.Current();
+        if (!ReferenceEquals(_guideUi.FlowDoneSrc, fl.steps)) { _guideUi.FlowDoneSrc = fl.steps; _guideUi.FlowDone = fl.steps.Where(s => s.state == "done").Select(s => s.label).ToArray(); }
         var fv = new FlowView(
             fl.status == "running" || (fl.status == "done" && now - _guideUi.FlowEndedAt < GuideFlowDoneShowSec),
-            fl.status == "running", plan, fl.steps.Where(s => s.state == "done").Select(s => s.label).ToArray(), fl.steps.Length);
+            fl.status == "running", plan, _guideUi.FlowDone, fl.steps.Length);
 
         // Visibility: a card exists while there is an instruction or a non-idle status. The panel hides itself once
         // everything is quiet (idle / captured / done / info) and nothing happened for two minutes; waiting, failed
@@ -1012,7 +1021,13 @@ public partial class WhatsAnAiBridge
         var y = min.Y + pad;
         if (u.HoverTitleCaps != null)
         {
-            var t = GuideClipTracked(u.HoverTitleCaps, font, f, GuideToastTitleTrack, w - GuideToastStripe - pad * 2);
+            var tw = w - GuideToastStripe - pad * 2;
+            if (!ReferenceEquals(u.HoverTitleClipSrc, u.HoverTitleCaps) || u.HoverTitleClipW != tw || u.HoverTitleClipF != f)
+            {
+                u.HoverTitleClipSrc = u.HoverTitleCaps; u.HoverTitleClipW = tw; u.HoverTitleClipF = f;
+                u.HoverTitleClip = GuideClipTracked(u.HoverTitleCaps, font, f, GuideToastTitleTrack, tw);
+            }
+            var t = u.HoverTitleClip;
             var tcol = U(GuideToastText);
             GuideTrackedText(dl, font, f, new Vector2(x, y), tcol, t, GuideToastTitleTrack);
             GuideTrackedText(dl, font, f, new Vector2(x + 0.6f, y), tcol, t, GuideToastTitleTrack);

@@ -62,6 +62,34 @@ public partial class WhatsAnAiBridge
         public bool Empty;
         public readonly StringBuilder Sb = new();
         public double HoverAt = -1e9;
+        // Rows are reused across composes (Pool[i] is row i), so their clipped texts survive a compose that changed nothing.
+        public readonly List<BoardRow> Pool = new();
+        public readonly BoardClip RecentClip = new(), NoteClip = new(), Foot1Clip = new(), Foot2Clip = new();
+    }
+
+    /// <summary>One line clipped to a width, kept until the text (by value: compose rebuilds equal strings) or the room changes.</summary>
+    private sealed class BoardClip
+    {
+        private string? _src; private float _w = -1; private string _out = "";
+
+        public string Get(string s, float maxW)
+        {
+            if (_w == maxW && GuideSame(_src, s)) return _out;
+            _src = s; _w = maxW; _out = GuideClipText(s, maxW);
+            return _out;
+        }
+    }
+
+    /// <summary>The next row for this compose: a pooled instance, reset, its clip caches kept.</summary>
+    private static BoardRow BoardRowNext(BoardUiState b, int i)
+    {
+        if (i == b.Pool.Count) b.Pool.Add(new BoardRow());
+        var r = b.Pool[i];
+        r.Work = null; r.Ui = null; r.Name = ""; r.Hue = -1;
+        r.HasHue = r.Stale = r.Track = r.Spinner = r.NeedsYou = r.TailWarn = false;
+        r.Request = ""; r.StageWord = null; r.Tone = ToneNeutral; r.TailKind = WorkTailKind.None; r.Tail = null; r.Elapsed = "";
+        r.HoverTitle = r.HoverBody = r.HoverNote = r.HoverFoot = null;
+        return r;
     }
 
     private readonly BoardUiState _boardUi = new();
@@ -99,15 +127,14 @@ public partial class WhatsAnAiBridge
         foreach (var r in work.Rows)
         {
             var f8 = r.Kind == "F8";
-            var row = new BoardRow
-            {
-                Work = r, Ui = WorkRowUiOf(r), Name = r.OwnerName.Length > 0 ? r.OwnerName : f8 ? "Claude" : r.Title, Hue = r.Hue, HasHue = r.HasOwner,
-                Stale = r.Stale, Track = f8, Spinner = !f8 && !r.Final && !r.Stale,
-                Request = f8 ? r.Label + " " + r.Request : r.Request, StageWord = r.StageWord, Tone = WorkToneColor(r.Tone),
-                TailKind = r.TailKind, Tail = r.Tail, TailWarn = r.TailWarn, NeedsYou = r.NeedsYou,
-                Elapsed = GuideElapsed(utc - r.StartedAt),
-                HoverTitle = r.HoverTitle, HoverBody = r.HoverBody, HoverNote = r.HoverNote, HoverFoot = r.HoverFoot,
-            };
+            // At most BoardRowsMax + 1 pooled rows: the one past the last is filled, counted by Add and never shown.
+            var row = BoardRowNext(b, b.Rows.Count);
+            row.Work = r; row.Ui = WorkRowUiOf(r); row.Name = r.OwnerName.Length > 0 ? r.OwnerName : f8 ? "Claude" : r.Title; row.Hue = r.Hue; row.HasHue = r.HasOwner;
+            row.Stale = r.Stale; row.Track = f8; row.Spinner = !f8 && !r.Final && !r.Stale;
+            row.Request = f8 ? r.Label + " " + r.Request : r.Request; row.StageWord = r.StageWord; row.Tone = WorkToneColor(r.Tone);
+            row.TailKind = r.TailKind; row.Tail = r.Tail; row.TailWarn = r.TailWarn; row.NeedsYou = r.NeedsYou;
+            row.Elapsed = GuideElapsed(utc - r.StartedAt);
+            row.HoverTitle = r.HoverTitle; row.HoverBody = r.HoverBody; row.HoverNote = r.HoverNote; row.HoverFoot = r.HoverFoot;
             if (r.Pr is { } pr && r.TailKind is WorkTailKind.None or WorkTailKind.Text or WorkTailKind.Waiting)
             {
                 row.TailKind = WorkTailKind.Text;
@@ -138,17 +165,19 @@ public partial class WhatsAnAiBridge
             if (s.Present)
             {
                 var doing = s.Doing.Length > 0 ? string.Join("; ", s.Doing) : "idle";
-                Add(new BoardRow
-                {
-                    Name = s.Name, Hue = hue, HasHue = true, Request = doing, Spinner = s.Doing.Length > 0, Tone = ToneNeutral,
-                    HoverTitle = s.Name, HoverBody = doing, HoverNote = BoardMcpLine(s, rs),
-                });
+                var row = BoardRowNext(b, b.Rows.Count);
+                row.Name = s.Name; row.Hue = hue; row.HasHue = true; row.Request = doing; row.Spinner = s.Doing.Length > 0;
+                row.HoverTitle = s.Name; row.HoverBody = doing; row.HoverNote = BoardMcpLine(s, rs);
+                Add(row);
             }
             else
             {
                 var quiet = utc - s.LastSeen;
                 if (quiet.TotalMinutes >= 30) continue;   // gone
-                Add(new BoardRow { Name = s.Name, Hue = hue, HasHue = true, Stale = true, Request = "(quiet " + GuideElapsed(quiet) + ")", Tone = ToneNeutral, HoverTitle = s.Name, HoverBody = "Seen " + GuideElapsed(quiet) + " ago; gone from the board after 30 min." });
+                var row = BoardRowNext(b, b.Rows.Count);
+                row.Name = s.Name; row.Hue = hue; row.HasHue = true; row.Stale = true; row.Request = "(quiet " + GuideElapsed(quiet) + ")";
+                row.HoverTitle = s.Name; row.HoverBody = "Seen " + GuideElapsed(quiet) + " ago; gone from the board after 30 min.";
+                Add(row);
             }
         }
         b.Empty = total == 0;
@@ -180,7 +209,14 @@ public partial class WhatsAnAiBridge
                 ? "MCP " + build + ": all " + ro.Total + " on it" : "MCP " + build + ": " + ro.OnDeployed + " of " + ro.Total + " on it";
             if (ro.Behind.Length > 0) foot += ", " + ro.Behind.Length + " swapping";
             if (ro.Local.Length > 0) foot += ", " + ro.Local.Length + " local";
-            if (ro.Unsupervised.Length > 0) foot += ", " + ro.Unsupervised.Length + " need a session restart (" + string.Join(", ", Array.ConvertAll(ro.Unsupervised, l => ag.NameOf(l))) + ")";
+            if (ro.Unsupervised.Length > 0)
+            {
+                // A loop, not a lambda: a lambda capturing a parameter makes the compiler allocate its closure at the method's
+                // entry, so every frame paid for it, the early return included.
+                sb.Clear().Append(foot).Append(", ").Append(ro.Unsupervised.Length).Append(" need a session restart (");
+                for (var i = 0; i < ro.Unsupervised.Length; i++) sb.Append(i > 0 ? ", " : "").Append(ag.NameOf(ro.Unsupervised[i]));
+                foot = sb.Append(')').ToString();
+            }
             b.Foot1 = foot;
         }
         b.Foot2 = infra != null ? "Shared server: " + infra : b.Empty ? BoardEmptyFoot : null;
@@ -329,25 +365,25 @@ public partial class WhatsAnAiBridge
         if (b.Recent != null)
         {
             y += 4f;
-            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.9f * alpha), GuideClipText(b.Recent, (max.X - GuideToastPadX - x0) / k));
+            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.9f * alpha), b.RecentClip.Get(b.Recent, (max.X - GuideToastPadX - x0) / k));
             y += small + 2f;
         }
         if (b.Note != null)
         {
             y += 2f;
-            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, alpha), GuideClipText(b.Note, (max.X - GuideToastPadX - x0) / k));
+            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, alpha), b.NoteClip.Get(b.Note, (max.X - GuideToastPadX - x0) / k));
             y += small + 2f;
         }
         if (b.Foot1 != null)
         {
             y += 2f;
-            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.75f * alpha), GuideClipText(b.Foot1, (max.X - GuideToastPadX - x0) / k));
+            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.75f * alpha), b.Foot1Clip.Get(b.Foot1, (max.X - GuideToastPadX - x0) / k));
             y += small + 2f;
         }
         if (b.Foot2 != null)
         {
             y += 2f;
-            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.75f * alpha), GuideClipText(b.Foot2, (max.X - GuideToastPadX - x0) / k));
+            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.75f * alpha), b.Foot2Clip.Get(b.Foot2, (max.X - GuideToastPadX - x0) / k));
         }
     }
 
@@ -387,7 +423,7 @@ public partial class WhatsAnAiBridge
         else DrawNeutralDot(dl, dc, a);
         x += WhoDotW;
         // Name (110 px) and request (150 px), clipped; the clipped forms are kept until the text or the room changes.
-        if (!ReferenceEquals(r.NameSrc, r.Name) || r.NameW != WorkNameW) { r.NameSrc = r.Name; r.NameW = WorkNameW; r.NameOut = GuideClipText(r.Name, (WorkNameW - 8f) / k); }
+        if (!GuideSame(r.NameSrc, r.Name) || r.NameW != WorkNameW) { r.NameSrc = r.Name; r.NameW = WorkNameW; r.NameOut = GuideClipText(r.Name, (WorkNameW - 8f) / k); }
         dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * a), r.NameOut);
         x += WorkNameW;
         // The right side first (elapsed, the stage word, the track and a minimum tail): the request column gives way so the
@@ -397,7 +433,7 @@ public partial class WhatsAnAiBridge
         var wordW = r.StageWord != null ? GuideTrackedWidth(font, small, r.StageWord, GuideToastTitleTrack) + 10f : 0f;
         var tailMin = r.Tail != null ? BoardTailMinW : 0f;
         var reqW = Math.Clamp(rx - ew - x - trackW - wordW - tailMin, BoardRequestMinW, WorkRequestW);
-        if (!ReferenceEquals(r.ReqSrc, r.Request) || r.ReqW != reqW) { r.ReqSrc = r.Request; r.ReqW = reqW; r.ReqOut = GuideClipText(r.Request, (reqW - 8f) / k); }
+        if (!GuideSame(r.ReqSrc, r.Request) || r.ReqW != reqW) { r.ReqSrc = r.Request; r.ReqW = reqW; r.ReqOut = GuideClipText(r.Request, (reqW - 8f) / k); }
         dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.8f * a), r.ReqOut);
         x += reqW;
         if (r.Track && r.Work != null && r.Ui != null)
@@ -438,7 +474,7 @@ public partial class WhatsAnAiBridge
         }
         var room = rx - x;
         if (room < 24f) return;
-        if (!ReferenceEquals(r.TailSrc, r.Tail) || r.TailW != room) { r.TailSrc = r.Tail; r.TailW = room; r.TailOut = GuideClipText(r.Tail, room / k); }
+        if (!GuideSame(r.TailSrc, r.Tail) || r.TailW != room) { r.TailSrc = r.Tail; r.TailW = room; r.TailOut = GuideClipText(r.Tail, room / k); }
         var col = r.TailKind switch
         {
             WorkTailKind.LiveFix => U(ToneAccent, a),

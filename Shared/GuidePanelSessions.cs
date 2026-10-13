@@ -192,10 +192,25 @@ public partial class WhatsAnAiBridge
         }
         else { c.Lines = []; c.More = null; }
         c.Interrupt = rr.Blockers.Count > 0
-            ? "Restart now anyway. It interrupts " + string.Join(", ", rr.Blockers.Take(3).Select(b => b.Who != null ? $"{ag.NameOf(b.Session, b.Who)}'s {b.Label}" : b.Label)) + "; they are told why in the log."
+            ? "Restart now anyway. It interrupts " + RestartInterrupts(rr, ag) + "; they are told why in the log."
             : handover ? $"Restart now anyway. It interrupts {leaveWho}'s hand-over; they are told why in the log."
             : "Don't wait the countdown.";
         return c;
+    }
+
+    /// <summary>
+    /// "Name's label, label" for the first three blockers. A loop in its own method: a lambda capturing <c>ag</c> in
+    /// RestartTextsFor made the compiler allocate its closure at that method's entry, every frame, the cached return included.
+    /// </summary>
+    private static string RestartInterrupts(RestartRequest rr, AgentsView ag)
+    {
+        var parts = new string[Math.Min(3, rr.Blockers.Count)];
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var b = rr.Blockers[i];
+            parts[i] = b.Who != null ? $"{ag.NameOf(b.Session, b.Who)}'s {b.Label}" : b.Label;
+        }
+        return string.Join(", ", parts);
     }
 
     /// <summary>12 px restart glyph: a three-quarter arc with an arrow head; it turns slowly while counting down (t = 0: still).</summary>

@@ -427,12 +427,21 @@ public partial class WhatsAnAiBridge
         };
     }
 
-    /// <summary>A consistent copy for drawing (taken once per frame).</summary>
+    // The log as the last snapshot copied it: copied again only when a line arrived or left (the count or the newest entry moved).
+    private GuideLogEntry[] _guideLogPub = [];
+    private GuideLogEntry? _guideLogPubLast;
+
+    /// <summary>A consistent copy for drawing (taken once per frame; the log array is shared until the log changes: read only).</summary>
     internal (string? title, string? instruction, int? step, int? steps, string status, string? detail, DateTime updatedAt, DateTime? instructionSince, int rev, GuideLogEntry[] log, string? who, string? session) GuideSnapshot()
     {
         lock (_guideLock)
+        {
+            var log = _guide.Log;
+            var last = log.Count > 0 ? log[^1] : null;
+            if (log.Count != _guideLogPub.Length || !ReferenceEquals(last, _guideLogPubLast)) { _guideLogPub = log.ToArray(); _guideLogPubLast = last; }
             return (_guide.Title, _guide.Instruction, _guide.Step, _guide.Steps, _guide.Status, _guide.Detail, _guide.UpdatedAt,
-                _guide.InstructionSince, _guide.Rev, _guide.Log.ToArray(), _guide.Who, _guide.Session);
+                _guide.InstructionSince, _guide.Rev, _guideLogPub, _guide.Who, _guide.Session);
+        }
     }
 
     /// <summary>
