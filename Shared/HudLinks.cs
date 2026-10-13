@@ -150,7 +150,7 @@ internal sealed class HudLink
 
     internal static string Name(Type t) =>
         t.IsArray ? Name(t.GetElementType()!) + "[]"
-        : t.IsGenericType ? $"{t.Name[..Math.Max(0, t.Name.IndexOf('`'))]}<{string.Join(", ", t.GetGenericArguments().Select(Name))}>"
+        : t.IsGenericType ? $"{(t.Name.IndexOf('`') is var tick and >= 0 ? t.Name[..tick] : t.Name)}<{string.Join(", ", t.GetGenericArguments().Select(Name))}>"
         : t.Name;
 
     /// <summary>The preflight row: ok, broken (gone: a HUD/runtime update), not_now (there, but its value isn't set yet), blocked (needs a broken link).</summary>
@@ -167,7 +167,7 @@ internal sealed class HudLink
         try { t = _typeOf(); }
         catch (Exception ex) { row.Status = "broken"; row.Found = $"finding {TypeLabel} threw {ex.GetType().Name}: {ex.Message}"; return row; }
         if (t == null) { row.Status = "broken"; row.Found = $"type {TypeLabel} not found"; return row; }
-        row.Type = t.FullName ?? t.Name;
+        row.Type = string.IsNullOrEmpty(t.Namespace) ? Name(t) : $"{t.Namespace}.{Name(t)}";
         var m = On(t);
         if (m == null) { row.Status = "broken"; Lookup(t, out var why); row.Found = why; return row; }
         row.Status = "ok";
