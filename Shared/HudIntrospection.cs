@@ -161,8 +161,21 @@ public partial class WhatsAnAiBridge
     private IDictionary? BridgeRegistry() =>
         MemberIndex.TryGet(GameController.PluginBridge, "_methods", BindingFlags.NonPublic | BindingFlags.Instance, MemberIndex.Kinds.Field) as IDictionary;
 
-    private static JObject BridgeUnavailable() =>
-        new() { ["error"] = "unavailable", ["message"] = "PluginBridge._methods not found in this HUD build (check with hud_type)." };
+    /// <summary>Names the link that broke when <see cref="BridgeRegistry"/> gave null.</summary>
+    private JObject BridgeUnavailable()
+    {
+        const BindingFlags nonPublic = BindingFlags.NonPublic | BindingFlags.Instance;
+        var bridge = GameController.PluginBridge;
+        string link;
+        if (bridge == null) link = "GameController.PluginBridge is null";
+        else if (MemberIndex.Find(bridge.GetType(), "_methods", nonPublic, MemberIndex.Kinds.Field) is not { } f) link = $"{bridge.GetType().Name} has no _methods field in this HUD build";
+        else
+        {
+            try { link = f.Get(bridge) is { } v ? $"PluginBridge._methods is a {v.GetType().Name}, not an IDictionary" : "PluginBridge._methods is null"; }
+            catch (Exception ex) { link = $"reading PluginBridge._methods threw {(ex.InnerException ?? ex).GetType().Name}"; }
+        }
+        return new() { ["error"] = "unavailable", ["message"] = $"PluginBridge registry unreachable: {link} (check with hud_type)." };
+    }
 
     private static string DelegateSignature(MethodInfo m) =>
         $"{TypeName(m.ReturnType)} ({string.Join(", ", m.GetParameters().Select(p => $"{TypeName(p.ParameterType)} {p.Name}"))})";
