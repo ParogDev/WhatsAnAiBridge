@@ -132,8 +132,11 @@ public partial class WhatsAnAiBridge
         {
             if (addr == 0) { note = $"reflection: '{(k == 0 ? "item" : segs[k - 1])}' has no Address"; return null; }
             var prop = MemberIndex.Find(cur.GetType(), segs[k], kinds: MemberIndex.Kinds.Property);
-            var v = prop is { CanRead: true } ? prop.Get(cur) : null;
-            if (prop == null || v == null) { note = $"reflection: '{segs[k]}' is null on item 0"; return null; }
+            if (prop is not { CanRead: true }) { note = $"reflection: {cur.GetType().Name} has no readable '{segs[k]}'"; return null; }
+            object? v;
+            try { v = prop.Get(cur); }
+            catch (Exception ex) { note = $"reflection: '{segs[k]}' threw {(ex.InnerException ?? ex).GetType().Name} on item 0"; return null; }
+            if (v == null) { note = $"reflection: '{segs[k]}' is null on item 0"; return null; }
             if (k < segs.Length - 1)
             {
                 var child = MemoryObjects.Address(v) ?? 0;

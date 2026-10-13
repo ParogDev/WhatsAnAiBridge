@@ -237,14 +237,18 @@ public partial class WhatsAnAiBridge
         object? owner = Prop(Prop(w, "Plugin"), "_Settings");
         MemberIndex.Member? prop = null;
         var parts = path.Split('.');
-        for (var i = 0; i < parts.Length && owner != null; i++)
+        if (owner == null) return Err("unknown_setting", $"{w.Name} has no settings object (_Settings is null).");
+        for (var i = 0; i < parts.Length; i++)
         {
             prop = MemberIndex.Find(owner.GetType(), parts[i], kinds: MemberIndex.Kinds.Property);
             if (prop is not { CanRead: true }) return Err("unknown_setting", $"'{parts[i]}' is not a setting of {w.Name} (at {string.Join('.', parts.Take(i))}).");
-            if (i < parts.Length - 1) owner = prop.Get(owner);
+            if (i == parts.Length - 1) break;
+            owner = prop.Get(owner);
+            if (owner == null) return Err("unknown_setting", $"'{string.Join('.', parts.Take(i + 1))}' of {w.Name} is null (segment {i + 1} of {parts.Length}), so '{parts[i + 1]}' can't be reached.");
         }
-        var node = owner == null ? null : prop?.Get(owner);
-        if (node == null || !IsNode(node.GetType())) return Err("unknown_setting", $"{path} of {w.Name} is not a settings node.");
+        var node = prop!.Get(owner);
+        if (node == null) return Err("unknown_setting", $"{path} of {w.Name} is null.");
+        if (!IsNode(node.GetType())) return Err("unknown_setting", $"{path} of {w.Name} is a {node.GetType().Name}, not a settings node.");
         var (menuName, tooltip) = MenuOf(prop!.Property!);
         var before = Describe(prop.Name, path, node, null, menuName, tooltip, isBridge);
         if (before["permission"]?.Value<bool>() == true && !allowPermission)

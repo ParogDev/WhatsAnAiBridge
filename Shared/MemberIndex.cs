@@ -154,10 +154,14 @@ internal static class MemberIndex
 
         /// <summary>
         /// Public instance properties with a getter (no indexers) in reflection's own order, for walkers that show an
-        /// object's properties in that order (settings, props layers). Hidden duplicates stay, as GetProperties gives them.
+        /// object's properties in that order (settings, props layers). One per name: a property hidden with <c>new</c>
+        /// shows once, as its most-derived declaration, where its name first appears.
         /// </summary>
         public Member[] ReadableProperties => _readableProperties ??= AllProperties
-            .Where(p => p.GetIndexParameters().Length == 0 && p.GetMethod != null).Select(For).ToArray();
+            .Where(p => p.GetIndexParameters().Length == 0 && p.GetMethod != null)
+            .GroupBy(p => p.Name, StringComparer.Ordinal)
+            .Select(g => g.OrderByDescending(p => Depth(p.DeclaringType)).First())
+            .Select(For).ToArray();
 
         private Member[] BuildReadable()
         {
