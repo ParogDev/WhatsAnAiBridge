@@ -65,6 +65,7 @@ public partial class WhatsAnAiBridge
         {
             System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += (_, name) => name.Name == "0Harmony" ? loaded : null;
             _harmonyAsm = loaded;
+            PreflightAfterHarmonyLoad();   // the Harmony/MonoMod links were not_now until 0Harmony was in the default context
             return null;
         }
         var dir = System.IO.Path.GetFileName(DirectoryFullName.TrimEnd('\\', '/'));
@@ -80,6 +81,7 @@ public partial class WhatsAnAiBridge
             var asm = System.Runtime.Loader.AssemblyLoadContext.Default.LoadFromStream(s);
             System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += (_, name) => name.Name == "0Harmony" ? asm : null;
             _harmonyAsm = asm;
+            PreflightAfterHarmonyLoad();
             return null;
         }
         catch (Exception ex) { return _harmonyError = $"Loading 0Harmony into the default load context failed: {ex.GetType().Name}: {ex.Message}"; }
@@ -172,14 +174,13 @@ public partial class WhatsAnAiBridge
     private Action? WrapMemoryBackends(JObject report, out string? why)
     {
         why = null;
-        const BindingFlags inst = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
         var memory = GameController.Memory;
         // While wrapped, Memory.DisableCaching() (a type test for PagedMemoryBackend) does nothing: only ground-label and
         // file-table reads use it, never camera or entities, and it lasts the trace (seconds).
         if (memory.CustomBackend != null) { why = "the HUD is showing a memory snapshot (Memory.CustomBackend is set): reads not timed"; return null; }
-        var paged = memory.GetType().GetField("_backend", inst)?.GetValue(memory) as IMemoryBackend;
-        if (paged == null) { why = $"{memory.GetType().Name}._backend not found (HUD build changed): reads not timed"; return null; }
-        var leafField = paged.GetType().GetFields(inst).FirstOrDefault(f => f.FieldType == typeof(IMemoryBackend));
+        if (HudLinks.MemoryBackend.FieldOn(memory.GetType()) is not { } backendField) { why = $"{HudLinks.MemoryBackend.Broken(memory.GetType())} (HUD build changed): reads not timed"; return null; }
+        if (backendField.GetValue(memory) is not IMemoryBackend paged) { why = $"{memory.GetType().Name}._backend is null: reads not timed"; return null; }
+        var leafField = HudLinks.PagedInner.FieldOn(paged.GetType());
         var leaf = leafField?.GetValue(paged) as IMemoryBackend;
         if (leafField != null && leaf != null) leafField.SetValue(paged, new TimingBackend(leaf, fetch: true));
         else ((JArray)report["refused"]!).Add($"{paged.GetType().Name}: no inner IMemoryBackend field - fetches from the game not timed, only cached reads");
@@ -233,8 +234,6 @@ public partial class WhatsAnAiBridge
         try
         {
         TrPluginIdx.Clear(); TrTickIdx.Clear(); TrPluginNames.Clear();
-        var asms = AppDomain.CurrentDomain.GetAssemblies();
-        Type? T(string asmName, string typeName) => asms.FirstOrDefault(a => a.GetName().Name == asmName)?.GetType(typeName);
         const BindingFlags all = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
         var self = typeof(WhatsAnAiBridge);
         HarmonyMethod H(string name) => new(self.GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic));
@@ -247,15 +246,19 @@ public partial class WhatsAnAiBridge
             else ((JArray)report["patched"]!).Add(label);
         }
 
-        var renderer = T("ClickableTransparentOverlay", "ClickableTransparentOverlay.ImGuiRenderer");
-        Patch(renderer?.GetMethods(all).FirstOrDefault(m => m.Name == "Update"), "ImGuiRenderer.Update (HUD frame)", nameof(PreUpdate), nameof(PostUpdate));
-        Patch(renderer?.GetMethods(all).FirstOrDefault(m => m.Name == "Render"), "ImGuiRenderer.Render (draw data)", nameof(PreRender), nameof(PostRender));
+        // The overlay's methods are declared links (HudLinks.cs), preflighted at load; a broken one is refused naming the link.
+        void PatchLink(HudLink link, string label, string? pre, string? post)
+        {
+            if (link.Method is { } m) Patch(m, label, pre, post);
+            else ((JArray)report["refused"]!).Add($"{label}: {link.Broken(link.DeclaredType)}");
+        }
+        PatchLink(HudLinks.RendererUpdate, "ImGuiRenderer.Update (HUD frame)", nameof(PreUpdate), nameof(PostUpdate));
+        PatchLink(HudLinks.RendererRender, "ImGuiRenderer.Render (draw data)", nameof(PreRender), nameof(PostRender));
         // Present itself (Vortice IDXGISwapChain.Present) is a calli through the COM vtable, which Harmony cannot copy, and
         // the PoE2 HUD overrides Overlay.PostFrame with a protected stub. Overlay.RunFrameLoop calls ImGuiRenderer.Update ->
         // Render -> Present -> ReplaceFontIfRequired -> PostFrame: Present starts when Render returns and has returned when
         // ReplaceFontIfRequired is entered (also called once before the loop starts; the analysis ignores it).
-        var overlay = T("ClickableTransparentOverlay", "ClickableTransparentOverlay.Overlay");
-        Patch(overlay?.GetMethod("ReplaceFontIfRequired", all), "Overlay.ReplaceFontIfRequired (Present returned)", nameof(PostPresent), null);
+        PatchLink(HudLinks.OverlayReplaceFont, "Overlay.ReplaceFontIfRequired (Present returned)", nameof(PostPresent), null);
 
         // Plugin Render and Tick methods (plugins are compiled from source: never protected, but checked anyway). Only the
         // loaded plugins: an earlier load of a reloaded plugin is still in the process, and patching it is pointless (it no
@@ -531,17 +534,16 @@ public partial class WhatsAnAiBridge
             if (live != null) _poolLimits["arraysPerSize"] = live;
             return _poolLimits;
         }
-        const BindingFlags sf = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
-        var st = typeof(System.Buffers.ArrayPool<byte>).Assembly.GetType("System.Buffers.SharedArrayPoolStatics");
-        int? Get(string name) => st?.GetField(name, sf)?.GetValue(null) is int v ? v : null;
-        var partitions = Get("s_partitionCount");
-        var perPartition = Get("s_maxArraysPerPartition");
+        static int? Get(HudLink link) => link.Field?.GetValue(null) is int v ? v : null;
+        var partitions = Get(HudLinks.PoolPartitionCount);
+        var perPartition = Get(HudLinks.PoolMaxPerPartition);
         return _poolLimits = new JObject
         {
             ["partitions"] = partitions, ["maxArraysPerPartition"] = perPartition,
             ["arraysPerSize"] = PoolCapacity(4096) ?? partitions * perPartition,
             ["envMaxArraysPerPartition"] = Environment.GetEnvironmentVariable("DOTNET_SYSTEM_BUFFERS_SHAREDARRAYPOOL_MAXARRAYSPERPARTITION"),
-            ["broken"] = st == null ? "System.Buffers.SharedArrayPoolStatics not found in this runtime" : partitions == null || perPartition == null ? "SharedArrayPoolStatics fields s_partitionCount/s_maxArraysPerPartition not found" : null,
+            ["broken"] = partitions == null ? HudLinks.PoolPartitionCount.Broken(HudLinks.PoolPartitionCount.DeclaredType)
+                : perPartition == null ? HudLinks.PoolMaxPerPartition.Broken(HudLinks.PoolMaxPerPartition.DeclaredType) : null,
         };
     }
 }

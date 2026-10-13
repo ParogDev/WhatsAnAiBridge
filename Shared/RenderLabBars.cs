@@ -91,7 +91,7 @@ public partial class WhatsAnAiBridge
             var wrapper = Core.Current?.pluginManager?.Plugins.FirstOrDefault(w => w.Name == "HealthBars");
             if (wrapper == null) return default!;
             const BindingFlags any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            var plugin = wrapper.GetType().GetProperty("Plugin", any)?.GetValue(wrapper) ?? wrapper.GetType().GetField("_plugin", any)?.GetValue(wrapper);
+            object? plugin = wrapper.Plugin;
             var settings = plugin?.GetType().GetProperty("Settings", any)?.GetValue(plugin);
             var node = settings?.GetType().GetProperty(name, any)?.GetValue(settings);
             var v = node?.GetType().GetProperty("Value")?.GetValue(node);

@@ -204,21 +204,17 @@ public partial class WhatsAnAiBridge
     /// the link when one is missing; leaves everything null while the logger is just not set yet.</summary>
     private static void BindFileLogger()
     {
-        var prop = typeof(Core).GetProperties(BindingFlags.Public | BindingFlags.Static).FirstOrDefault(p => p.Name == "Logger");
-        if (prop == null) { _fileLogBroken = "Core.Logger: no such public static property in this HUD build"; _fileLogPermanent = true; return; }
+        // Declared links (HudLinks.cs), preflighted at load.
+        var prop = HudLinks.CoreLogger.Property;
+        if (prop == null) { _fileLogBroken = $"{HudLinks.CoreLogger.Broken(typeof(Core))} in this HUD build"; _fileLogPermanent = true; return; }
         var logger = prop.GetValue(null);
         if (logger == null) return;
-        var args = new[] { typeof(string), typeof(object[]) };
-        var types = new[] { prop.PropertyType }.Concat(prop.PropertyType.GetInterfaces()).Append(logger.GetType());
-        MethodInfo? info = null, err = null;
-        foreach (var t in types)
-        {
-            info ??= t.GetMethod("Information", args);
-            err ??= t.GetMethod("Error", args);
-        }
+        // The property's type and its interfaces first, then the logger's own type.
+        var info = HudLinks.LoggerInformation.MethodOn(prop.PropertyType) ?? HudLinks.LoggerInformation.MethodOn(logger.GetType());
+        var err = HudLinks.LoggerError.MethodOn(prop.PropertyType) ?? HudLinks.LoggerError.MethodOn(logger.GetType());
         if (info == null || err == null)
         {
-            _fileLogBroken = $"{prop.PropertyType.FullName}: no Information/Error(string, object[])";
+            _fileLogBroken = (info == null ? HudLinks.LoggerInformation : HudLinks.LoggerError).Broken(prop.PropertyType);
             _fileLogPermanent = true;
             return;
         }

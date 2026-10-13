@@ -269,8 +269,8 @@ public partial class WhatsAnAiBridge
     }
 
     private static MethodInfo Reload(PluginManager pm) =>
-        pm.GetType().GetMethod("ReloadSourcePlugin", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
-        ?? throw new MissingMethodException("PluginManager.ReloadSourcePlugin not found in this HUD build");
+        HudLinks.ReloadSourcePlugin.MethodOn(pm.GetType())
+        ?? throw new MissingMethodException($"{HudLinks.ReloadSourcePlugin.Broken(pm.GetType())} (this HUD build)");
 
     private static string? FailureOf(PluginManager pm, string folder) =>
         pm.FailedSourcePlugins.FirstOrDefault(kv => string.Equals(Path.GetFileName(kv.Key.TrimEnd('\\', '/')), folder, StringComparison.OrdinalIgnoreCase)).Value;
