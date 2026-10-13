@@ -74,7 +74,7 @@ public partial class WhatsAnAiBridge
                 if (i++ < offset) continue;
                 if (children.Count >= limit) break;
                 var key = e.Key?.ToString() ?? "null";
-                children.Add(Child($"[{key}]", e.Value, e.Value?.GetType(), $"{path}[\"{key}\"]", $"{csharp}?[{KeyLiteral(e.Key, keyType)}]"));
+                children.Add(Child($"[{key}]", e.Value, e.Value?.GetType(), path + ExpressionWalker.KeySegment(key), $"{csharp}?[{KeyLiteral(e.Key, keyType)}]"));
             }
             node["page"] = new JObject { ["offset"] = offset, ["limit"] = limit, ["total"] = dict.Count };
         }

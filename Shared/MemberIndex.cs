@@ -24,9 +24,10 @@ namespace WhatsAnAiBridge;
 /// - **Compiled getters.** <see cref="Member.Get"/> reads through PropertyInfo/FieldInfo.GetValue for the first
 ///   <see cref="CompileAfterReads"/> reads of a member, then compiles an expression-tree getter (so one-off reads in explore never
 ///   pay for a compile). A getter that fails to compile stays on reflection for good (<see cref="Member.CompileError"/>
-///   says why). Exceptions thrown by a getter are wrapped in TargetInvocationException like PropertyInfo.GetValue,
-///   so callers' error texts don't change. Not identical for misuse: a target of the wrong type is a TargetException
-///   from reflection but a wrapped InvalidCastException from a compiled getter (callers pass the member's own type).
+///   says why). Compiled reads and calls throw what the reflective path throws, so callers can't tell them apart:
+///   the getter's or method's own exception wrapped in TargetInvocationException (PropertyInfo.GetValue / MethodInfo.Invoke),
+///   and for a null or wrong-type target a TargetException (property, method) or ArgumentException (field), never a
+///   wrapped InvalidCastException / NullReferenceException from the compiled cast.
 /// - **Types by name** (<see cref="Types"/>): one index over the non-collectible loaded assemblies, built once, by full
 ///   name and by simple name (case-insensitive), keeping every candidate: two types named "Player" are both listed and
 ///   the caller chooses (ExpressionWalker.ResolveComponentType prefers the Component subclass).
@@ -92,7 +93,7 @@ internal static class MemberIndex
             if (c == null)
                 return Info is PropertyInfo p ? p.GetValue(target) : ((FieldInfo)Info).GetValue(target);
             try { return c(target); }
-            catch (Exception ex) { throw new TargetInvocationException(ex); }
+            catch (Exception ex) { throw Reshape(ex, Info, DeclaringType, target); }
         }
 
         private Func<object, object?>? Compile()
@@ -310,7 +311,25 @@ internal static class MemberIndex
         if (c == null && !inv.NoCompile && Interlocked.Increment(ref inv.Calls) > CompileAfterReads) c = inv.Compile();
         if (c == null) return method.Invoke(target, null);
         try { return c(target); }
-        catch (Exception ex) { throw new TargetInvocationException(ex); }
+        catch (Exception ex) { throw Reshape(ex, method, method.DeclaringType!, target); }
+    }
+
+    /// <summary>
+    /// A compiled read or call threw: the exception the reflective path would have thrown for the same call. A null or
+    /// wrong-type target fails the compiled cast; reflection reports that as TargetException (property, method) or
+    /// ArgumentException (field). Anything else came from the getter or method itself: wrapped in
+    /// TargetInvocationException like PropertyInfo.GetValue / MethodInfo.Invoke (a field read has no code of its own).
+    /// </summary>
+    private static Exception Reshape(Exception ex, MemberInfo info, Type declaring, object? target)
+    {
+        if (target == null || !declaring.IsInstanceOfType(target))
+        {
+            var what = target == null ? "null target" : $"target is {target.GetType().FullName}, not {declaring.FullName}";
+            return info is FieldInfo
+                ? new ArgumentException($"Field '{info.Name}' defined on type '{declaring.FullName}' is not a field on the target object ({what}).")
+                : new TargetException($"Object does not match target type for {declaring.Name}.{info.Name} ({what}).");
+        }
+        return info is FieldInfo ? ex : new TargetInvocationException(ex);
     }
 
     private sealed class Invoker

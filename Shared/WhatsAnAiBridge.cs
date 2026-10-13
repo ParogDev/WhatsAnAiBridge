@@ -140,19 +140,32 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         try { BridgeExports.Register(this, bridge); }
         catch (Exception ex) { registerError = $"{ex.GetType().Name}: {ex.Message}"; }
 
+        // The check after Register in its own try/catch: Initialise must go on whatever it hits, and a check that threw is
+        // named as such (which export it was on), never taken for "all exports fine".
         var failed = new List<string>(0);
-        foreach (var name in BridgeExports.All)
+        string? checking = null;
+        try
         {
-            if (!BridgeExportTypes.TryGetValue(name, out var expected)) { failed.Add($"{name} (unchecked: no expected type in BridgeExportTypes)"); continue; }
-            object? saved;
-            try { saved = bridge.GetMethod<object>(name); }
-            catch (Exception ex) { failed.Add($"{name} (lookup threw {ex.GetType().Name}: {ex.Message})"); continue; }
-            if (saved == null) failed.Add($"{name} (not saved)");
-            else if (!expected.IsInstanceOfType(saved)) failed.Add($"{name} (saved as {saved.GetType().Name}, consumers ask for {expected.Name})");
-            else if (!ReferenceEquals(((Delegate)saved).Target, this)) failed.Add($"{name} (still the delegate of an earlier bridge load)");
+            foreach (var name in BridgeExports.All)
+            {
+                checking = name;
+                if (!BridgeExportTypes.TryGetValue(name, out var expected)) { failed.Add($"{name} (unchecked: no expected type in BridgeExportTypes)"); continue; }
+                object? saved;
+                try { saved = bridge.GetMethod<object>(name); }
+                catch (Exception ex) { failed.Add($"{name} (lookup threw {ex.GetType().Name}: {ex.Message})"); continue; }
+                if (saved == null) failed.Add($"{name} (not saved)");
+                else if (!expected.IsInstanceOfType(saved)) failed.Add($"{name} (saved as {saved.GetType().Name}, consumers ask for {expected.Name})");
+                else if (saved is not Delegate d) failed.Add($"{name} (saved as {saved.GetType().Name}, not a delegate)");
+                else if (!ReferenceEquals(d.Target, this)) failed.Add($"{name} (still the delegate of an earlier bridge load)");
+            }
+            checking = null;
+            foreach (var name in BridgeExportTypes.Keys)
+                if (!BridgeExports.All.Contains(name)) failed.Add($"{name} (expected but no [BridgeExport] carries it)");
         }
-        foreach (var name in BridgeExportTypes.Keys)
-            if (!BridgeExports.All.Contains(name)) failed.Add($"{name} (expected but no [BridgeExport] carries it)");
+        catch (Exception ex)
+        {
+            failed.Add($"the post-register check threw {ex.GetType().Name}: {ex.Message} ({(checking != null ? $"at {checking}" : "listing the expected exports")}; the exports after it are unchecked)");
+        }
         if (failed.Count > 0 || registerError != null)
             ToastF8RegisterFailed($"[PluginBridge] {failed.Count} of {BridgeExports.All.Count} exports unusable: {(failed.Count > 0 ? string.Join("; ", failed) : "none")}"
                 + (registerError != null ? $" (BridgeExports.Register threw {registerError})" : ""));
@@ -192,6 +205,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         RecordingCut("hud_closing");
         _recordingWriter?.Dispose();
         _recordingWriter = null;
+        ExpressionWalker.ClearCaches();   // parsed paths and their resolved members: nothing carries over to the next load
     }
 
     public override void OnPluginDestroyForHotReload()
@@ -209,6 +223,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         RecordingCut("bridge_reload");
         _recordingWriter?.Dispose();
         _recordingWriter = null;
+        ExpressionWalker.ClearCaches();
     }
 
     private string InterruptedRecordingFile => Path.Combine(_bridgeDir, "recordings", "interrupted.json");

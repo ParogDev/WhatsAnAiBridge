@@ -76,6 +76,7 @@ public partial class WhatsAnAiBridge
         public Dictionary<object, string>? ListA, ListB;               // list: key -> preview (swapped)
         public Type? ListType; public MemberIndex.Member? ListKey;     // list: the key member of the last item type seen
         public Type? DictType; public DictDiff? Dict;                  // dict: the typed differ for the last dictionary type
+        public string? DictNote;                                       // dict: why the typed differ couldn't be built (object maps then)
         public StatsRawGate? StatsGate;                                // dict over Stats.StatDictionary: the raw change gate
         public Dictionary<object, object?>? ValuesA, ValuesB;          // props / dict (swapped)
         public readonly Dictionary<object, string> KeyNames = new();
@@ -149,6 +150,7 @@ public partial class WhatsAnAiBridge
         ["rawGate"] = l.StatsGate is { } g ? JObject.FromObject(g.Status()) : null,
         ["rawPaths"] = l.Each?.Plans != null ? new JObject(l.Spec.Props!.Select((p, i) => new JProperty(p, l.Each.PlanNotes[i]))) : null,
         ["items"] = l.Each?.Items.Count,
+        ["dictDiff"] = l.DictNote,
         ["broken"] = l.Broken, ["notNow"] = l.NotNow,
     };
 
@@ -474,16 +476,28 @@ public partial class WhatsAnAiBridge
         }
     }
 
-    /// <summary>The typed differ for a dictionary type, or null when it isn't an IEnumerable&lt;KeyValuePair&lt;K, V&gt;&gt; (then: object maps).</summary>
-    private static DictDiff? DictDiffFor(LayerRun l, Type type)
+    /// <summary>
+    /// The typed differ for a dictionary type, or null when it isn't an IEnumerable&lt;KeyValuePair&lt;K, V&gt;&gt; or the
+    /// differ can't be built for its types (then: object maps). A build failure is named in the layer's status
+    /// (<c>dictDiff</c>) and logged once per dictionary type, not swallowed.
+    /// </summary>
+    private DictDiff? DictDiffFor(LayerRun l, Type type)
     {
         if (type == l.DictType) return l.Dict;
         l.DictType = type;
         l.Dict = null;
+        l.DictNote = null;
         var kvp = type.GetInterfaces().Prepend(type).FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>)
             && i.GetGenericArguments()[0] is { IsGenericType: true } a && a.GetGenericTypeDefinition() == typeof(KeyValuePair<,>));
         if (kvp?.GetGenericArguments()[0].GetGenericArguments() is [var k, var v])
-            try { l.Dict = (DictDiff)Activator.CreateInstance(typeof(DictDiff<,>).MakeGenericType(k, v))!; } catch { }
+            try { l.Dict = (DictDiff)Activator.CreateInstance(typeof(DictDiff<,>).MakeGenericType(k, v))!; }
+            catch (Exception ex)
+            {
+                var inner = ex is TargetInvocationException { InnerException: { } ie } ? ie : ex;
+                l.DictNote = $"typed differ DictDiff<{k.Name}, {v.Name}> for {ExpressionWalker.FormatTypeName(type)} could not be built "
+                             + $"({inner.GetType().Name}: {inner.Message}); diffing through object maps (boxes every entry each tick)";
+                LogFault($"[Observe] layer {l.Spec.Id}: {l.DictNote}");
+            }
         return l.Dict;
     }
 

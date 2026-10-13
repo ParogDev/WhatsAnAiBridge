@@ -106,12 +106,28 @@ public partial class WhatsAnAiBridge
         return Serialize(report);
     }
 
-    /// <summary>The report of this load (checked on first use if the load-time check hasn't run). A check that failed is
-    /// cached like any other report (<see cref="PreflightAtLoad"/>): hello never re-scans under the lock; only an explicit
-    /// refresh (or the re-check after 0Harmony loads) runs it again.</summary>
+    /// <summary>The report of this load (checked on first use if the load-time check hasn't run). A good report is kept
+    /// until a refresh, the re-check after 0Harmony loads or a build-stamp change. A check that threw is not kept for
+    /// good: the next read retries it once <see cref="PreflightRetryAfter"/> has passed, or at once when the build stamp
+    /// changed (so hello re-scans at most that often while the check keeps failing, never every call).</summary>
     private ReflectionPreflightDto Preflight()
     {
-        lock (PreflightLock) return _preflight ?? PreflightAtLoad();
+        lock (PreflightLock)
+        {
+            if (_preflight is not { } r) return PreflightAtLoad();
+            if (r.Failed == true && (DateTime.UtcNow - r.CheckedAt >= PreflightRetryAfter || StampChanged(r))) return PreflightAtLoad();
+            return r;
+        }
+    }
+
+    /// <summary>How long a failed check answers as is before the next read retries it.</summary>
+    private static readonly TimeSpan PreflightRetryAfter = TimeSpan.FromSeconds(30);
+
+    /// <summary>The HUD build differs from the one the report was made for (or the stamp can't be read now).</summary>
+    private static bool StampChanged(ReflectionPreflightDto r)
+    {
+        try { return BuildStamp() != r.Stamp; }
+        catch { return false; }   // the stamp itself is what fails: the time-based retry covers it
     }
 
     /// <summary>Hello's short form: counts and problems, no rows.</summary>
@@ -150,9 +166,9 @@ public partial class WhatsAnAiBridge
             try { r = RunPreflight(_preflightPrev, null); }
             catch (Exception ex)
             {
-                // The check itself failed: cached as this load's report (hello and reflection.preflight answer it without
-                // re-scanning), re-run only by refresh=true or the re-check after 0Harmony loads. Nothing is saved: the
-                // previous file stays the baseline.
+                // The check itself failed: kept as this load's report (hello and reflection.preflight answer it without
+                // re-scanning) until Preflight() retries it (30 s later, or on a build-stamp change), a refresh=true or
+                // the re-check after 0Harmony loads. Nothing is saved: the previous file stays the baseline.
                 string stamp;
                 try { stamp = BuildStamp(); } catch (Exception sx) { stamp = $"? ({sx.GetType().Name})"; }
                 r = FailedReport(stamp, ex);

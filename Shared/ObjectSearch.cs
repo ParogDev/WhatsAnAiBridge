@@ -319,20 +319,26 @@ public partial class WhatsAnAiBridge
             if (value is IDictionary dict)
             {
                 var keyType = type.IsGenericType ? type.GetGenericArguments()[0] : null;
+                // Nested indexers (a["x"]["y"]) aren't walker syntax: entries of an indexed path get no path.
+                var addressable = n.Path != null && !n.Path.EndsWith("]", StringComparison.Ordinal);
                 var i = 0;
-                foreach (DictionaryEntry e in dict)
+                try
                 {
-                    if (i++ >= _listLimit) { Budget.ItemsSkipped += dict.Count - _listLimit; break; }
-                    if (_sw.ElapsedMilliseconds > _timeMs) return false;
-                    var key = e.Key?.ToString() ?? "null";
-                    var seg = "[\"" + key + "\"]";
-                    Budget.MembersRead++;
-                    into.Add(new WalkChild
+                    foreach (DictionaryEntry e in dict)
                     {
-                        Name = "[" + key + "]", Key = n.Key + seg, Path = n.Path == null ? null : n.Path + seg,
-                        Csharp = $"{n.Csharp}?[{KeyLiteral(e.Key, keyType)}]", Value = e.Value, Declared = e.Value?.GetType(), Level = level,
-                    });
+                        if (i++ >= _listLimit) { Budget.ItemsSkipped += dict.Count - _listLimit; break; }
+                        if (_sw.ElapsedMilliseconds > _timeMs) return false;
+                        var key = e.Key?.ToString() ?? "null";
+                        var seg = ExpressionWalker.KeySegment(key);   // escaped: keys with dots, brackets or quotes read back
+                        Budget.MembersRead++;
+                        into.Add(new WalkChild
+                        {
+                            Name = "[" + key + "]", Key = n.Key + seg, Path = addressable ? n.Path + seg : null,
+                            Csharp = $"{n.Csharp}?[{KeyLiteral(e.Key, keyType)}]", Value = e.Value, Declared = e.Value?.GetType(), Level = level,
+                        });
+                    }
                 }
+                catch (Exception ex) { into.Add(EnumerationError(n, type, i, ex, level)); }   // keep what was read, name where it broke
                 return true;
             }
             if (value is IList list)
@@ -356,15 +362,19 @@ public partial class WhatsAnAiBridge
             if (value is IEnumerable seq and not string)
             {
                 var i = 0;
-                foreach (var item in seq)
+                try
                 {
-                    if (i >= _listLimit) { Budget.ItemsSkipped++; break; }   // a lazy sequence has no count: one "more" marker
-                    if (_sw.ElapsedMilliseconds > _timeMs) return false;
-                    var seg = "[" + i.ToString(CultureInfo.InvariantCulture) + "]";
-                    Budget.MembersRead++;
-                    into.Add(new WalkChild { Name = seg, Key = n.Key + seg, Path = null, Csharp = $"{n.Csharp}?.ElementAt({i})", Value = item, Declared = item?.GetType(), Level = level });
-                    i++;
+                    foreach (var item in seq)
+                    {
+                        if (i >= _listLimit) { Budget.ItemsSkipped++; break; }   // a lazy sequence has no count: one "more" marker
+                        if (_sw.ElapsedMilliseconds > _timeMs) return false;
+                        var seg = "[" + i.ToString(CultureInfo.InvariantCulture) + "]";
+                        Budget.MembersRead++;
+                        into.Add(new WalkChild { Name = seg, Key = n.Key + seg, Path = null, Csharp = $"{n.Csharp}?.ElementAt({i})", Value = item, Declared = item?.GetType(), Level = level });
+                        i++;
+                    }
                 }
+                catch (Exception ex) { into.Add(EnumerationError(n, type, i, ex, level)); }
                 return true;
             }
 
@@ -424,6 +434,13 @@ public partial class WhatsAnAiBridge
                 into.Add(child);
             }
         }
+
+        /// <summary>A collection's enumerator threw part way (modified while read, a broken lazy sequence): one error child naming it.</summary>
+        private static WalkChild EnumerationError(Node n, Type type, int read, Exception ex, int level) => new()
+        {
+            Name = "(enumeration)", Key = n.Key, Path = n.Path, Csharp = n.Csharp, Level = level,
+            Error = $"enumerating {ExpressionWalker.FormatTypeName(type)} threw after {read} item(s): {Message(ex)}",
+        };
 
         internal static string Join(string key, string seg) => key.Length == 0 && seg.StartsWith('.') ? seg[1..] : key + seg;
 
