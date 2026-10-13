@@ -100,7 +100,7 @@ public partial class WhatsAnAiBridge
     private readonly Dictionary<long, UcOpen> _ucOpen = new();
     private UiCatalogueFile? _uc;
     private bool _ucDirty, _ucMouseWasDown;
-    private double _ucLastUs, _ucMaxUs, _ucMaxFrameUs;
+    private double _ucLastUs, _ucMaxUs, _ucMaxFrameUs, _ucFirstFrameUs;
     private long _ucLastBytes, _ucMaxBytes;
     private int _ucLastVisited, _ucLastFrames, _ucCaptures;
     private string? _ucLastError;
@@ -118,6 +118,19 @@ public partial class WhatsAnAiBridge
     }
 
     private System.Threading.Tasks.Task? _ucLoading;
+
+    /// <summary>JIT-compiles the capture path ahead of its first frame (pool thread).</summary>
+    private static void UcPrepare()
+    {
+        foreach (var name in new[] { nameof(UcStep), nameof(UcFinish), nameof(UcMerge), nameof(UiDetectsHover) })
+            try
+            {
+                var m = typeof(WhatsAnAiBridge).GetMethod(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static
+                                                                | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+                if (m != null) System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(m.MethodHandle);
+            }
+            catch { }
+    }
     private readonly object _ucLock = new();   // the catalogue: merges (main thread), the writer and queries
 
     /// <summary>From ObservePanels: a top-level panel became visible / hidden.</summary>
@@ -132,7 +145,8 @@ public partial class WhatsAnAiBridge
     {
         if (_ucOpen.Count == 0) { _ucMouseWasDown = false; return; }
         // The catalogue file is read (and Newtonsoft warmed up) on a pool thread, never in a frame.
-        if (_uc == null) { _ucLoading ??= System.Threading.Tasks.Task.Run(Uc); return; }
+        // The capture code is JIT-compiled there too: its first run in a frame cost ~7 ms of compiling, measured live.
+        if (_uc == null) { _ucLoading ??= System.Threading.Tasks.Task.Run(() => { UcPrepare(); Uc(); }); return; }
         bool down = false;
         try { down = Input.IsKeyDown(0x01); } catch { }   // VK_LBUTTON: reading key state, never sending
         var released = _ucMouseWasDown && !down;
@@ -174,7 +188,8 @@ public partial class WhatsAnAiBridge
         }
         var us = sw.Elapsed.TotalMilliseconds * 1000;
         var bytes = GC.GetAllocatedBytesForCurrentThread() - a0;
-        _ucMaxFrameUs = Math.Max(_ucMaxFrameUs, us);
+        if (_ucCaptures == 0) _ucFirstFrameUs = Math.Max(_ucFirstFrameUs, us);   // the first capture after a load pays JIT: reported apart
+        else _ucMaxFrameUs = Math.Max(_ucMaxFrameUs, us);
         w.Us += us; w.Bytes += bytes; w.Frames++;
         if (done)
         {
@@ -348,7 +363,7 @@ public partial class WhatsAnAiBridge
             {
                 ["captures"] = _ucCaptures, ["lastUs"] = Math.Round(_ucLastUs), ["maxUs"] = Math.Round(_ucMaxUs),
                 ["lastBytes"] = _ucLastBytes, ["maxBytes"] = _ucMaxBytes, ["lastVisited"] = _ucLastVisited,
-                ["lastFrames"] = _ucLastFrames, ["maxFrameUs"] = Math.Round(_ucMaxFrameUs), ["sliceUs"] = UcSliceUs,
+                ["lastFrames"] = _ucLastFrames, ["maxFrameUs"] = Math.Round(_ucMaxFrameUs), ["firstCaptureFrameUs"] = Math.Round(_ucFirstFrameUs), ["sliceUs"] = UcSliceUs,
             },
             ["openNow"] = _ucOpen.Count,
         };
