@@ -501,7 +501,7 @@ public partial class WhatsAnAiBridge
                 var first = BitConverter.ToInt64(peek, 0);
                 if (ctx.InModule(first, out var s2, out var r2) && s2 is ".rdata")
                     o.Points = ctx.RttiName(first) is { } cls ? $"object {cls}" : $"object (vtable {Hex(ctx.ImageBase + r2)})";
-                else if (Text(peek) is { } text) { o.Points = "text"; o.Text = text; }
+                else if (BytesText(peek) is { } text) { o.Points = "text"; o.Text = text; }
             }
             return o;
         }
@@ -510,7 +510,7 @@ public partial class WhatsAnAiBridge
         float flo = BitConverter.ToSingle(b, off), fhi = BitConverter.ToSingle(b, off + 4);
         if (Plausible(flo) && Plausible(fhi) && (Math.Abs((long)lo) > 100_000 || Math.Abs((long)hi) > 100_000)) // long: Math.Abs(int.MinValue) throws
         { o.Kind = "float"; o.Value = $"{Num(flo)}, {Num(fhi)}"; }
-        else if (Text(b.AsSpan(off, 8)) is { } t8) { o.Kind = "text"; o.Text = t8; }
+        else if (BytesText(b.AsSpan(off, 8)) is { } t8) { o.Kind = "text"; o.Text = t8; }
         else
         {
             o.Kind = (v >> 47) != 0 && (v >> 47) != -1 ? "bad-pointer" : "int";
@@ -523,7 +523,7 @@ public partial class WhatsAnAiBridge
     private static bool Plausible(float f) => float.IsFinite(f) && (f == 0 || Math.Abs(f) > 1e-4 && Math.Abs(f) < 1e7);
 
     /// <summary>ASCII or UTF-16 text at the start of a buffer (at least 4 printable characters).</summary>
-    private static string? Text(ReadOnlySpan<byte> b)
+    private static string? BytesText(ReadOnlySpan<byte> b)
     {
         int ascii = 0; while (ascii < b.Length && b[ascii] >= 0x20 && b[ascii] < 0x7F) ascii++;
         if (ascii >= 4) return Encoding.ASCII.GetString(b[..ascii]);
