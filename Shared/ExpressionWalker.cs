@@ -73,7 +73,7 @@ public class ExpressionWalker
         if (expression.Contains("Component<", StringComparison.Ordinal))
             _ = MemberIndex.Types;
         var deadline = DateTime.UtcNow.AddMilliseconds(TimeoutMs);
-        var segments = ParseExpression(expression);
+        var segments = Parsed(expression);
         if (segments.Count == 0) { error = "Empty expression"; return null; }
         // Root must be GameController
         if (segments[0].Name != "GameController") { error = "Expression must start with 'GameController'"; return null; }
@@ -139,6 +139,23 @@ public class ExpressionWalker
         public string? MethodArg { get; set; }
         public bool HasIndexer { get; set; }
         public string? IndexerValue { get; set; }
+        /// <summary>GetComponent/HasComponent: the resolved component type, once found (a miss is looked up again next time).</summary>
+        public volatile Type? ComponentType;
+        /// <summary>GetComponent/HasComponent: the last target type and its closed method (one entry: a path's targets rarely vary).</summary>
+        public volatile Tuple<Type, MethodInfo>? LastMethod;
+    }
+
+    // Parsed paths, cached by text: observer layers, flows and experiment watches resolve the same paths several times a
+    // second. Segments are never changed after parsing, except their resolve caches above (each a single reference write).
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, List<PathSegment>> _parsed = new(StringComparer.Ordinal);
+    private const int MaxParsedPaths = 2048;
+
+    private static List<PathSegment> Parsed(string expr)
+    {
+        if (_parsed.TryGetValue(expr, out var hit)) return hit;
+        var segs = ParseExpression(expr);
+        if (_parsed.Count >= MaxParsedPaths) _parsed.Clear();   // one-off paths from agents must not grow it forever
+        return _parsed.GetOrAdd(expr, segs);
     }
 
     private static List<PathSegment> ParseExpression(string expr)
@@ -232,7 +249,9 @@ public class ExpressionWalker
 
         if (seg.Name is "GetComponent" or "HasComponent" && seg.GenericArg != null)
         {
-            var compType = ResolveComponentType(seg.GenericArg);
+            // Per segment: the last target type's closed method (a compiled call after a few uses), else the full lookup.
+            if (seg.LastMethod is { } last && last.Item1 == targetType) return MemberIndex.Call(last.Item2, target);
+            var compType = seg.ComponentType ??= ResolveComponentType(seg.GenericArg);
             if (compType == null)
             {
                 var ti = MemberIndex.Types;
@@ -251,7 +270,8 @@ public class ExpressionWalker
                 return null;
             }
 
-            return generic.Invoke(target, null);
+            seg.LastMethod = Tuple.Create(targetType, generic);
+            return MemberIndex.Call(generic, target);
         }
 
         if (seg.Name == "GetChildAtIndex" && seg.MethodArg != null)

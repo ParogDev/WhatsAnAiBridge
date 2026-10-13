@@ -489,15 +489,69 @@ public partial class WhatsAnAiBridge
         return rows;
     }
 
+    /// <summary>
+    /// What a MemoryContext needs to know about the game process that doesn't change while it runs: the handle, the main
+    /// module's bounds and name, the file's ImageBase and the PE sections. Built once per HUD Memory object (a new game
+    /// process gets a new one): Process.MainModule enumerates the process's modules on every call, and the HUD Memory
+    /// members it needs differ between the games (read through dynamic), so building this per call made every
+    /// memory.read / memory.collect - an experiment watch polls those at ~8 Hz - pay both.
+    /// </summary>
+    private sealed record ProcessFacts(object Memory, IntPtr Handle, long ModuleBase, long ModuleSize, string ModuleName, long ImageBase,
+        (string name, long rva, long size)[] Sections);
+
+    private ProcessFacts? _processFacts;
+
+    private ProcessFacts Facts()
+    {
+        var mem = (object)GameController.Memory;
+        if (_processFacts is { } f && ReferenceEquals(f.Memory, mem)) return f;
+        dynamic m = mem;
+        IntPtr handle = IntPtr.Zero;
+        long moduleBase = 0, moduleSize = 0;
+        var moduleName = "PathOfExile.exe";
+        try { handle = (IntPtr)m.OpenProcessHandle; } catch { }
+        try { moduleBase = (long)m.AddressOfProcess; } catch { }
+        try
+        {
+            var proc = (System.Diagnostics.Process)m.Process;
+            var main = proc.MainModule;
+            moduleSize = main?.ModuleMemorySize ?? 0;
+            moduleName = main?.ModuleName ?? moduleName;
+        }
+        catch { }
+        var imageBase = moduleBase;
+        var sections = new List<(string name, long rva, long size)>();
+        // PE header: e_lfanew at 0x3C; optional header ImageBase at PE+0x30; section table after the optional header.
+        byte[]? h = null;
+        try { if (moduleBase != 0) h = GameController.Memory.ReadBytes(moduleBase, 0x1000); } catch { }
+        if (h is { Length: 0x1000 } && h[0] == 'M' && h[1] == 'Z')
+        {
+            int pe = BitConverter.ToInt32(h, 0x3C);
+            if (pe > 0 && pe + 0x108 < h.Length && h[pe] == 'P' && h[pe + 1] == 'E')
+            {
+                // The loader rewrites ImageBase in memory to the load address; Ghidra uses the file's value.
+                imageBase = MemoryContext.FileImageBase(m) ?? 0x140000000;
+                if (moduleSize == 0) moduleSize = BitConverter.ToInt32(h, pe + 0x50);
+                int count = BitConverter.ToUInt16(h, pe + 6), optSize = BitConverter.ToUInt16(h, pe + 0x14);
+                int sec = pe + 0x18 + optSize;
+                for (int i = 0; i < count && sec + 40 <= h.Length; i++, sec += 40)
+                    sections.Add((Encoding.ASCII.GetString(h, sec, 8).TrimEnd('\0'), BitConverter.ToUInt32(h, sec + 12), BitConverter.ToUInt32(h, sec + 8)));
+            }
+        }
+        // A header that couldn't be read (module base unknown yet) is tried again next call rather than kept.
+        var facts = new ProcessFacts(mem, handle, moduleBase, moduleSize, moduleName, imageBase, sections.ToArray());
+        if (sections.Count > 0) _processFacts = facts;
+        return facts;
+    }
+
     /// <summary>Per-call view of the game process: module bounds and sections (from the PE header in memory), region queries, RTTI.</summary>
     private sealed class MemoryContext
     {
-        private readonly dynamic _m;
         private readonly IntPtr _handle;
         private readonly Dictionary<long, (long start, long end, bool readable, string text)> _regions = new();
-        private readonly List<(string name, long rva, long size)> _sections = new();
+        private readonly (string name, long rva, long size)[] _sections;
         public readonly long ModuleBase, ModuleSize, ImageBase;
-        public readonly string ModuleName = "PathOfExile.exe";
+        public readonly string ModuleName;
         private readonly Dictionary<long, string?> _rtti = new();
         private readonly WhatsAnAiBridge _plugin;
 
@@ -510,38 +564,14 @@ public partial class WhatsAnAiBridge
         public MemoryContext(WhatsAnAiBridge plugin)
         {
             _plugin = plugin;
-            _m = plugin.GameController.Memory;
-            try { _handle = (IntPtr)_m.OpenProcessHandle; } catch { _handle = IntPtr.Zero; }
-            try { ModuleBase = (long)_m.AddressOfProcess; } catch { }
-            try
-            {
-                var proc = (System.Diagnostics.Process)_m.Process;
-                ModuleSize = proc.MainModule?.ModuleMemorySize ?? 0;
-                ModuleName = proc.MainModule?.ModuleName ?? ModuleName;
-            }
-            catch { }
-            ImageBase = ModuleBase;
-            // PE header: e_lfanew at 0x3C; optional header ImageBase at PE+0x30; section table after the optional header.
-            if (ModuleBase != 0 && Read(ModuleBase, 0x1000) is { } h && h[0] == 'M' && h[1] == 'Z')
-            {
-                int pe = BitConverter.ToInt32(h, 0x3C);
-                if (pe > 0 && pe + 0x108 < h.Length && h[pe] == 'P' && h[pe + 1] == 'E')
-                {
-                    // The loader rewrites ImageBase in memory to the load address; Ghidra uses the file's value.
-                    ImageBase = FileImageBase(_m) ?? 0x140000000;
-                    if (ModuleSize == 0) ModuleSize = BitConverter.ToInt32(h, pe + 0x50);
-                    int count = BitConverter.ToUInt16(h, pe + 6), optSize = BitConverter.ToUInt16(h, pe + 0x14);
-                    int sec = pe + 0x18 + optSize;
-                    for (int i = 0; i < count && sec + 40 <= h.Length; i++, sec += 40)
-                        _sections.Add((Encoding.ASCII.GetString(h, sec, 8).TrimEnd('\0'), BitConverter.ToUInt32(h, sec + 12), BitConverter.ToUInt32(h, sec + 8)));
-                }
-            }
+            var f = plugin.Facts();
+            (_handle, ModuleBase, ModuleSize, ModuleName, ImageBase, _sections) = (f.Handle, f.ModuleBase, f.ModuleSize, f.ModuleName, f.ImageBase, f.Sections);
         }
 
         private static long? _fileImageBase;
 
         /// <summary>OptionalHeader.ImageBase from the exe on disk (cached for the session).</summary>
-        private static long? FileImageBase(dynamic m)
+        internal static long? FileImageBase(dynamic m)
         {
             if (_fileImageBase != null) return _fileImageBase;
             try
@@ -568,7 +598,7 @@ public partial class WhatsAnAiBridge
         public byte[]? Read(long address, int size)
         {
             if (address <= 0 || !Readable(address)) return null;
-            try { var b = (byte[])_m.ReadBytes(address, size); return b is { Length: > 0 } ? b : null; } catch { return null; }
+            try { var b = _plugin.GameController.Memory.ReadBytes(address, size); return b is { Length: > 0 } ? b : null; } catch { return null; }
         }
 
         public bool InModule(long v, out string? section, out long rva)

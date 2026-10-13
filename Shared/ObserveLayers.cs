@@ -65,18 +65,22 @@ public partial class WhatsAnAiBridge
         public string? NotNow;            // resolved to null right now (loading, no player)
         public long Events, Ticks;
         public double CostMs;             // last tick
+        // Since the last bridge.self_perf (reset there): time and bytes of every tick, the path resolve's share, the worst tick.
+        public long SumTicks, SumBytes, ResolveTicks, PerfTicks; public double MaxMs;
         public Type? CheckedType;         // the resolved type ModeMismatch last passed
         public EachCache? Each;           // each: items listed every 5 s and the raw read plans
         // struct
-        public long Address; public int Size; public byte[] Prev = [], Now = []; public bool HasPrev;
+        public long Address; public int Size; public byte[] Prev = [], Now = []; public bool HasPrev; public DateTime ResolvedAt;
         public List<(int off, int len, string name, bool property)> Names = [];
         // props / dict / list
-        public Dictionary<string, string>? PrevValues;                 // list
+        public Dictionary<object, string>? ListA, ListB;               // list: key -> preview (swapped)
+        public Type? ListType; public MemberIndex.Member? ListKey;     // list: the key member of the last item type seen
+        public Type? DictType; public DictDiff? Dict;                  // dict: the typed differ for the last dictionary type
+        public StatsRawGate? StatsGate;                                // dict over Stats.StatDictionary: the raw change gate
         public Dictionary<object, object?>? ValuesA, ValuesB;          // props / dict (swapped)
         public readonly Dictionary<object, string> KeyNames = new();
         public Dictionary<Type, MemberIndex.Member[]> PropCache = new();
         public HashSet<string> SlowProps = new();
-        public readonly Dictionary<(object, int), string> EachUnits = new();           // each: (item key, prop) -> unit
         // noise and map
         public readonly Dictionary<string, (int count, double windowStart)> Rate = new();
         public readonly Dictionary<string, long> Noisy = new();
@@ -86,7 +90,7 @@ public partial class WhatsAnAiBridge
     private readonly List<LayerRun> _layers = [];
     private bool _layersLoaded;
     private string? _layerArea;
-    private const double LayerNoisyPer10s = 20, LayerTickBudgetMs = 4;
+    private const double LayerNoisyPer10s = 20, LayerTickBudgetMs = 4, StructResolveSeconds = 1;
     private const int LayerMaxStructBytes = 64 * 1024, LayerShowBytes = 32;
 
     // ── Specs ────────────────────────────────────────────────────────
@@ -105,6 +109,30 @@ public partial class WhatsAnAiBridge
         SaveObs();
     }
 
+    /// <summary>Per tick since the last bridge.self_perf: average and worst time, the path resolve's share, bytes allocated.</summary>
+    private static JObject? LayerPerf(LayerRun l)
+    {
+        if (l.PerfTicks == 0) return null;
+        var f = System.Diagnostics.Stopwatch.Frequency;
+        return new JObject
+        {
+            ["ticks"] = l.PerfTicks, ["avgUs"] = Math.Round(l.SumTicks * 1e6 / f / l.PerfTicks, 1), ["maxMs"] = Math.Round(l.MaxMs, 3),
+            ["resolveUs"] = Math.Round(l.ResolveTicks * 1e6 / f / l.PerfTicks, 1), ["bytesPerTick"] = l.SumBytes / l.PerfTicks,
+        };
+    }
+
+    /// <summary>For bridge.self_perf: every layer's cost since the previous call, then reset (main-thread counters, read racily).</summary>
+    private JObject LayersSelfPerf()
+    {
+        var o = new JObject();
+        foreach (var l in _layers.ToArray())
+        {
+            if (LayerPerf(l) is { } p) o[l.Spec.Id] = p;
+            l.SumTicks = l.SumBytes = l.ResolveTicks = l.PerfTicks = 0; l.MaxMs = 0;
+        }
+        return o;
+    }
+
     private JObject LayersList()
     {
         LayersLoad();
@@ -114,10 +142,11 @@ public partial class WhatsAnAiBridge
     private JObject LayerStatus(LayerRun l) => new()
     {
         ["spec"] = JObject.FromObject(l.Spec),
-        ["events"] = l.Events, ["ticks"] = l.Ticks, ["costMs"] = Math.Round(l.CostMs, 3),
+        ["events"] = l.Events, ["ticks"] = l.Ticks, ["costMs"] = Math.Round(l.CostMs, 3), ["perf"] = LayerPerf(l),
         ["unitsChanged"] = l.Map.Count, ["noisyUnits"] = l.Noisy.Count,
         ["bytes"] = l.Spec.Mode == "struct" ? l.Size : null, ["namedRanges"] = l.Spec.Mode == "struct" ? l.Names.Count : null,
         ["slowProps"] = l.SlowProps.Count > 0 ? new JArray(l.SlowProps) : null,
+        ["rawGate"] = l.StatsGate is { } g ? JObject.FromObject(g.Status()) : null,
         ["rawPaths"] = l.Each?.Plans != null ? new JObject(l.Spec.Props!.Select((p, i) => new JProperty(p, l.Each.PlanNotes[i]))) : null,
         ["items"] = l.Each?.Items.Count,
         ["broken"] = l.Broken, ["notNow"] = l.NotNow,
@@ -183,7 +212,7 @@ public partial class WhatsAnAiBridge
         if (area != _layerArea)
         {
             _layerArea = area;
-            foreach (var l in _layers.Where(l => l.Spec.Mode is "struct" or "list" or "each")) { l.HasPrev = false; l.PrevValues = null; l.Address = 0; l.Each = null; l.ValuesA = null; }
+            foreach (var l in _layers.Where(l => l.Spec.Mode is "struct" or "list" or "each")) { l.HasPrev = false; l.ListA = null; l.Address = 0; l.Each = null; l.ValuesA = null; }
         }
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         foreach (var l in _layers)
@@ -192,9 +221,13 @@ public partial class WhatsAnAiBridge
             if (System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds > LayerTickBudgetMs) break;   // the rest next frame
             l.NextAt = now.AddMilliseconds(1000.0 / l.Spec.Hz);
             var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            var a0 = GC.GetAllocatedBytesForCurrentThread();
             try { LayerTick(l); }
             catch (Exception ex) { l.Broken = $"{ex.GetType().Name}: {ex.Message}"; LogFault($"[Observe] layer {l.Spec.Id}: {l.Broken}"); }
-            l.CostMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+            var dt = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            l.CostMs = dt * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            l.SumTicks += dt; l.SumBytes += GC.GetAllocatedBytesForCurrentThread() - a0; l.PerfTicks++;
+            if (l.CostMs > l.MaxMs) l.MaxMs = l.CostMs;
             l.Ticks++;
         }
     }
@@ -207,7 +240,19 @@ public partial class WhatsAnAiBridge
             ValuesTick(l, null!, ObsClock.Elapsed.TotalMilliseconds);
             return;
         }
-        var obj =new ExpressionWalker(GameController).Resolve(l.Spec.Path, out var error);
+        // struct: the object's address is known; the path is resolved again once a second (and after an area change) to
+        // follow a move, and every tick in between is just the raw read.
+        if (l.Spec.Mode == "struct" && l.Address != 0 && l.Size > 0 && (DateTime.UtcNow - l.ResolvedAt).TotalSeconds < StructResolveSeconds)
+        {
+            l.NotNow = null;
+            StructDiff(l, ObsClock.Elapsed.TotalMilliseconds);
+            return;
+        }
+        // dict over a Stats component's StatDictionary: skip the HUD's dictionary read while the raw stat pairs are unchanged.
+        if (l.Spec.Mode == "dict" && l.Spec.Path.EndsWith(StatDictSuffix, StringComparison.Ordinal) && StatsDictTick(l)) return;
+        var r0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var obj = new ExpressionWalker(GameController).Resolve(l.Spec.Path, out var error);
+        l.ResolveTicks += System.Diagnostics.Stopwatch.GetTimestamp() - r0;
         if (error != null) { l.Broken = $"path: {error}"; return; }   // the link no longer exists: say so once
         if (obj == null) { l.NotNow = "resolves to null right now"; return; }
         l.NotNow = null;
@@ -226,6 +271,38 @@ public partial class WhatsAnAiBridge
         }
     }
 
+    private const string StatDictSuffix = ".StatDictionary";
+
+    /// <summary>
+    /// The stats layer's fast path (StatsRaw.cs): resolve the Stats component, and read the HUD's StatDictionary (~90 us,
+    /// ~65 KB on PoE2) only when its raw (id, value) pairs changed or the gate's periodic full read is due; the gate checks
+    /// the raw pairs against every dictionary it is given and turns itself off naming the link on a mismatch. False when
+    /// the path's parent isn't a Stats component or doesn't resolve: the caller takes the generic path (which names a
+    /// broken link).
+    /// </summary>
+    private bool StatsDictTick(LayerRun l)
+    {
+        var r0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var parent = new ExpressionWalker(GameController).Resolve(l.Spec.Path[..^StatDictSuffix.Length], out var error);
+        if (error != null || parent is not Stats stats) { l.StatsGate = null; return false; }
+        var now = DateTime.UtcNow;
+        var gate = l.StatsGate ??= new StatsRawGate($"layer {l.Spec.Id}");
+        var address = stats.Address;
+        if (gate.Unchanged(this, address, now)) { l.NotNow = null; l.ResolveTicks += System.Diagnostics.Stopwatch.GetTimestamp() - r0; return true; }
+        var dict = stats.StatDictionary;
+        l.ResolveTicks += System.Diagnostics.Stopwatch.GetTimestamp() - r0;
+        if (dict == null) { l.NotNow = "resolves to null right now"; return true; }
+        gate.AfterRead(this, address, dict, now);
+        l.NotNow = null;
+        if (dict.GetType() != l.CheckedType)
+        {
+            if (ModeMismatch(l.Spec.Mode, dict) is { } wrong) { l.Broken = wrong; return true; }
+            l.CheckedType = dict.GetType();
+        }
+        ValuesTick(l, dict, ObsClock.Elapsed.TotalMilliseconds);
+        return true;
+    }
+
     // ── struct ───────────────────────────────────────────────────────
 
     private void StructTick(LayerRun l, object obj, double t)
@@ -241,6 +318,13 @@ public partial class WhatsAnAiBridge
             l.Now = new byte[l.Size]; l.Prev = new byte[l.Size]; l.HasPrev = false;
             l.Names = StructNames(l.Spec.Path);
         }
+        l.ResolvedAt = DateTime.UtcNow;
+        StructDiff(l, t);
+    }
+
+    /// <summary>Reads the struct's bytes raw at the known address and reports the changed ranges.</summary>
+    private void StructDiff(LayerRun l, double t)
+    {
         if (RawReader() is not { } read || !read(new IntPtr(l.Address), l.Now)) { l.NotNow = "raw read failed"; return; }
         if (l.HasPrev)
         {
@@ -341,6 +425,7 @@ public partial class WhatsAnAiBridge
 
     private void ValuesTick(LayerRun l, object obj, double t)
     {
+        if (l.Spec.Mode == "dict" && DictDiffFor(l, obj.GetType()) is { } typed) { typed.Tick(this, l, obj, t); return; }
         var now = l.ValuesB ??= new Dictionary<object, object?>();
         now.Clear();
         if (l.Spec.Mode == "dict") DictValues((IDictionary)obj, now);
@@ -354,6 +439,52 @@ public partial class WhatsAnAiBridge
             else if (!Equals(old, v)) ValueChange(l, KeyText(l, k), Text(old), Text(v), t);
         foreach (var (k, old) in prev)
             if (!now.ContainsKey(k)) ValueChange(l, KeyText(l, k), Text(old), null, t);
+    }
+
+    // ── dict, typed ──────────────────────────────────────────────────
+    // A generic dictionary (any IEnumerable<KeyValuePair<K, V>>) is diffed in its own types: copying it into object maps
+    // boxed every key and value each tick (317 GameStat/int pairs = ~15 KB per tick for the stats layer). Keys and values
+    // are boxed and formatted only for a change. Built once per dictionary type (MakeGenericType), then no reflection.
+
+    private abstract class DictDiff
+    {
+        public abstract void Tick(WhatsAnAiBridge b, LayerRun l, object dict, double t);
+    }
+
+    private sealed class DictDiff<TK, TV> : DictDiff where TK : notnull
+    {
+        private Dictionary<TK, TV>? _prev;
+        private Dictionary<TK, TV> _now = new();
+
+        public override void Tick(WhatsAnAiBridge b, LayerRun l, object dict, double t)
+        {
+            var now = _now;
+            now.Clear();
+            foreach (var kv in (IEnumerable<KeyValuePair<TK, TV>>)dict) now[kv.Key] = kv.Value;
+            var prev = _prev;
+            _prev = now;
+            _now = prev ?? new Dictionary<TK, TV>();
+            if (prev == null) return;   // baseline
+            var cmp = EqualityComparer<TV>.Default;
+            foreach (var (k, v) in now)
+                if (!prev.TryGetValue(k, out var old)) b.ValueChange(l, KeyText(l, k), null, Text(v), t);
+                else if (!cmp.Equals(old, v)) b.ValueChange(l, KeyText(l, k), Text(old), Text(v), t);
+            foreach (var (k, old) in prev)
+                if (!now.ContainsKey(k)) b.ValueChange(l, KeyText(l, k), Text(old), null, t);
+        }
+    }
+
+    /// <summary>The typed differ for a dictionary type, or null when it isn't an IEnumerable&lt;KeyValuePair&lt;K, V&gt;&gt; (then: object maps).</summary>
+    private static DictDiff? DictDiffFor(LayerRun l, Type type)
+    {
+        if (type == l.DictType) return l.Dict;
+        l.DictType = type;
+        l.Dict = null;
+        var kvp = type.GetInterfaces().Prepend(type).FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>)
+            && i.GetGenericArguments()[0] is { IsGenericType: true } a && a.GetGenericTypeDefinition() == typeof(KeyValuePair<,>));
+        if (kvp?.GetGenericArguments()[0].GetGenericArguments() is [var k, var v])
+            try { l.Dict = (DictDiff)Activator.CreateInstance(typeof(DictDiff<,>).MakeGenericType(k, v))!; } catch { }
+        return l.Dict;
     }
 
     private static string KeyText(LayerRun l, object key)
@@ -392,27 +523,41 @@ public partial class WhatsAnAiBridge
 
     // ── list ─────────────────────────────────────────────────────────
 
+    // Items are keyed by the key's value itself (a boxed long for the default Address), formatted only for an event, and
+    // an item's preview (its naming getter: RenderName reads a string from memory) is read once, when the item appears:
+    // the per-item key text and preview read every tick were most of a 5000-item list's cost. The key member is looked
+    // up once per item type. Two maps per layer are swapped, not reallocated.
     private void ListTick(LayerRun l, IEnumerable items, double t)
     {
         var keyProp = l.Spec.Key ?? "Address";
-        var now = new Dictionary<string, string>();
+        var prev = l.ListA;
+        var now = l.ListB ??= new Dictionary<object, string>();
+        now.Clear();
         var n = 0;
         foreach (var item in items)
         {
             if (item == null || ++n > 5000) continue;
-            var id = Text(MemberIndex.Find(item.GetType(), keyProp, kinds: MemberIndex.Kinds.Property)?.Get(item) ?? item);
-            now[id] = Preview(item);
+            var type = item.GetType();
+            if (type != l.ListType) { l.ListType = type; l.ListKey = MemberIndex.Find(type, keyProp, kinds: MemberIndex.Kinds.Property); }
+            var id = ListId(l.ListKey?.Get(item) ?? item);
+            // A preview that fell back to the type name (nothing named it yet, e.g. an entity still loading) is read again.
+            now[id] = prev != null && prev.TryGetValue(id, out var p) && p != type.Name ? p : Preview(item);
         }
-        var prev = l.PrevValues;
-        l.PrevValues = now;
+        (l.ListA, l.ListB) = (now, prev);
         if (prev == null) return;
         foreach (var (id, preview) in now)
-            if (!prev.ContainsKey(id) && Count(l, id, null, preview, t, $"added {preview}"))
-            { var e = Event(l, id, null, null, preview); e["change"] = "added"; Emit(l, e); }
+            if (!prev.ContainsKey(id) && Count(l, Text(id), null, preview, t, $"added {preview}"))
+            { var e = Event(l, Text(id), null, null, preview); e["change"] = "added"; Emit(l, e); }
         foreach (var (id, preview) in prev)
-            if (!now.ContainsKey(id) && Count(l, id, null, "(removed)", t, $"removed {preview}"))
-            { var e = Event(l, id, null, preview, null); e["change"] = "removed"; Emit(l, e); }
+            if (!now.ContainsKey(id) && Count(l, Text(id), null, "(removed)", t, $"removed {preview}"))
+            { var e = Event(l, Text(id), null, preview, null); e["change"] = "removed"; Emit(l, e); }
     }
+
+    /// <summary>
+    /// An item's identity: a string, number, enum or other value type as itself (compared by value, formatted only for an
+    /// event); any other object (no key member, or a key that is a wrapper object) by its text, as before.
+    /// </summary>
+    private static object ListId(object v) => v is string || v.GetType().IsValueType ? v : Text(v);
 
     private static string Preview(object item)
     {

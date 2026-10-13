@@ -214,23 +214,27 @@ public partial class WhatsAnAiBridge
     {
         if (!Obs().Enabled || !GameController.InGame) { _obsFrameAt = 0; return; }
         var now = DateTime.UtcNow;
-        ObserveHudFrame();
+        var sp = SelfStart(); ObserveHudFrame(); ObsPartEnd(0, sp);
+        sp = SelfStart();
         try { ObserveLayers(now); } catch (Exception ex) { LogFault($"[Observe] layers: {ex.Message}"); }
+        ObsPartEnd(1, sp);
         // Panels at 10 Hz once the visibility bit is calibrated (8 bytes per panel), so a panel lines up with 10 Hz
         // server changes; 2 Hz while it falls back to IsVisibleLocal (~3.6 KB allocated per panel).
+        sp = SelfStart();
         try { UcTick(now); } catch (Exception ex) { LogFault($"[Observe] ui catalogue: {ex.Message}", "obs-uc"); }
+        ObsPartEnd(2, sp);
         var panelsDue = (now - _obsLastPanels).TotalMilliseconds >= (_obsFlagOff >= 0 ? 100 : 500);
         var slowDue = (now - _obsLastTick).TotalMilliseconds >= 500;
         if (!panelsDue && !slowDue) return;
         try
         {
-            if (slowDue) { _obsLastTick = now; ObserveArea(); }
+            if (slowDue) { _obsLastTick = now; sp = SelfStart(); ObserveArea(); ObsPartEnd(3, sp); }
             _obsLastPanels = now;
-            ObservePanels();
-            if ((now - _obsLastEntities).TotalSeconds >= 2) { _obsLastEntities = now; ObserveEntities(); }
+            sp = SelfStart(); ObservePanels(); ObsPartEnd(4, sp);
+            if ((now - _obsLastEntities).TotalSeconds >= 2) { _obsLastEntities = now; sp = SelfStart(); ObserveEntities(); ObsPartEnd(5, sp); }
         }
         catch (Exception ex) { LogFault($"[Observe] {ex.Message}"); }
-        if (slowDue) { ObsFlush(); UcFlush(); }
+        if (slowDue) { sp = SelfStart(); ObsFlush(); UcFlush(); ObsPartEnd(6, sp); }
     }
 
     private void ObserveArea()
@@ -344,13 +348,18 @@ public partial class WhatsAnAiBridge
     private static Dictionary<long, string> MappedPanels(object ui)
     {
         var d = new Dictionary<long, string>();
-        foreach (var p in ui.GetType().GetProperties())
+        foreach (var p in PanelMembers(ui.GetType()))
         {
-            if (!typeof(UiElement).IsAssignableFrom(p.PropertyType) || p.GetIndexParameters().Length > 0) continue;
-            try { if (p.GetValue(ui) is UiElement el && el.Address != 0) d.TryAdd(el.Address, p.Name); } catch { }
+            try { if (p.Get(ui) is UiElement el && el.Address != 0) d.TryAdd(el.Address, p.Name); } catch { }
         }
         return d;
     }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Type, MemberIndex.Member[]> _panelMembers = new();
+
+    /// <summary>IngameUIElements' element-typed properties (reflection's order, compiled getters), listed once per type.</summary>
+    private static MemberIndex.Member[] PanelMembers(Type t) => _panelMembers.GetValue(t, type =>
+        MemberIndex.ReadableProperties(type).Where(m => typeof(UiElement).IsAssignableFrom(m.Type)).ToArray());
 
     /// <summary>The first few non-empty texts in a panel's subtree (breadth-first, bounded): what the panel says it is.</summary>
     private static List<string> PanelTexts(UiElement root, int depth, int max)
