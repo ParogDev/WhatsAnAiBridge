@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using ImGuiNET;
@@ -7,14 +8,30 @@ using ImGuiNET;
 namespace WhatsAnAiBridge;
 
 /// <summary>
-/// Self-contained neon-styled settings panel for WhatsAnAiBridge.
-/// Teal (#00CED1) accent  - dev-tool / bridge theme.
-/// Custom DrawList widgets, tabbed layout, live status display.
+/// The bridge's settings panel: the generated SettingsMenu (Shared\SettingsMenu.cs) draws every setting from the
+/// attributes in WhatsAnAiBridgeSettings (tabs Bridge / Limits / Recording / Permissions / Stats panel / Agent guide),
+/// and this class adds what isn't a setting: the live bridge status on top of the Bridge tab, the recording status and
+/// saved recordings on top of the Recording tab, the "Show player stats panel" row (a flag of the shared stats view,
+/// written through its mutator, not a node) and a Queries tab with the recent query log and the query reference.
+/// Teal (#00CED1) accent: the bridge's colour.
 /// </summary>
 public class WhatsAnAiBridgeSettingsUi
 {
-    private int _activeTab;
-    private readonly Dictionary<string, float> _anims = new();
+    private static readonly Vector4 Accent = new(0f, 0.81f, 0.82f, 1f);   // #00CED1 DarkTurquoise
+    private static readonly Vector4 Green = new(0.2f, 0.9f, 0.4f, 1f);
+    private static readonly Vector4 Yellow = new(1f, 0.82f, 0.2f, 1f);
+    private static readonly Vector4 Red = new(1f, 0.3f, 0.3f, 1f);
+    private const float ValueColumn = 170f;
+
+    private readonly SettingsMenu _menu;
+    private WhatsAnAiBridgeSettings? _s;
+    private WhatsAnAiBridge.BridgeStatus? _status;
+    private List<WhatsAnAiBridge.QueryLogEntry>? _queryLog;
+
+    // Saved recordings, listed at most every 2 s (the old panel listed the folder every frame).
+    private (string name, long size, DateTime written)[] _recordings = [];
+    private string? _recordingsNote;
+    private DateTime _recordingsAt;
 
     /// <summary>
     /// Opens/closes the in-HUD stats panel through the shared view's mutator (StatsUiState.PanelOpen),
@@ -22,609 +39,210 @@ public class WhatsAnAiBridgeSettingsUi
     /// </summary>
     public Action<bool>? SetStatsPanelOpen { get; set; }
 
-    private static readonly string[] Tabs = { "Status", "Settings", "Query Log", "Recording", "Guide" };
-
-    // ── Palette ─────────────────────────────────────────────────────
-    private static uint Accent => Col(0f, 0.81f, 0.82f);       // #00CED1 DarkTurquoise
-    private static uint AccentDim => Col(0f, 0.50f, 0.52f);
-    private static uint AccentSoft => Col(0f, 0.81f, 0.82f, 0.15f);
-    private static uint Label => Col(0.88f, 0.88f, 0.88f);
-    private static uint Desc => Col(0.38f, 0.40f, 0.44f);
-    private static uint TabOff => Col(0.48f, 0.48f, 0.52f);
-    private static uint CardBg => Col(0.05f, 0.05f, 0.07f, 1f);
-    private static uint Green => Col(0.2f, 0.9f, 0.4f);
-    private static uint Yellow => Col(1f, 0.82f, 0.2f);
-    private static uint Red => Col(1f, 0.3f, 0.3f);
-    private const float Row = 34f;
-    private const float RowText = 40f;
-
-    // ── Entry point ─────────────────────────────────────────────────
+    public WhatsAnAiBridgeSettingsUi()
+    {
+        _menu = new SettingsMenu { Accent = Accent, RootTabName = "Bridge" }
+            .Tab("Bridge", DrawStatus, first: true)
+            .Tab("Recording", DrawRecording, first: true)
+            .Tab("Queries", DrawQueries)
+            .Custom("StatsUi", DrawStatsPanelRow);
+    }
 
     public void Draw(WhatsAnAiBridgeSettings s, WhatsAnAiBridge.BridgeStatus status, List<WhatsAnAiBridge.QueryLogEntry> queryLog)
     {
-        var contentMin = ImGui.GetCursorScreenPos();
-        float contentW = ImGui.GetContentRegionAvail().X;
-        var dl = ImGui.GetWindowDrawList();
-
-        // Tab bar
-        float tabH = 26f;
-        float tabW = contentW / Tabs.Length;
-
-        for (int i = 0; i < Tabs.Length; i++)
-        {
-            var tMin = new Vector2(contentMin.X + i * tabW, contentMin.Y);
-            var tMax = new Vector2(contentMin.X + (i + 1) * tabW, contentMin.Y + tabH);
-            bool active = i == _activeTab;
-
-            if (active)
-                dl.AddRectFilled(tMin, tMax, WithAlpha(Accent, 0.12f));
-
-            ImGui.SetCursorScreenPos(tMin);
-            ImGui.InvisibleButton($"##cb_tab_{i}", tMax - tMin);
-            bool hov = ImGui.IsItemHovered();
-            if (ImGui.IsItemClicked()) _activeTab = i;
-
-            if (hov && !active)
-                dl.AddRectFilled(tMin, tMax, WithAlpha(Accent, 0.06f));
-            if (active)
-                dl.AddLine(tMin with { Y = tMax.Y - 1 } + new Vector2(3, 0),
-                    tMax - new Vector2(3, 1), Accent, 2f);
-
-            uint tc = active ? Accent : (hov ? AccentDim : TabOff);
-            CenterText(dl, Tabs[i], (tMin + tMax) * 0.5f, tc);
-        }
-
-        float sepY = contentMin.Y + tabH + 1;
-        dl.AddLine(new Vector2(contentMin.X, sepY),
-            new Vector2(contentMin.X + contentW, sepY), WithAlpha(Accent, 0.10f), 1f);
-
-        // Content area
-        ImGui.SetCursorScreenPos(new Vector2(contentMin.X, sepY + 3));
-        var avail = new Vector2(contentW, ImGui.GetContentRegionAvail().Y);
-        ImGui.BeginChild("##cb_content", avail, ImGuiChildFlags.None, ImGuiWindowFlags.None);
-
-        var cdl = ImGui.GetWindowDrawList();
-        var cMin = ImGui.GetWindowPos();
-        var cSz = ImGui.GetWindowSize();
-
-        cdl.AddRectFilled(cMin, cMin + cSz, CardBg, 3f);
-        float pulse = (float)(0.4 + 0.3 * Math.Sin(ImGui.GetTime() * 1.8));
-        cdl.AddRect(cMin, cMin + cSz, WithAlpha(Accent, pulse * 0.18f), 3f, ImDrawFlags.None, 1f);
-
-        float scrollY = ImGui.GetScrollY();
-        float y = cMin.Y + 10 - scrollY;
-        float x = cMin.X + 12;
-        float cx = cMin.X + cSz.X * 0.50f;
-        float sw = cSz.X * 0.40f;
-
-        switch (_activeTab)
-        {
-            case 0: TabStatus(cdl, status, x, cx, ref y, sw, cSz.X - 24); break;
-            case 1: TabSettings(cdl, s, x, cx, ref y, sw); break;
-            case 2: TabQueryLog(cdl, queryLog, x, ref y, cSz.X - 24); break;
-            case 3: TabRecording(cdl, status, s, x, cx, ref y, sw, cSz.X - 24); break;
-            case 4: TabGuide(cdl, x, ref y, cSz.X - 24); break;
-        }
-
-        ImGui.SetCursorScreenPos(new Vector2(x, y));
-        ImGui.Dummy(new Vector2(1, 4));
-        ImGui.EndChild();
+        _s = s;
+        _status = status;
+        _queryLog = queryLog;
+        _menu.Draw(s);
     }
 
-    // ── Tabs ────────────────────────────────────────────────────────
+    // ---- Bridge tab: live status ----
 
-    private void TabStatus(ImDrawListPtr dl, WhatsAnAiBridge.BridgeStatus status,
-        float x, float cx, ref float y, float sw, float width)
+    private void DrawStatus()
     {
-        SectionHeader(dl, x, ref y, "Bridge Status");
-
-        // Status indicator
-        uint statusCol = status.State switch
+        var status = _status;
+        if (status == null) return;
+        _menu.SectionHeader("Bridge status");
+        var (col, text) = status.State switch
         {
-            "idle" => Green,
-            "processing" => Yellow,
-            _ => Red
+            "idle" => (Green, "Idle - waiting for requests"),
+            "processing" => (Yellow, "Processing a query..."),
+            _ => (Red, status.State),
         };
-        string statusText = status.State switch
-        {
-            "idle" => "Idle  - waiting for request",
-            "processing" => "Processing query...",
-            _ => status.State
-        };
+        StatusDot(col, pulse: status.State != "idle");
+        SettingsMenu.Text(col, text);
 
-        dl.AddCircleFilled(new Vector2(x + 6, y + 8), 6f, statusCol);
-
-        // Pulse animation for the status dot
-        float statusPulse = (float)(0.3 + 0.7 * Math.Abs(Math.Sin(ImGui.GetTime() * 2.0)));
-        dl.AddCircle(new Vector2(x + 6, y + 8), 8f, WithAlpha(statusCol, statusPulse * 0.5f), 12, 1.5f);
-
-        dl.AddText(new Vector2(x + 20, y + 1), Label, statusText);
-        y += 24;
-
-        // Stats
-        SectionHeader(dl, x, ref y, "Statistics");
-        StatusRow(dl, x, cx, ref y, "Total Queries", status.TotalQueries.ToString());
-        StatusRow(dl, x, cx, ref y, "Last Query", string.IsNullOrEmpty(status.LastQueryType) ? " -" : status.LastQueryType);
-        StatusRow(dl, x, cx, ref y, "Last Response", status.LastResponseTime > 0 ? $"{status.LastResponseTime:F0}ms" : " -");
-        StatusRow(dl, x, cx, ref y, "Last Response Size", status.LastResponseSize > 0 ? FormatBytes(status.LastResponseSize) : " -");
-        StatusRow(dl, x, cx, ref y, "Poll Interval", $"{status.PollIntervalMs}ms");
-        StatusRow(dl, x, cx, ref y, "Recording", status.IsRecording ? $"active ({status.RecordingFrames} frames)" : "idle");
-
+        Row("Total queries", status.TotalQueries.ToString());
+        Row("Last query", string.IsNullOrEmpty(status.LastQueryType) ? "-" : status.LastQueryType);
+        Row("Last response", status.LastResponseTime > 0 ? $"{status.LastResponseTime:F0} ms" : "-");
+        Row("Last response size", status.LastResponseSize > 0 ? FormatBytes(status.LastResponseSize) : "-");
+        Row("Poll interval", $"{status.PollIntervalMs} ms");
+        Row("Recording", status.IsRecording ? $"active ({status.RecordingFrames} frames)" : "idle");
         if (status.LastQueryTimestamp != default)
         {
             var ago = DateTime.UtcNow - status.LastQueryTimestamp;
-            string agoStr = ago.TotalSeconds < 60 ? $"{ago.TotalSeconds:F0}s ago"
-                : ago.TotalMinutes < 60 ? $"{ago.TotalMinutes:F0}m ago"
-                : $"{ago.TotalHours:F1}h ago";
-            StatusRow(dl, x, cx, ref y, "Last Activity", agoStr);
+            Row("Last activity", ago.TotalSeconds < 60 ? $"{ago.TotalSeconds:F0} s ago"
+                : ago.TotalMinutes < 60 ? $"{ago.TotalMinutes:F0} min ago" : $"{ago.TotalHours:F1} h ago");
         }
-
-        y += 8;
-
-        // Last error
         if (!string.IsNullOrEmpty(status.LastError))
         {
-            SectionHeader(dl, x, ref y, "Last Error");
-            dl.AddText(new Vector2(x + 4, y), Red, status.LastError.Length > 120 ? status.LastError[..120] + "..." : status.LastError);
-            y += 20;
+            _menu.SectionHeader("Last error");
+            ImGui.PushTextWrapPos(0f);
+            SettingsMenu.Text(Red, status.LastError.Length > 400 ? status.LastError[..400] + "..." : status.LastError);
+            ImGui.PopTextWrapPos();
         }
+        ImGui.Spacing();
     }
 
-    private void TabSettings(ImDrawListPtr dl, WhatsAnAiBridgeSettings s,
-        float x, float cx, ref float y, float sw)
+    // ---- Recording tab: status and saved recordings, above the recording settings ----
+
+    private void DrawRecording()
     {
-        SectionHeader(dl, x, ref y, "Bridge");
-        IntSlider("cb_poll", s.PollIntervalMs, dl, x, cx, ref y, sw,
-            "Poll Interval (ms)", "How often to check for request.txt");
-        TextInput("cb_dir", s.BridgeDirectory, dl, x, cx, ref y, sw,
-            "Bridge Directory", "Path where request.txt and response.json live");
-
-        SectionHeader(dl, x, ref y, "Status HUD");
-        Toggle("cb_hud", s.ShowStatusHud, dl, x, cx, ref y,
-            "Show Status HUD", "Display a small bridge status indicator on screen");
-        IntSlider("cb_hx", s.HudX, dl, x, cx, ref y, sw,
-            "HUD X", "Horizontal position of the status HUD");
-        IntSlider("cb_hy", s.HudY, dl, x, cx, ref y, sw,
-            "HUD Y", "Vertical position of the status HUD");
-
-        SectionHeader(dl, x, ref y, "Stats Panel");
-        ToggleBool("cb_sp", s.StatsUi.PanelOpen, v => SetStatsPanelOpen?.Invoke(v), dl, x, cx, ref y,
-            "Show Player Stats Panel", "In-game panel of the shared stats view: pins, filter and selection sync with the Claude app");
-        ToggleBool("cb_spk", s.StatsPanelShowKeys.Value, v => s.StatsPanelShowKeys.Value = v, dl, x, cx, ref y,
-            "Panel Shows Stat Keys", "List Stats.dat keys instead of in-game text in the panel's table");
-
-        SectionHeader(dl, x, ref y, "Agent Guide");
-        Toggle("cb_ag", s.ShowAgentGuide, dl, x, cx, ref y,
-            "Show Agent Guide", "In-game card with what the agent asks you to do next, plus its log. Hides itself when idle");
-        Hotkey("cb_lk", s.AgentLogHotkey, dl, x, cx, ref y,
-            "Agent Log Hotkey (toggle)", "Opens the recent agent log under the card to select and copy lines. None: the log only shows as toasts");
-        Toggle("cb_ta", s.ToastAgent, dl, x, cx, ref y,
-            "Toasts: Agent Activity", "A grey toast for every agent tool call. Off: those lines only go to the log sheet");
-        Toggle("cb_ts", s.ToastStep, dl, x, cx, ref y,
-            "Toasts: Steps", "A toast when a guided step starts or is queued");
-        Toggle("cb_tr", s.ToastResult, dl, x, cx, ref y,
-            "Toasts: Results", "A toast for results and the 3 s done receipt");
-        Toggle("cb_tw", s.ToastWarn, dl, x, cx, ref y,
-            "Toasts: Warnings", "Amber toasts");
-        Toggle("cb_te", s.ToastError, dl, x, cx, ref y,
-            "Toasts: Errors", "Red toasts");
-        IntSlider("cb_rh", s.RestartHoldSec, dl, x, cx, ref y, sw,
-            "HUD Restart Hold (s)", "An agent's HUD restart that nothing blocks still waits this long on the card, with Not now. 0 = at once. Restarts never interrupt a running test unless you press Restart now");
-
-        SectionHeader(dl, x, ref y, "Query Limits");
-        IntSlider("cb_er", s.MaxEntityRange, dl, x, cx, ref y, sw,
-            "Default Entity Range", "Default max distance for entity queries");
-        IntSlider("cb_ds", s.MaxDeepStats, dl, x, cx, ref y, sw,
-            "Deep Scan Max Stats", "Maximum stat entries per entity in deep scans");
-        IntSlider("cb_uc", s.MaxUiChildren, dl, x, cx, ref y, sw,
-            "UI Scan Depth", "How many UI children to scan in 'ui' queries");
-
-        SectionHeader(dl, x, ref y, "Dev Loop");
-        Toggle("cb_rl", s.AllowPluginReload, dl, x, cx, ref y,
-            "Allow Plugin Reload Requests", "Let bridge clients recompile a source plugin in place, like its Reload button");
-        Toggle("cb_cs", s.AllowCSharpScripts, dl, x, cx, ref y,
-            "Allow C# Scripts", "Let bridge clients (AI agents) run C# inside the HUD. Arbitrary code: enable only while you want it");
-        Toggle("cb_hi", s.AllowHudInstrumentation, dl, x, cx, ref y,
-            "Allow HUD Instrumentation", "Let bridge clients time the HUD's render pipeline for a few seconds (patches the HUD's own code, never the game)");
-
-        SectionHeader(dl, x, ref y, "Recording");
-        IntSlider("cb_ri", s.RecordingIntervalMs, dl, x, cx, ref y, sw,
-            "Recording Interval (ms)", "Time between snapshot captures during recording");
-        IntSlider("cb_rr", s.RecordingEntityRange, dl, x, cx, ref y, sw,
-            "Recording Entity Range", "Max distance for entities in recording snapshots");
-        Toggle("cb_rd", s.AutoDeepScanBosses, dl, x, cx, ref y,
-            "Auto Deep Scan Bosses", "Full deep scan for Unique/Rare entities during recording");
-        IntSlider("cb_rs", s.RecordingMaxDeepStats, dl, x, cx, ref y, sw,
-            "Recording Max Stats", "Maximum stat entries per deep-scanned entity");
-    }
-
-    private void TabQueryLog(ImDrawListPtr dl, List<WhatsAnAiBridge.QueryLogEntry> log,
-        float x, ref float y, float width)
-    {
-        SectionHeader(dl, x, ref y, "Recent Queries");
-
-        if (log.Count == 0)
-        {
-            dl.AddText(new Vector2(x + 4, y), Desc, "No queries yet. Write a request.txt to start.");
-            y += 20;
-            return;
-        }
-
-        // Column headers
-        dl.AddText(new Vector2(x + 4, y), AccentDim, "Time");
-        dl.AddText(new Vector2(x + 80, y), AccentDim, "Query");
-        dl.AddText(new Vector2(x + width * 0.55f, y), AccentDim, "Duration");
-        dl.AddText(new Vector2(x + width * 0.72f, y), AccentDim, "Size");
-        dl.AddText(new Vector2(x + width * 0.88f, y), AccentDim, "Status");
-        y += 18;
-        dl.AddLine(new Vector2(x, y), new Vector2(x + width, y), WithAlpha(Accent, 0.15f), 1f);
-        y += 4;
-
-        // Show newest first
-        for (int i = log.Count - 1; i >= 0; i--)
-        {
-            var entry = log[i];
-            uint rowCol = entry.Success ? Label : Red;
-
-            dl.AddText(new Vector2(x + 4, y), Desc, entry.Timestamp.ToString("HH:mm:ss"));
-            dl.AddText(new Vector2(x + 80, y), rowCol, entry.Query.Length > 30 ? entry.Query[..30] + "..." : entry.Query);
-            dl.AddText(new Vector2(x + width * 0.55f, y), Accent, $"{entry.DurationMs:F0}ms");
-            dl.AddText(new Vector2(x + width * 0.72f, y), Label, FormatBytes(entry.ResponseSize));
-
-            uint statusBadge = entry.Success ? Green : Red;
-            dl.AddCircleFilled(new Vector2(x + width * 0.88f + 6, y + 7), 4f, statusBadge);
-
-            y += 18;
-        }
-    }
-
-    private void TabRecording(ImDrawListPtr dl, WhatsAnAiBridge.BridgeStatus status,
-        WhatsAnAiBridgeSettings s, float x, float cx, ref float y, float sw, float width)
-    {
-        SectionHeader(dl, x, ref y, "Recording Status");
-
-        // Recording indicator
+        var status = _status;
+        if (status == null) return;
+        _menu.SectionHeader("Recording status");
+        StatusDot(status.IsRecording ? Red : Green, pulse: status.IsRecording);
+        SettingsMenu.Text(status.IsRecording ? Red : Green, status.IsRecording ? "RECORDING" : "IDLE");
+        Row("Frames captured", status.RecordingFrames.ToString());
         if (status.IsRecording)
         {
-            float pulse = (float)(0.4 + 0.6 * Math.Abs(Math.Sin(ImGui.GetTime() * 3.0)));
-            dl.AddCircleFilled(new Vector2(x + 8, y + 8), 8f, WithAlpha(Red, pulse));
-            dl.AddCircle(new Vector2(x + 8, y + 8), 11f, WithAlpha(Red, pulse * 0.5f), 12, 1.5f);
-            dl.AddText(new Vector2(x + 24, y + 1), Red, "RECORDING");
+            var e = TimeSpan.FromMilliseconds(status.RecordingElapsedMs);
+            Row("Elapsed", $"{e.Minutes:D2}:{e.Seconds:D2}.{e.Milliseconds / 100}");
         }
-        else
-        {
-            dl.AddCircleFilled(new Vector2(x + 8, y + 8), 8f, Green);
-            dl.AddText(new Vector2(x + 24, y + 1), Green, "IDLE");
-        }
-        y += 24;
+        if (!string.IsNullOrEmpty(status.RecordingFile)) Row("File", Path.GetFileName(status.RecordingFile));
 
-        // Stats
-        StatusRow(dl, x, cx, ref y, "Frames Captured", status.RecordingFrames.ToString());
-        if (status.IsRecording)
+        _menu.SectionHeader("Saved recordings", "Files in <bridge folder>\\recordings (record:start / record:stop).");
+        RefreshRecordings();
+        if (_recordingsNote != null) SettingsMenu.Dim(_recordingsNote);
+        foreach (var (name, size, written) in _recordings)
         {
-            var elapsed = TimeSpan.FromMilliseconds(status.RecordingElapsedMs);
-            StatusRow(dl, x, cx, ref y, "Elapsed", $"{elapsed.Minutes:D2}:{elapsed.Seconds:D2}.{elapsed.Milliseconds / 100}");
+            SettingsMenu.Text(Accent, name);
+            ImGui.SameLine(Math.Max(ValueColumn + 60f, ImGui.GetContentRegionAvail().X * 0.55f));
+            ImGui.TextUnformatted(FormatBytes(size));
+            ImGui.SameLine();
+            SettingsMenu.Dim(written.ToString("yyyy-MM-dd HH:mm"));
         }
-        if (!string.IsNullOrEmpty(status.RecordingFile))
-        {
-            var fileName = System.IO.Path.GetFileName(status.RecordingFile);
-            StatusRow(dl, x, cx, ref y, "File", fileName);
-            try
-            {
-                if (System.IO.File.Exists(status.RecordingFile))
-                {
-                    var fi = new System.IO.FileInfo(status.RecordingFile);
-                    StatusRow(dl, x, cx, ref y, "File Size", FormatBytes(fi.Length));
-                }
-            }
-            catch { }
-        }
+        ImGui.Spacing();
+    }
 
-        y += 8;
-
-        // Recordings list
-        SectionHeader(dl, x, ref y, "Saved Recordings");
+    private void RefreshRecordings()
+    {
+        if (DateTime.UtcNow - _recordingsAt < TimeSpan.FromSeconds(2) || _s == null) return;
+        _recordingsAt = DateTime.UtcNow;
         try
         {
-            var recDir = System.IO.Path.Combine(s.BridgeDirectory.Value, "recordings");
-            if (System.IO.Directory.Exists(recDir))
-            {
-                var files = System.IO.Directory.GetFiles(recDir, "*.jsonl");
-                if (files.Length == 0)
-                {
-                    dl.AddText(new Vector2(x + 4, y), Desc, "No recordings yet. Use record:start to begin.");
-                    y += 20;
-                }
-                else
-                {
-                    foreach (var f in files.OrderByDescending(f => f))
-                    {
-                        var fi = new System.IO.FileInfo(f);
-                        dl.AddText(new Vector2(x + 4, y), Accent, fi.Name);
-                        dl.AddText(new Vector2(x + width * 0.55f, y), Label, FormatBytes(fi.Length));
-                        dl.AddText(new Vector2(x + width * 0.75f, y), Desc, fi.LastWriteTime.ToString("yyyy-MM-dd HH:mm"));
-                        y += 18;
-                    }
-                }
-            }
-            else
-            {
-                dl.AddText(new Vector2(x + 4, y), Desc, "No recordings directory yet.");
-                y += 20;
-            }
+            var dir = Path.Combine(_s.BridgeDirectory.Value ?? "", "recordings");
+            if (!Directory.Exists(dir)) { _recordings = []; _recordingsNote = "No recordings folder yet."; return; }
+            _recordings = Directory.GetFiles(dir, "*.jsonl").OrderByDescending(f => f)
+                .Select(f => new FileInfo(f)).Select(fi => (fi.Name, fi.Length, fi.LastWriteTime)).ToArray();
+            _recordingsNote = _recordings.Length == 0 ? "No recordings yet. Use record:start to begin." : null;
         }
-        catch { }
+        catch (Exception ex) { _recordings = []; _recordingsNote = $"Can't list the recordings folder: {ex.GetType().Name}: {ex.Message}"; }
     }
 
-    private void TabGuide(ImDrawListPtr dl, float x, ref float y, float width)
+    // ---- Stats panel tab: the shared view's PanelOpen flag ----
+
+    private void DrawStatsPanelRow()
     {
-        SectionHeader(dl, x, ref y, "How It Works");
-        dl.AddText(new Vector2(x + 4, y), Label, "Claude writes a query to request.txt in the bridge directory.");
-        y += 16;
-        dl.AddText(new Vector2(x + 4, y), Label, "This plugin reads it, processes the query, and writes response.json.");
-        y += 16;
-        dl.AddText(new Vector2(x + 4, y), Label, "Claude reads the response and analyzes the game state.");
-        y += 24;
-
-        SectionHeader(dl, x, ref y, "Available Queries");
-        QueryGuideEntry(dl, x, ref y, width, "all", "Full dump: player + area + NPC dialog + map data + entities");
-        QueryGuideEntry(dl, x, ref y, width, "player", "Player vitals, position, buffs");
-        QueryGuideEntry(dl, x, ref y, width, "area", "Current zone name, level, act");
-        QueryGuideEntry(dl, x, ref y, width, "entities[:range]", "All nearby entities (default 200 range)");
-        QueryGuideEntry(dl, x, ref y, width, "monsters", "Alive hostile monsters only");
-        QueryGuideEntry(dl, x, ref y, width, "items", "World items (drops on ground)");
-        QueryGuideEntry(dl, x, ref y, width, "deep:Filter[:range]", "Deep component dump for entities matching Filter in path");
-        QueryGuideEntry(dl, x, ref y, width, "npcdialog", "NPC dialog state: visible, name, lines, dialog depth");
-        QueryGuideEntry(dl, x, ref y, width, "mapdata", "Map stats, Djinn quest flags, dialog depth");
-        QueryGuideEntry(dl, x, ref y, width, "ui", "Scan all visible UI panels with child text (2 levels deep)");
-
-        y += 8;
-        SectionHeader(dl, x, ref y, "Recording Commands");
-        QueryGuideEntry(dl, x, ref y, width, "record:start[:interval]", "Start recording snapshots (optional interval in ms)");
-        QueryGuideEntry(dl, x, ref y, width, "record:stop", "Stop recording, returns summary with frame count and file");
-        QueryGuideEntry(dl, x, ref y, width, "record:status", "Check current recording state");
-        QueryGuideEntry(dl, x, ref y, width, "snapshot", "Capture single snapshot (also written to file if recording)");
-
-        y += 8;
-        SectionHeader(dl, x, ref y, "Playback Commands");
-        QueryGuideEntry(dl, x, ref y, width, "recording:list", "List saved .jsonl recording files");
-        QueryGuideEntry(dl, x, ref y, width, "recording:load:filename", "Load a recording for playback/analysis");
-        QueryGuideEntry(dl, x, ref y, width, "recording:frame:N", "Read frame N from loaded recording");
-        QueryGuideEntry(dl, x, ref y, width, "recording:range:N:M", "Read frames N through M");
-        QueryGuideEntry(dl, x, ref y, width, "recording:search:term", "Find frames containing term in entity/buff data");
-        QueryGuideEntry(dl, x, ref y, width, "recording:summary", "Analyze loaded recording: entities, buffs, timestamps");
-
-        y += 8;
-        SectionHeader(dl, x, ref y, "Snapshot Data (per frame)");
-        dl.AddText(new Vector2(x + 4, y), Label, "Each snapshot captures the full game state:"); y += 18;
-        dl.AddText(new Vector2(x + 8, y), Accent, "Player"); y += 16;
-        dl.AddText(new Vector2(x + 16, y), Desc, "HP/ES/Mana, position, rotation, actor (action, animation,"); y += 16;
-        dl.AddText(new Vector2(x + 16, y), Desc, "current skill/destination/target), buffs (stacks, maxTime, source)"); y += 20;
-        dl.AddText(new Vector2(x + 8, y), Accent, "Entities (adaptive depth)"); y += 16;
-        dl.AddText(new Vector2(x + 16, y), Desc, "Unique/Rare: deep scan with Life, Actor, Buffs, StateMachine,"); y += 16;
-        dl.AddText(new Vector2(x + 16, y), Desc, "Stats, Targetable, OMP, Render, Positioned"); y += 16;
-        dl.AddText(new Vector2(x + 16, y), Desc, "Normal/Magic: id, type, path, name, alive, hostile, rarity, hp"); y += 20;
-        dl.AddText(new Vector2(x + 8, y), Accent, "Visual Effects (all entities)"); y += 16;
-        dl.AddText(new Vector2(x + 16, y), Desc, "Beam (start/end positions), GroundEffect (duration, scale),"); y += 16;
-        dl.AddText(new Vector2(x + 16, y), Desc, "EffectPack (presence flag), AnimationController (id, progress, speed)"); y += 16;
-        dl.AddText(new Vector2(x + 16, y), Desc, "Entities with effects auto-promoted to deep scan"); y += 20;
+        var s = _s;
+        if (s == null) return;
+        SettingsMenu.Label("Player stats panel", "In-game panel of the shared stats view: pins, filter and selection sync with the Claude app.");
+        ImGui.SameLine(_menu.ControlColumn);
+        var open = s.StatsUi.PanelOpen;
+        if (_menu.PillToggle("##stats_panel_open", ref open, "StatsUi.PanelOpen")) SetStatsPanelOpen?.Invoke(open);
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────
+    // ---- Queries tab: recent queries and the query reference ----
 
-    private static void StatusRow(ImDrawListPtr dl, float x, float cx, ref float y, string label, string value)
+    private void DrawQueries()
     {
-        dl.AddText(new Vector2(x + 6, y), Desc, label);
-        dl.AddText(new Vector2(cx, y), Label, value);
-        y += 20;
-    }
-
-    private static void QueryGuideEntry(ImDrawListPtr dl, float x, ref float y, float width, string query, string desc)
-    {
-        dl.AddText(new Vector2(x + 8, y), Accent, query);
-        y += 16;
-        dl.AddText(new Vector2(x + 16, y), Desc, desc);
-        y += 20;
-    }
-
-    private static string FormatBytes(long bytes)
-    {
-        if (bytes < 1024) return $"{bytes} B";
-        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
-        return $"{bytes / (1024.0 * 1024):F1} MB";
-    }
-
-    // ── Section header ──────────────────────────────────────────────
-
-    private static void SectionHeader(ImDrawListPtr dl, float x, ref float y, string title)
-    {
-        y += 4f;
-        dl.AddText(new Vector2(x, y), Accent, title);
-        y += 18f;
-        dl.AddLine(new Vector2(x, y - 4), new Vector2(x + ImGui.CalcTextSize(title).X + 40, y - 4),
-            WithAlpha(Accent, 0.25f), 1f);
-    }
-
-    // ── Widget primitives ───────────────────────────────────────────
-
-    private void Toggle(string key, ToggleNode node, ImDrawListPtr dl,
-        float x, float cx, ref float y, string label, string desc)
-    {
-        dl.AddText(new Vector2(x + 6, y + 1), Label, label);
-        dl.AddText(new Vector2(x + 6, y + 16), Desc, desc);
-        ImGui.SetCursorScreenPos(new Vector2(cx, y + 5));
-        var v = node.Value;
-        _anims.TryGetValue(key, out float a);
-        if (PillToggle($"##{key}", ref v, ref a))
-            node.Value = v;
-        _anims[key] = a;
-        y += Row;
-    }
-
-    /// <summary>Same pill toggle as <see cref="Toggle"/>, for a bool that is not a ToggleNode (writes go through <paramref name="set"/>).</summary>
-    private void ToggleBool(string key, bool value, Action<bool> set, ImDrawListPtr dl,
-        float x, float cx, ref float y, string label, string desc)
-    {
-        dl.AddText(new Vector2(x + 6, y + 1), Label, label);
-        dl.AddText(new Vector2(x + 6, y + 16), Desc, desc);
-        ImGui.SetCursorScreenPos(new Vector2(cx, y + 5));
-        var v = value;
-        _anims.TryGetValue(key, out float a);
-        if (PillToggle($"##{key}", ref v, ref a))
-            set(v);
-        _anims[key] = a;
-        y += Row;
-    }
-
-    private void IntSlider(string key, RangeNode<int> node, ImDrawListPtr dl,
-        float x, float cx, ref float y, float sw, string label, string desc)
-    {
-        dl.AddText(new Vector2(x + 6, y + 1), Label, label);
-        dl.AddText(new Vector2(x + 6, y + 16), Desc, desc);
-        ImGui.SetCursorScreenPos(new Vector2(cx, y + 7));
-        var v = node.Value;
-        if (SliderInt($"##{key}", ref v, node.Min, node.Max, sw))
-            node.Value = v;
-        dl.AddText(new Vector2(cx + sw + 6, y + 7), Accent, v.ToString());
-        y += Row;
-    }
-
-    private void TextInput(string key, TextNode node, ImDrawListPtr dl,
-        float x, float cx, ref float y, float sw, string label, string desc)
-    {
-        dl.AddText(new Vector2(x + 6, y + 1), Label, label);
-        dl.AddText(new Vector2(x + 6, y + 16), Desc, desc);
-
-        ImGui.SetCursorScreenPos(new Vector2(cx, y + 3));
-        ImGui.PushStyleColor(ImGuiCol.FrameBg, new Vector4(0.07f, 0.07f, 0.09f, 1f));
-        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.88f, 0.88f, 0.88f, 1f));
-        ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(0f, 0.50f, 0.52f, 0.6f));
-        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 3f);
-        ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f);
-
-        string val = node.Value ?? "";
-        ImGui.SetNextItemWidth(sw);
-        if (ImGui.InputText($"##{key}", ref val, 512))
-            node.Value = val;
-
-        ImGui.PopStyleVar(2);
-        ImGui.PopStyleColor(3);
-        y += RowText;
-    }
-
-    /// <summary>
-    /// A hotkey row: the HUD's own picker (HotkeyNodeV2.DrawPickerButton: press a key, tick modifiers, Clear, Esc)
-    /// behind a button styled like the text input. The button shows the current key, or "None".
-    /// </summary>
-    private void Hotkey(string key, HotkeyNodeV2 node, ImDrawListPtr dl,
-        float x, float cx, ref float y, string label, string desc)
-    {
-        dl.AddText(new Vector2(x + 6, y + 1), Label, label);
-        dl.AddText(new Vector2(x + 6, y + 16), Desc, desc);
-
-        ImGui.SetCursorScreenPos(new Vector2(cx, y + 3));
-        ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.07f, 0.07f, 0.09f, 1f));
-        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, new Vector4(0f, 0.50f, 0.52f, 0.35f));
-        ImGui.PushStyleColor(ImGuiCol.ButtonActive, new Vector4(0f, 0.81f, 0.82f, 0.45f));
-        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0.88f, 0.88f, 0.88f, 1f));
-        ImGui.PushStyleColor(ImGuiCol.Border, new Vector4(0f, 0.50f, 0.52f, 0.6f));
-        ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 3f);
-        ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1f);
-        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new Vector2(12, 3));
-
-        // "###" keeps the ImGui id stable while the label (the key name) changes; the picker's popup shares it.
-        var caption = node.Value.Mode == HotkeyNodeV2.HotkeyNodeMode.None ? "None - click to set" : node.Value.ToString();
-        node.DrawPickerButton($"{caption}###{key}");
-
-        ImGui.PopStyleVar(3);
-        ImGui.PopStyleColor(5);
-        y += RowText;
-    }
-
-    // ── Self-contained drawing helpers ──────────────────────────────
-
-    private static bool PillToggle(string id, ref bool value, ref float animState)
-    {
-        var dl = ImGui.GetWindowDrawList();
-        var cur = ImGui.GetCursorScreenPos();
-        const float w = 40f, h = 20f, r = h * 0.5f;
-
-        ImGui.InvisibleButton(id, new Vector2(w, h));
-        bool changed = ImGui.IsItemClicked();
-        if (changed) value = !value;
-
-        float dt = ImGui.GetIO().DeltaTime;
-        float target = value ? 1f : 0f;
-        animState = Math.Clamp(animState + (target - animState) * Math.Min(dt * 10f, 1f), 0f, 1f);
-
-        uint trackOff = ImGui.GetColorU32(new Vector4(0.2f, 0.2f, 0.2f, 1f));
-        uint trackColor = LerpCol(trackOff, Accent, animState);
-        dl.AddRectFilled(cur, cur + new Vector2(w, h), trackColor, r);
-
-        float knobX = cur.X + r + animState * (w - h);
-        uint knobCol = ImGui.GetColorU32(new Vector4(
-            0.5f + 0.5f * animState, 0.5f + 0.5f * animState,
-            0.5f + 0.5f * animState, 1f));
-        dl.AddCircleFilled(new Vector2(knobX, cur.Y + r), r - 2f, knobCol);
-
-        return changed;
-    }
-
-    private static bool SliderInt(string id, ref int value, int min, int max, float width)
-    {
-        var dl = ImGui.GetWindowDrawList();
-        var cur = ImGui.GetCursorScreenPos();
-        const float h = 16f, th = 4f, tr = 7f;
-
-        ImGui.InvisibleButton(id, new Vector2(width, h));
-        bool changed = false;
-        if (ImGui.IsItemActive())
+        _menu.SectionHeader("Recent queries");
+        var log = _queryLog;
+        if (log == null || log.Count == 0) SettingsMenu.Dim("No queries yet.");
+        else
         {
-            float frac = Math.Clamp((ImGui.GetMousePos().X - cur.X) / width, 0f, 1f);
-            int nv = min + (int)(frac * (max - min));
-            if (nv != value) { value = nv; changed = true; }
+            float w = ImGui.GetContentRegionAvail().X;
+            float c1 = 80f, c2 = w * 0.55f, c3 = w * 0.72f, c4 = w * 0.88f;
+            SettingsMenu.Dim("Time"); ImGui.SameLine(c1); SettingsMenu.Dim("Query"); ImGui.SameLine(c2); SettingsMenu.Dim("Duration");
+            ImGui.SameLine(c3); SettingsMenu.Dim("Size"); ImGui.SameLine(c4); SettingsMenu.Dim("Status");
+            for (int i = log.Count - 1; i >= 0; i--)
+            {
+                var e = log[i];
+                SettingsMenu.Dim(e.Timestamp.ToString("HH:mm:ss"));
+                ImGui.SameLine(c1);
+                SettingsMenu.Text(e.Success ? ImGui.GetStyle().Colors[(int)ImGuiCol.Text] : Red, e.Query.Length > 30 ? e.Query[..30] + "..." : e.Query);
+                if (e.Query.Length > 30 && ImGui.IsItemHovered()) SettingsMenu.Tooltip(e.Query);
+                ImGui.SameLine(c2);
+                SettingsMenu.Text(Accent, $"{e.DurationMs:F0} ms");
+                ImGui.SameLine(c3);
+                ImGui.TextUnformatted(FormatBytes(e.ResponseSize));
+                ImGui.SameLine(c4);
+                SettingsMenu.Text(e.Success ? Green : Red, e.Success ? "ok" : "failed");
+            }
         }
 
-        float trackY = cur.Y + (h - th) * 0.5f;
-        dl.AddRectFilled(cur with { Y = trackY }, new Vector2(cur.X + width, trackY + th),
-            ImGui.GetColorU32(new Vector4(0.15f, 0.15f, 0.15f, 1f)), 2f);
-
-        float f = (max > min) ? (float)(value - min) / (max - min) : 0f;
-        float fw = f * width;
-        dl.AddRectFilled(cur with { Y = trackY }, new Vector2(cur.X + fw, trackY + th), Accent, 2f);
-
-        float tx = cur.X + fw, ty = cur.Y + h * 0.5f;
-        dl.AddCircleFilled(new Vector2(tx, ty), tr, Accent);
-        dl.AddCircleFilled(new Vector2(tx, ty), tr - 2f,
-            ImGui.GetColorU32(new Vector4(0.95f, 0.95f, 0.95f, 1f)));
-
-        return changed;
+        _menu.SectionHeader("Query reference", "query types for method \"query\" (params.type) and the legacy request file.");
+        Ref("all", "Full dump: player + area + NPC dialog + map data + entities");
+        Ref("player", "Player vitals, position, buffs");
+        Ref("area", "Current zone name, level, act");
+        Ref("entities[:range]", "All nearby entities (default 200 range)");
+        Ref("monsters", "Alive hostile monsters only");
+        Ref("items", "World items (drops on ground)");
+        Ref("deep:Filter[:range]", "Deep component dump for entities matching Filter in path");
+        Ref("npcdialog", "NPC dialog state: visible, name, lines, dialog depth");
+        Ref("mapdata", "Map stats, Djinn quest flags, dialog depth");
+        Ref("ui", "Scan all visible UI panels with child text (2 levels deep)");
+        _menu.SectionHeader("Recording and playback");
+        Ref("record:start[:interval]", "Start recording snapshots (optional interval in ms)");
+        Ref("record:stop", "Stop recording, returns summary with frame count and file");
+        Ref("record:status", "Check current recording state");
+        Ref("snapshot", "Capture a single snapshot (also written to file if recording)");
+        Ref("recording:list", "List saved .jsonl recording files");
+        Ref("recording:load:filename", "Load a recording for playback/analysis");
+        Ref("recording:frame:N", "Read frame N from the loaded recording");
+        Ref("recording:range:N:M", "Read frames N through M");
+        Ref("recording:search:term", "Find frames containing term in entity/buff data");
+        Ref("recording:summary", "Analyze the loaded recording: entities, buffs, timestamps");
+        ImGui.Spacing();
     }
 
-    // ── Color utilities ─────────────────────────────────────────────
+    // ---- helpers ----
 
-    private static uint Col(float r, float g, float b, float a = 1f)
-        => ImGui.GetColorU32(new Vector4(r, g, b, a));
-
-    private static uint WithAlpha(uint color, float alpha)
+    private static void Row(string label, string value)
     {
-        var v = ImGui.ColorConvertU32ToFloat4(color);
-        v.W = alpha;
-        return ImGui.GetColorU32(v);
+        SettingsMenu.Dim(label);
+        ImGui.SameLine(ValueColumn);
+        ImGui.TextUnformatted(value);
     }
 
-    private static uint LerpCol(uint a, uint b, float t)
+    private static void Ref(string query, string desc)
     {
-        var va = ImGui.ColorConvertU32ToFloat4(a);
-        var vb = ImGui.ColorConvertU32ToFloat4(b);
-        return ImGui.GetColorU32(new Vector4(
-            va.X + (vb.X - va.X) * t, va.Y + (vb.Y - va.Y) * t,
-            va.Z + (vb.Z - va.Z) * t, va.W + (vb.W - va.W) * t));
+        SettingsMenu.Text(Accent, query);
+        ImGui.SameLine(Math.Max(ValueColumn + 40f, ImGui.CalcTextSize(query).X + 24f));
+        SettingsMenu.Dim(desc);
     }
 
-    private static void CenterText(ImDrawListPtr dl, string text, Vector2 center, uint color)
+    /// <summary>A small status dot before the next text on the same line, pulsing while something is going on.</summary>
+    private static void StatusDot(Vector4 col, bool pulse)
     {
-        var sz = ImGui.CalcTextSize(text);
-        dl.AddText(center - sz * 0.5f, color, text);
+        var dl = ImGui.GetWindowDrawList();
+        var p = ImGui.GetCursorScreenPos();
+        float h = ImGui.GetTextLineHeight();
+        var c = new Vector2(p.X + 7, p.Y + h * 0.5f);
+        dl.AddCircleFilled(c, 5f, ImGui.GetColorU32(col));
+        if (pulse)
+        {
+            float a = (float)(0.3 + 0.7 * Math.Abs(Math.Sin(ImGui.GetTime() * 2.5)));
+            dl.AddCircle(c, 8f, ImGui.GetColorU32(col with { W = a * 0.5f }), 12, 1.5f);
+        }
+        ImGui.Dummy(new Vector2(18f, h));
+        ImGui.SameLine();
     }
+
+    private static string FormatBytes(long bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} B",
+        < 1024 * 1024 => $"{bytes / 1024.0:F1} KB",
+        _ => $"{bytes / (1024.0 * 1024):F1} MB",
+    };
 }
