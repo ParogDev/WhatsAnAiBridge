@@ -27,9 +27,27 @@ public class TcpBridgeServer : IDisposable
         public required TaskCompletionSource<string> Response { get; init; }
         /// <summary>The connection the request came in on (1, 2, ...): sessions (Shared\Sessions.cs) are keyed by it.</summary>
         public long ClientId { get; init; }
+        private const int StateQueued = 0, StateRunning = 1, StateAbandoned = 2;
+        private int _state;   // StateQueued -> StateRunning (the runner) or StateAbandoned (the listener): one wins, once
+
+        /// <summary>Already answered from the listener (-32010, the HUD is loading, or the timeout): the runner skips it.</summary>
+        public bool Abandoned => Volatile.Read(ref _state) == StateAbandoned;
+
+        /// <summary>The runner (main thread or watchdog worker) claims the request before running it; false = the listener
+        /// already answered it (abandoned), skip it.</summary>
+        public bool TryClaimRun() => Interlocked.CompareExchange(ref _state, StateRunning, StateQueued) == StateQueued;
+
+        /// <summary>The listener claims the request before answering it itself; false = it is already running (a mutating call
+        /// may be half done), so "safe to resend" must not be said.</summary>
+        public bool TryAbandon() => Interlocked.CompareExchange(ref _state, StateAbandoned, StateQueued) == StateQueued;
     }
 
+    /// <summary>The plugin's live phase (Shared\HudState.cs): listener-side methods, status fields, early and timeout replies.</summary>
+    internal IBridgeLiveInfo? Live { get; set; }
+
     private const int PortFallbackRange = 10;
+    private const int TimeoutSec = 10;
+    private static readonly TimeSpan WaitSlice = TimeSpan.FromMilliseconds(250), EarlyReplyAfter = TimeSpan.FromSeconds(1.5);
 
     public ConcurrentQueue<PendingRequest> PendingRequests { get; } = new();
 
@@ -166,7 +184,7 @@ public class TcpBridgeServer : IDisposable
                     if (line == null) break; // Client disconnected
                     if (string.IsNullOrWhiteSpace(line)) continue;
 
-                    var response = await ProcessJsonRpcMessage(line, clientId);
+                    var response = await ProcessJsonRpcMessage(line, clientId, ct);
                     if (response != null)
                     {
                         try
@@ -190,7 +208,7 @@ public class TcpBridgeServer : IDisposable
         }
     }
 
-    private async Task<string?> ProcessJsonRpcMessage(string json, long clientId)
+    private async Task<string?> ProcessJsonRpcMessage(string json, long clientId, CancellationToken ct)
     {
         JObject msg;
         try
@@ -232,7 +250,19 @@ public class TcpBridgeServer : IDisposable
                 ["pendingRequests"] = PendingRequests.Count,
                 ["connectedClients"] = _clientCount,
             };
+            try { Live?.AddStatus(status); } catch (Exception ex) { status["phaseError"] = $"{ex.GetType().Name}: {ex.Message}"; }
             return JsonRpcResult(id, status);
+        }
+
+        // hud.state and outage.* are answered here too (Shared\HudState.cs, Shared\Outage.cs): they must work while the
+        // main thread is on a load screen or frozen.
+        var live = Live;
+        if (live != null)
+        {
+            string? local;
+            try { local = live.TryLocal(method, msg["params"], PendingRequests.Count); }
+            catch (Exception ex) { return JsonRpcError(id, -32603, $"Internal error in listener-side {method}: {ex.GetType().Name}: {ex.Message}"); }
+            if (local != null) return JsonRpcResult(id, JToken.Parse(local));
         }
 
         // Queue for main thread processing
@@ -248,17 +278,42 @@ public class TcpBridgeServer : IDisposable
 
         PendingRequests.Enqueue(pending);
 
-        // Wait for main thread to process (with timeout)
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        // Wait for main thread to process (with timeout). While the HUD is on a load screen, a request still unanswered after
+        // ~1.5 s is answered from here (-32010, "normal, comes back by itself"). The early reply and the runner both claim the
+        // request atomically (PendingRequest.TryAbandon / TryClaimRun): the reply only goes out when the request never
+        // started, and the runner skips an abandoned one, so a "safe to resend" call can never also run.
+        var started = DateTime.UtcNow;
+        var deadline = started + TimeSpan.FromSeconds(TimeoutSec);
         try
         {
-            var result = await tcs.Task.WaitAsync(timeoutCts.Token);
-            return JsonRpcResult(id, JToken.Parse(result));
+            while (true)
+            {
+                var left = deadline - DateTime.UtcNow;
+                if (left <= TimeSpan.Zero) break;
+                var slice = left < WaitSlice ? left : WaitSlice;
+                try { return JsonRpcResult(id, JToken.Parse(await tcs.Task.WaitAsync(slice, ct))); }
+                catch (TimeoutException) { }   // this slice passed with no result: maybe answer early
+                if (live == null || DateTime.UtcNow - started < EarlyReplyAfter) continue;
+                BridgeRpcError? early = null;
+                try { early = live.EarlyReply(DateTime.UtcNow - started, PendingRequests.Count); } catch (Exception ex) { _logError($"early reply for {method}: {ex.Message}"); }
+                if (early == null) continue;
+                if (!pending.TryAbandon()) continue;   // already running on the HUD: wait for its result instead
+                tcs.TrySetCanceled();
+                return JsonRpcError(id, early.Code, early.Message, JToken.FromObject(early.Data));
+            }
+            // Timeout: abandon it if it never started, so it can't run after the caller was told it timed out. If it is
+            // running, the reply says so: the call may still complete, so resending it may run it twice.
+            var neverStarted = pending.TryAbandon();
+            var runningNote = neverStarted ? "" : " (it had already started on the HUD and may still complete: check before resending a call that changes something)";
+            BridgeRpcError? timeout = null;
+            try { timeout = live?.Timeout(TimeoutSec, PendingRequests.Count); } catch (Exception ex) { _logError($"timeout reply for {method}: {ex.Message}"); }
+            return timeout != null
+                ? JsonRpcError(id, timeout.Code, timeout.Message + runningNote, JToken.FromObject(timeout.Data))
+                : JsonRpcError(id, -32002, "Timed out after 10s waiting for the HUD to process the request (HUD paused, loading, or busy)" + runningNote);
         }
-        catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
+        catch (OperationCanceledException)
         {
-            // WaitAsync(token) throws TaskCanceledException on timeout, not TimeoutException.
-            return JsonRpcError(id, -32002, "Timed out after 10s waiting for the HUD to process the request (HUD paused, loading, or busy)");
+            return JsonRpcError(id, -32002, "The bridge is shutting down (HUD closing or the bridge reloading)");
         }
         catch (Exception ex)
         {
@@ -284,17 +339,19 @@ public class TcpBridgeServer : IDisposable
         return response.ToString(Formatting.None);
     }
 
-    private static string JsonRpcError(JToken? id, int code, string message)
+    private static string JsonRpcError(JToken? id, int code, string message, JToken? data = null)
     {
+        var error = new JObject
+        {
+            ["code"] = code,
+            ["message"] = message,
+        };
+        if (data != null) error["data"] = data;
         var response = new JObject
         {
             ["jsonrpc"] = "2.0",
             ["id"] = id ?? JValue.CreateNull(),
-            ["error"] = new JObject
-            {
-                ["code"] = code,
-                ["message"] = message,
-            },
+            ["error"] = error,
         };
         return response.ToString(Formatting.None);
     }

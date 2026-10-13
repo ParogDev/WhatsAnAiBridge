@@ -42,6 +42,8 @@ public partial class WhatsAnAiBridge
         public string Text = "";
         public string? Title;   // the toast's title line; null = the kind as a word
         public double Hold = GuideHoldDefaultSec;   // guide.log holdSec (C3): how long its toast stays, 1-30 s; over 3 s never merged with repeats
+        public string? Tag;              // HUD-posted lines only (outage toasts): GuideToastRetire(tag) takes its toast down early
+        public volatile bool Retired;    // set by GuideToastRetire (any thread): the toast feed skips it and drops its toast
     }
 
     internal sealed class GuideState
@@ -381,7 +383,7 @@ public partial class WhatsAnAiBridge
 
     private string GuideWhoText(string? label) => label == null ? "The agent" : SessionDisplayName(label);
 
-    private JObject GuideLog(JToken? p)
+    private JObject GuideLog(JToken? p, string? tag = null)
     {
         var text = Clip(p?["text"]?.ToString(), 200);
         if (string.IsNullOrWhiteSpace(text)) return new JObject { ["error"] = "missing_text" };
@@ -395,13 +397,22 @@ public partial class WhatsAnAiBridge
             hold = Math.Clamp(h, GuideHoldMinSec, GuideHoldMaxSec);
         lock (_guideLock)
         {
-            _guide.Log.Add(new GuideLogEntry { At = DateTime.UtcNow, Kind = kind, Text = text!, Title = string.IsNullOrWhiteSpace(title) ? null : title, Hold = hold });
+            _guide.Log.Add(new GuideLogEntry { At = DateTime.UtcNow, Kind = kind, Text = text!, Title = string.IsNullOrWhiteSpace(title) ? null : title, Hold = hold, Tag = tag });
             if (_guide.Log.Count > GuideLogMax) _guide.Log.RemoveRange(0, _guide.Log.Count - GuideLogMax);
             // No UpdatedAt here: the quiet clock counts what the user saw (a toast that showed, GuideToastFeed.cs), not every
             // line; agent lines for each tool call are off by default and would keep the quiet card awake forever.
             _guide.Rev++;
             return new JObject { ["ok"] = true, ["rev"] = _guide.Rev };
         }
+    }
+
+    /// <summary>Takes down the toast of every log line posted with this tag (pending or showing); the log sheet keeps the
+    /// lines. Any thread: the feed (render thread) reads the flag.</summary>
+    private void GuideToastRetire(string tag)
+    {
+        lock (_guideLock)
+            foreach (var e in _guide.Log)
+                if (e.Tag == tag) e.Retired = true;
     }
 
     private JObject GuideStateJson() { lock (_guideLock) return GuideStateJsonLocked(); }

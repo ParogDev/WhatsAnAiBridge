@@ -236,7 +236,8 @@ public partial class WhatsAnAiBridge
         // dropped lines do not wake the card).
         var quietFor = (utc - (g.updatedAt > _toastShownAt ? g.updatedAt : _toastShownAt)).TotalSeconds;
         // A pending HUD restart (blocked, or counting down with Not now) keeps the panel up: the user must be able to answer it.
-        var quiet = ((!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null)) && rs.Waiting == null && !askUp;
+        var outageUp = OutageCardSnapshot() != null;   // a planned user restart asks too (Outage.cs): same as a restart card
+        var quiet = ((!needsUser && q.Next == null && quietFor > GuideQuietHideSec) || (!hasCard && q.Next == null)) && rs.Waiting == null && !outageUp && !askUp;
 
         // Attention, decided once per frame for every surface (GuideAttentionFor). Inputs: the highlight boxes on
         // screen (a consistent copy; the overlay re-resolves them after this panel, so they may be one frame old),
@@ -266,7 +267,7 @@ public partial class WhatsAnAiBridge
         var peekable = hasCard || q.Next != null || askUp || WorkStripHasRows;
         var waiting = queue.Rows.Length > 0 || ask != null;   // something for the player, on screen or not: the dot means something
         var at = GuideAttentionFor(boxes.Count > 0, hovered, now - u.HoverAt, needsUser, mustAct, avoid,
-            CombatNear(now), quiet, peekable, g.rev > 0 || bridgeDown || waiting || work.Active > 0, bridgeDown, toastsH > 0, rs.Waiting != null,
+            CombatNear(now), quiet, peekable, g.rev > 0 || bridgeDown || waiting || work.Active > 0, bridgeDown, toastsH > 0, rs.Waiting != null || outageUp,
             WorkStripHasRows, WorkQuiet(now), WorkStripNeedsYou(), work.AnyF8Running, BoardPinned);
         FeedGuideToasts(g, at, hl, utc);
         PublishAttention(at);
@@ -555,9 +556,11 @@ public partial class WhatsAnAiBridge
         var restart = rs.Waiting;
         // The floor's slot (GuidePanelAsk.cs): the attention queue's question, its answer receipt and fade, or the empty
         // hand-over gap. First, since it holds the floor. Not drawn in combat (the dot stands in, attention FloorHidden).
+        // A planned user restart of game + HUD (GuidePanelOutage.cs): restarts go first, so it tops the stack.
+        var outage = DrawOutageSlot(ag, th, now, utc);
         var slot = DrawAskSlot(at, ag, th, now, utc);
         if (slot) ImGui.Dummy(new Vector2(GuideWidth, 5));
-        var floorUp = slot || (hasCard && !at.FloorHidden);
+        var floorUp = slot || outage || (hasCard && !at.FloorHidden);
         if (hasCard && !at.FloorHidden)
         {
             DrawGuideCard(g, a, q.Running, fv, at, ag, th, now, utc);
