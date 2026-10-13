@@ -46,9 +46,8 @@ internal sealed class HudLink
         HudLinks.All.Add(this);
     }
 
-    /// <summary>For tests: resolve as if the member had this name (a simulated HUD rename).</summary>
-    internal string? SimulatedName { get; set; }
-    private string LookupName => SimulatedName ?? Member;
+    /// <summary>The name a simulated rename resolves (reflection.preflight simulateBroken): only inside that one check, never in <see cref="On"/>.</summary>
+    internal string SimulatedName => Member + "_simulatedRename";
 
     /// <summary>The owner type the preflight checks (call sites may pass the runtime type instead).</summary>
     public Type? DeclaredType
@@ -66,8 +65,20 @@ internal sealed class HudLink
 
     private string Scope => (Flags & BindingFlags.Static) != 0 && (Flags & BindingFlags.Instance) == 0 ? "static" : "instance";
 
-    /// <summary>The member on <paramref name="t"/> with the expected shape, or null (cached per type).</summary>
-    public MemberInfo? On(Type? t) => t == null ? null : SimulatedName != null ? Lookup(t, out _) : _cache.GetOrAdd(t, x => Lookup(x, out _));
+    /// <summary>The member on <paramref name="t"/> with the expected shape, or null. Hits are cached per type; misses are
+    /// looked up again next time (a type that gains the member later, e.g. after an assembly loads, is seen).</summary>
+    public MemberInfo? On(Type? t)
+    {
+        if (t == null) return null;
+        if (_cache.TryGetValue(t, out var hit)) return hit;
+        hit = Lookup(t, Member, out _);
+        if (hit != null) _cache[t] = hit;
+        return hit;
+    }
+
+    /// <summary><see cref="On"/>, or the simulated rename when this is the link being simulated.</summary>
+    private MemberInfo? Resolve(Type? t, HudLink? simulated) =>
+        simulated != this ? On(t) : t == null ? null : Lookup(t, SimulatedName, out _);
 
     public FieldInfo? FieldOn(Type? t) => On(t) as FieldInfo;
     public MethodInfo? MethodOn(Type? t) => On(t) as MethodInfo;
@@ -81,18 +92,31 @@ internal sealed class HudLink
     public string Broken(Type? t)
     {
         if (t == null) return $"{TypeLabel}: type not found (expected it to declare {Expected})";
-        Lookup(t, out var why);
+        Lookup(t, Member, out var why);
         return $"{Name(t)}.{Member}: expected {Expected}; {why ?? "found"}";
     }
 
-    private MemberInfo? Lookup(Type t, out string? why)
+    private MemberInfo? Lookup(Type t, string name, out string? why)
     {
         why = null;
-        var name = LookupName;
         MemberInfo? hit = null;
         var types = Hierarchy(t).ToList();
         if (Kind == LinkKind.Method)
             types.AddRange(t.GetInterfaces());
+        // By name only (no parameter list): one method of that name, or it's ambiguous and named as such, never the first
+        // of several (a new overload would otherwise be patched silently).
+        if (Kind == LinkKind.Method && Parameters == null)
+        {
+            // Overrides count once (their base definition); the class's own methods, the interfaces' only when it has none.
+            var own = Hierarchy(t).SelectMany(c => c.GetMethods(Flags | BindingFlags.DeclaredOnly)).Where(m => m.Name == name).ToList();
+            var named = (own.Count > 0 ? own : t.GetInterfaces().SelectMany(i => i.GetMethods()).Where(m => m.Name == name).ToList())
+                .GroupBy(m => m.GetBaseDefinition()).Select(g => g.First()).ToList();
+            if (named.Count > 1)
+            {
+                why = $"{named.Count} methods named {name}, expected one: {string.Join(", ", named.Take(4).Select(Describe))}";
+                return null;
+            }
+        }
         foreach (var c in types)
         {
             const BindingFlags decl = BindingFlags.DeclaredOnly;
@@ -107,7 +131,7 @@ internal sealed class HudLink
             };
             if (hit != null) break;
         }
-        if (hit == null) { why = FoundInstead(t, types); return null; }
+        if (hit == null) { why = FoundInstead(t, types, name); return null; }
         var actual = hit switch { FieldInfo f => f.FieldType, PropertyInfo p => p.PropertyType, MethodInfo m => m.ReturnType, _ => null };
         if (ValueType != null && actual != null && !ValueType.IsAssignableFrom(actual))
         {
@@ -118,14 +142,14 @@ internal sealed class HudLink
     }
 
     /// <summary>What the type has instead: the same name with another kind/scope/signature, a near name, or the fields of the wanted type.</summary>
-    private string FoundInstead(Type t, List<Type> types)
+    private string FoundInstead(Type t, List<Type> types, string name)
     {
         const BindingFlags every = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
         var all = types.SelectMany(c => c.GetMembers(every)).Where(m => m is FieldInfo or PropertyInfo or MethodInfo).ToList();
-        var name = LookupName;
         var same = all.Where(m => m.Name == name).Take(3).ToList();
         if (same.Count > 0) return $"found {string.Join(", ", same.Select(Describe))} instead";
-        static string Key(string s) => s.TrimStart('_').Replace("s_", "").ToLowerInvariant();
+        // Only a leading "s_" / "_" prefix is dropped (s_partitionCount ~ PartitionCount), never one inside the name.
+        static string Key(string s) => (s.StartsWith("s_", StringComparison.Ordinal) ? s[2..] : s.TrimStart('_')).ToLowerInvariant();
         var near = all.Where(m => Key(m.Name) == Key(name) || (Key(name).Length >= 5 && Key(m.Name).Contains(Key(name), StringComparison.Ordinal))).Take(3).ToList();
         if (near.Count > 0) return $"no member named {name}; near names: {string.Join(", ", near.Select(Describe))}";
         if (ValueType != null && Kind is LinkKind.Field or LinkKind.FieldOfType)
@@ -155,11 +179,12 @@ internal sealed class HudLink
         : t.Name;
 
     /// <summary>The preflight row: ok, broken (gone: a HUD/runtime update), not_now (there, but its value isn't set yet), blocked (needs a broken link).</summary>
-    public LinkCheckDto Check()
+    /// <param name="simulated">The link resolved under a wrong name for this check only (simulateBroken), or null.</param>
+    public LinkCheckDto Check(HudLink? simulated = null)
     {
         var row = new LinkCheckDto { Id = Id, Feature = Feature, Type = TypeLabel, Member = Member, Expected = Expected };
         if (_notYet?.Invoke() is { } notYet) { row.Status = "not_now"; row.Note = notYet; return row; }
-        if (DependsOn != null && DependsOn.On(DependsOn.DeclaredType) == null)
+        if (DependsOn != null && DependsOn.Resolve(DependsOn.DeclaredType, simulated) == null)
         {
             row.Status = "blocked";
             row.Found = $"needs {DependsOn.Id}, which is broken";
@@ -170,8 +195,8 @@ internal sealed class HudLink
         catch (Exception ex) { row.Status = "broken"; row.Found = $"finding {TypeLabel} threw {ex.GetType().Name}: {ex.Message}"; return row; }
         if (t == null) { row.Status = "broken"; row.Found = $"type {TypeLabel} not found"; return row; }
         row.Type = string.IsNullOrEmpty(t.Namespace) ? Name(t) : $"{t.Namespace}.{Name(t)}";
-        var m = On(t);
-        if (m == null) { row.Status = "broken"; Lookup(t, out var why); row.Found = why; return row; }
+        var m = Resolve(t, simulated);
+        if (m == null) { row.Status = "broken"; Lookup(t, simulated == this ? SimulatedName : Member, out var why); row.Found = why; return row; }
         row.Status = "ok";
         if (m.Name != Member) row.Found = Describe(m);
         try { if (_notNow?.Invoke() is { } note) { row.Status = "not_now"; row.Note = note; } }
@@ -208,6 +233,18 @@ internal static class HudLinks
     /// it holds on PoE2, whose GameController.PluginBridge isn't found by GetProperty.</summary>
     private static Type DeclaredTypeOf<T>(Func<GameController, T> member) => typeof(T);
 
+    // The objects the call sites reach (RawMemory, PipelineTrace), so the preflight checks the same classes; the
+    // first implementer by shape only when the HUD has none yet.
+    private static object? LiveMemory() => Core.Current?.GameController?.Memory;
+
+    /// <summary>The class in Memory._backend right now, when it wraps another backend (the paged one); else null.</summary>
+    private static Type? LiveBackendType()
+    {
+        var mem = LiveMemory();
+        var t = mem == null ? null : MemoryBackend.FieldOn(mem.GetType())?.GetValue(mem)?.GetType();
+        return t != null && t.GetFields(Inst).Any(f => f.FieldType == typeof(IMemoryBackend)) ? t : null;
+    }
+
     private static Type? ElementOf(HudLink link) => link.Field?.FieldType is { IsArray: true } a ? a.GetElementType() : null;
 
     // ── HUD memory backend (RawMemory.cs, PipelineTrace.cs) ──
@@ -215,11 +252,11 @@ internal static class HudLinks
 
     internal static readonly HudLink MemoryBackend = new("memory.backend", "raw reads skipping the page cache (RawMemory), pipeline_trace read timing",
         "Memory (the IMemory implementation)", "_backend", LinkKind.Field, Inst,
-        () => Concrete<IMemory>(), valueType: typeof(IMemoryBackend));
+        () => LiveMemory()?.GetType() ?? Concrete<IMemory>(), valueType: typeof(IMemoryBackend));
 
     internal static readonly HudLink PagedInner = new("memory.paged_inner", "raw reads go to the game, not the page cache; pipeline_trace times game fetches",
         "PagedMemoryBackend (an IMemoryBackend wrapping another)", "inner IMemoryBackend", LinkKind.FieldOfType, Inst,
-        () => Concrete<IMemoryBackend>(t => t.Name == "PagedMemoryBackend") ?? Concrete<IMemoryBackend>(t => t.GetFields(Inst).Any(f => f.FieldType == typeof(IMemoryBackend))),
+        () => LiveBackendType() ?? Concrete<IMemoryBackend>(t => t.Name == "PagedMemoryBackend") ?? Concrete<IMemoryBackend>(t => t.GetFields(Inst).Any(f => f.FieldType == typeof(IMemoryBackend))),
         valueType: typeof(IMemoryBackend));
 
     internal static readonly HudLink BackendRead = new("memory.try_read", "raw reads (RawMemory)",

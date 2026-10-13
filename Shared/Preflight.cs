@@ -41,6 +41,8 @@ public class ReflectionPreflightDto
     [JsonProperty("blocked")] public int Blocked { get; set; }
     /// <summary>"id: what broke" for every row that isn't ok, broken first.</summary>
     [JsonProperty("problems")] public List<string> Problems { get; set; } = new();
+    /// <summary>Links broken at the previous load's check that are ok now (not problems).</summary>
+    [JsonProperty("recovered", NullValueHandling = NullValueHandling.Ignore)] public List<string>? Recovered { get; set; }
     [JsonProperty("links", NullValueHandling = NullValueHandling.Ignore)] public List<LinkCheckDto>? Links { get; set; }
     [JsonProperty("simulated", NullValueHandling = NullValueHandling.Ignore)] public string? Simulated { get; set; }
 }
@@ -63,6 +65,8 @@ public class PreflightStateDto
 public partial class WhatsAnAiBridge
 {
     private static ReflectionPreflightDto? _preflight;
+    private static PreflightStateDto? _preflightPrev;
+    private static bool _preflightPrevRead;
     private static readonly object PreflightLock = new();
     private const string PreflightFile = "reflection-preflight.json";
 
@@ -73,14 +77,14 @@ public partial class WhatsAnAiBridge
         if (simulate != null)
         {
             // A test of the failure path: one link resolved under a wrong name, reported, never cached or saved.
+            // Only inside this check (HudLink.Check's parameter): the call sites keep resolving the real member meanwhile.
             var link = HudLinks.All.FirstOrDefault(l => l.Id == simulate);
             if (link == null) return Serialize(Err("bad_request", $"No link '{simulate}'. Links: {string.Join(", ", HudLinks.All.Select(l => l.Id))}"));
-            lock (PreflightLock)
-            {
-                link.SimulatedName = link.Member + "_simulatedRename";
-                try { var r = RunPreflight(null, true); r.Simulated = $"{simulate} resolved as {link.SimulatedName}"; return Serialize(r); }
-                finally { link.SimulatedName = null; }
-            }
+            if (link.Kind == LinkKind.FieldOfType)
+                return Serialize(Err("bad_request", $"{simulate} is found by its field type, not by name: a rename can't be simulated. Pick a link found by name."));
+            var r = RunPreflight(null, link);
+            r.Simulated = $"{simulate} resolved as {link.SimulatedName}";
+            return Serialize(r);
         }
         var report = p?["refresh"]?.Value<bool>() == true ? PreflightAtLoad() : Preflight();
         return Serialize(report);
@@ -101,7 +105,7 @@ public partial class WhatsAnAiBridge
             return new ReflectionPreflightDto
             {
                 Stamp = r.Stamp, ChangedFrom = r.ChangedFrom, CheckedAt = r.CheckedAt, Ms = r.Ms, Targets = r.Targets,
-                Ok = r.Ok, Broken = r.Broken, NotNow = r.NotNow, Blocked = r.Blocked, Problems = r.Problems,
+                Ok = r.Ok, Broken = r.Broken, NotNow = r.NotNow, Blocked = r.Blocked, Problems = r.Problems, Recovered = r.Recovered,
             };
         }
         catch (Exception ex) { return new ReflectionPreflightDto { Problems = { $"preflight failed: {ex.GetType().Name}: {ex.Message}" } }; }
@@ -113,11 +117,16 @@ public partial class WhatsAnAiBridge
         lock (PreflightLock)
         {
             var path = string.IsNullOrEmpty(_bridgeDir) ? null : Path.Combine(_bridgeDir, PreflightFile);
-            PreflightStateDto? prev = null;
-            try { if (path != null && File.Exists(path)) prev = JsonConvert.DeserializeObject<PreflightStateDto>(File.ReadAllText(path)); }
-            catch (Exception ex) { LogQuiet($"[Preflight] previous {PreflightFile} unreadable ({ex.Message}): treated as a first check"); }
+            // The previous load's file is the baseline for every check of this load (the re-check after 0Harmony loads,
+            // refresh): read once, before the first write, so changedFrom and "works again" survive re-checks.
+            if (!_preflightPrevRead)
+            {
+                _preflightPrevRead = true;
+                try { if (path != null && File.Exists(path)) _preflightPrev = JsonConvert.DeserializeObject<PreflightStateDto>(File.ReadAllText(path)); }
+                catch (Exception ex) { LogQuiet($"[Preflight] previous {PreflightFile} unreadable ({ex.Message}): treated as a first check"); }
+            }
 
-            var r = RunPreflight(prev, false);
+            var r = RunPreflight(_preflightPrev, null);
             _preflight = r;
             try
             {
@@ -139,13 +148,13 @@ public partial class WhatsAnAiBridge
         }
     }
 
-    private ReflectionPreflightDto RunPreflight(PreflightStateDto? prev, bool simulated)
+    private ReflectionPreflightDto RunPreflight(PreflightStateDto? prev, HudLink? simulated)
     {
         var sw = Stopwatch.StartNew();
         var rows = new List<LinkCheckDto>();
         foreach (var link in HudLinks.All)
         {
-            try { rows.Add(link.Check()); }
+            try { rows.Add(link.Check(simulated)); }
             catch (Exception ex) { rows.Add(new LinkCheckDto { Id = link.Id, Status = "broken", Type = link.TypeLabel, Member = link.Member, Expected = link.Expected, Feature = link.Feature, Found = $"checking threw {ex.GetType().Name}: {ex.Message}" }); }
         }
         var stamp = BuildStamp();
@@ -170,9 +179,9 @@ public partial class WhatsAnAiBridge
                 _ => $"{x.Id} not now: {x.Note}",
             });
         // Fixed again since the last check: worth one line.
-        if (prev != null && !simulated)
+        if (prev != null && simulated == null)
             foreach (var id in prev.Broken.Where(id => rows.Any(x => x.Id == id && x.Status == "ok")))
-                r.Problems.Add($"{id} works again (broken at the previous check)");
+                (r.Recovered ??= new()).Add($"{id} works again (broken at the previous load's check)");
         r.Ms = Math.Round(sw.Elapsed.TotalMilliseconds, 2);
         return r;
     }

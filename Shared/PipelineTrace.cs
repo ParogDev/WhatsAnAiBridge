@@ -258,7 +258,7 @@ public partial class WhatsAnAiBridge
         // the PoE2 HUD overrides Overlay.PostFrame with a protected stub. Overlay.RunFrameLoop calls ImGuiRenderer.Update ->
         // Render -> Present -> ReplaceFontIfRequired -> PostFrame: Present starts when Render returns and has returned when
         // ReplaceFontIfRequired is entered (also called once before the loop starts; the analysis ignores it).
-        PatchLink(HudLinks.OverlayReplaceFont,"Overlay.ReplaceFontIfRequired (Present returned)", nameof(PostPresent), null);
+        PatchLink(HudLinks.OverlayReplaceFont, "Overlay.ReplaceFontIfRequired (Present returned)", nameof(PostPresent), null);
 
         // Plugin Render and Tick methods (plugins are compiled from source: never protected, but checked anyway). Only the
         // loaded plugins: an earlier load of a reloaded plugin is still in the process, and patching it is pointless (it no

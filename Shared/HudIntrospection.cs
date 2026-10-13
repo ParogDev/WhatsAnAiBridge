@@ -109,7 +109,12 @@ public partial class WhatsAnAiBridge
             // SettingValue redacts string values under secret-looking names (bools, numbers, enums stay).
             o[prop.Name] = v == null ? JValue.CreateNull() : SettingValue(prop.Name, v, depth, seen);
             // Stop here, not at the top: the iterator reads the next member's getter before the loop body runs.
-            if (o.Count >= 150) break;
+            if (o.Count >= 150)
+            {
+                // Said, not silent: the rest of this object's settings are not listed.
+                o["(truncated)"] = "stopped at 150 settings: any more in this group are not listed";
+                break;
+            }
         }
         return o;
     }
