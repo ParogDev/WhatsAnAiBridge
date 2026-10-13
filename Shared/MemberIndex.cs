@@ -22,7 +22,7 @@ namespace WhatsAnAiBridge;
 /// - **Cached per type** in a ConditionalWeakTable, so a type from a plugin's collectible load context is never kept
 ///   alive by the cache (reloading that plugin still unloads it). Misses are cached too.
 /// - **Compiled getters.** <see cref="Member.Get"/> reads through PropertyInfo/FieldInfo.GetValue for the first
-///   <see cref="CompileAfterReads"/> reads, then compiles an expression-tree getter (so one-off reads in explore never
+///   <see cref="CompileAfterReads"/> reads of a member, then compiles an expression-tree getter (so one-off reads in explore never
 ///   pay for a compile). A getter that fails to compile stays on reflection for good (<see cref="Member.CompileError"/>
 ///   says why). Exceptions thrown by a compiled getter are wrapped in TargetInvocationException, exactly like
 ///   PropertyInfo.GetValue, so callers' error texts don't change.
@@ -38,8 +38,12 @@ internal static class MemberIndex
     internal const BindingFlags PublicInstance = BindingFlags.Public | BindingFlags.Instance;
     internal const BindingFlags AnyInstance = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
 
-    /// <summary>Reads through reflection before a member's getter is compiled (compiling costs ~0.1-1 ms once).</summary>
-    internal const int CompileAfterReads = 2;
+    /// <summary>
+    /// Reads through reflection before a member's getter is compiled. Compiling costs ~0.1-1 ms once and saves well
+    /// under 1 us per read (the runtime's own GetValue is already emit-backed after a few calls), so only members read
+    /// over and over (observer layers, repeated evals) are worth it: one-off explores never compile.
+    /// </summary>
+    internal const int CompileAfterReads = 64;
 
     [Flags]
     internal enum Kinds { Property = 1, Field = 2, Both = Property | Field }
@@ -101,11 +105,14 @@ internal static class MemberIndex
                     var inst = Expression.Convert(o, DeclaringType);   // unboxes a struct
                     Expression body = Info is PropertyInfo p ? Expression.Property(inst, p) : Expression.Field(inst, (FieldInfo)Info);
                     _compiled = Expression.Lambda<Func<object, object?>>(Expression.Convert(body, typeof(object)), o).Compile();
+                    Interlocked.Increment(ref _compiledCount);
                 }
                 catch (Exception ex)
                 {
                     CompileError = $"{ex.GetType().Name}: {ex.Message}";
                     _noCompile = true;
+                    Interlocked.Increment(ref _compileFailures);
+                    _lastCompileError = $"{this}: {CompileError}";
                 }
                 return _compiled;
             }
@@ -156,6 +163,21 @@ internal static class MemberIndex
     }
 
     private static readonly ConditionalWeakTable<Type, TypeMembers> _types = new();
+    private static int _compiledCount, _compileFailures;
+    private static string? _lastCompileError;
+
+    /// <summary>For bridge.self_perf: compiled getters, compile failures (the last named), the type index once built.</summary>
+    internal static Newtonsoft.Json.Linq.JObject Status()
+    {
+        var o = new Newtonsoft.Json.Linq.JObject { ["compiledGetters"] = _compiledCount, ["compileFailures"] = _compileFailures };
+        if (_lastCompileError != null) o["lastCompileError"] = _lastCompileError;
+        if (_typeIndex.IsValueCreated)
+        {
+            var ti = _typeIndex.Value;
+            o["typeIndex"] = new Newtonsoft.Json.Linq.JObject { ["types"] = ti.TypeCount, ["buildMs"] = ti.BuildMs, ["partialAssemblies"] = new Newtonsoft.Json.Linq.JArray(ti.Partial) };
+        }
+        return o;
+    }
 
     /// <summary>The cached member lists of a type.</summary>
     internal static TypeMembers Of(Type type) => _types.GetValue(type, t => new TypeMembers(t));

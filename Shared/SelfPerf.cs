@@ -80,6 +80,7 @@ public partial class WhatsAnAiBridge
             })));
             _selfRequests.Clear();
         }
+        o["memberIndex"] = MemberIndex.Status();   // the reflection core (MemberIndex.cs): compiled getters, failures, type index
         Array.Clear(_selfTicks); Array.Clear(_selfBytes); _selfFrames = 0; _selfSince = Stopwatch.GetTimestamp();
         return o.ToString(Newtonsoft.Json.Formatting.None);
     }

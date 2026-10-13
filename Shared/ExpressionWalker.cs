@@ -343,16 +343,22 @@ public class ExpressionWalker
 
         // Enum-keyed indexers (generic dictionaries, InventoryElement[InventoryIndex]); a type may have several
         // indexers (InventoryElement: this[InventoryIndex] and Element's this[int]), most-derived first.
+        List<string>? enumKeys = null;
         foreach (var indexerProp in MemberIndex.Indexers(type))
         {
             var ps = indexerProp.GetIndexParameters();
             if (ps.Length != 1 || !indexerProp.CanRead) continue;
             var keyType = ps[0].ParameterType;
-            if (keyType.IsEnum && Enum.TryParse(keyType, indexValue, true, out var enumKey))
+            if (!keyType.IsEnum) continue;
+            if (Enum.TryParse(keyType, indexValue, true, out var enumKey))
                 return indexerProp.GetValue(collection, [enumKey]);
+            (enumKeys ??= []).Add(keyType.Name);
         }
 
-        error = $"Cannot apply indexer [{indexValue}] to type {type.Name}";
+        // Name the link: the type has an enum indexer, the key just isn't one of its values (e.g. a PoE1 name on PoE2).
+        error = enumKeys != null
+            ? $"Cannot apply indexer [{indexValue}] to type {type.Name}: '{indexValue}' is not a {string.Join(" or ", enumKeys)} value"
+            : $"Cannot apply indexer [{indexValue}] to type {type.Name}";
         return null;
     }
 
