@@ -79,6 +79,9 @@ public class HudStateDto
     /// <summary>The previous HUD's closeReason (agent-restart | user-restart | unknown), null when it wrote none. Set in
     /// Initialise and kept in every write of this HUD run, so restart-hud.ps1's post-start hold can tell a manual restart.</summary>
     [JsonProperty("prevCloseReason")] public string? PrevCloseReason { get; set; }
+    /// <summary>True while phase starting is a bridge plugin reload in a running HUD (written by the closing load, kept by the
+    /// next one until its first phase change); null otherwise. A reload is never a HUD close.</summary>
+    [JsonProperty("reloading", NullValueHandling = NullValueHandling.Ignore)] public bool? Reloading { get; set; }
     /// <summary>The last off-thread read that failed, naming the link (null while reads work).</summary>
     [JsonProperty("error")] public string? Error { get; set; }
     [JsonExtensionData] public IDictionary<string, JToken>? Extra { get; set; }

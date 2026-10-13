@@ -19,12 +19,15 @@ namespace WhatsAnAiBridge;
 ///   - on a phase change it writes &lt;BridgeDirectory&gt;\hud-state.json atomically (temp + replace) and publishes pub/sub
 ///     events (source "bridge"): area.loading {from, at}, area.ready {area, from, loadMs}, hud.phase {phase, prev, since,
 ///     inGame, area}; the file is rewritten as a heartbeat every 2 s from the same timer. tickAt is the last Tick/Render.
+///     The first ready after starting publishes hud.phase only (no arrival: the area is adopted quietly). A load past 60 s
+///     posts the LONG LOAD warn toast once, taken down when the load ends.
 ///   - startup timing: process start, Initialise, listener up, first ready; recentStartupSec (last 10, carried over from
 ///     the previous file; a bridge reload in the same HUD process keeps the previous startup and adds no sample) and
 ///     typicalStartupSec (their median).
 ///   - OnClose writes restarting (restart-state.json phase stopping in the last 3 min: an agent or script restart),
 ///     user-restart (an open outage incident for this game on the board in phase down | waitingGame) or closed, with
-///     closeReason. Initialise carries the previous file's closeReason as prevCloseReason for the whole HUD run.
+///     closeReason. A bridge reload (OnClose comes for it too; the caller's stack tells HsCloseIsReload) writes starting with
+///     reloading = true and no closeReason, kept by the next load until its first phase change. Initialise carries the previous file's closeReason as prevCloseReason for the whole HUD run.
 ///   - the listener (TcpBridgeServer.Live) answers hud.state itself, adds phase / phaseSinceMs / tickAgeMs to status, answers
 ///     a queued request still waiting after ~1.5 s with -32010 hud_loading while the phase is loading or starting, and
 ///     gives the 10 s timeout a message and data that say frozen vs loading vs busy.
@@ -45,11 +48,22 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
     private long _hsSinceTs;                       // Stopwatch timestamp of the current phase's start
     private long _hsLoadTs;                        // Stopwatch timestamp of the current load's start, 0 = not loading
     private long _hsWrittenTs;                     // Stopwatch timestamp of the last successful write
-    private bool _hsDirty;                         // a phase change not yet written (a write failed)
+    private long _hsDirtyVer, _hsWrittenVer;       // +1 per change of _hs; the version the last successful write serialized
+    private bool HsDirtyLocked => _hsDirtyVer != _hsWrittenVer;   // a change not yet written (a write failed, or raced one)
+    private int _hsCloseDone;                      // 1 once HudStateClose ran for this load
+    private bool _hsLongLoadPosted;               // this load's LONG LOAD toast is out (once per load)
     private bool _hsReload;                        // this load is a bridge reload in the same HUD process
     private bool _hsClosed;                        // OnClose wrote the final phase: a late timer tick writes nothing
     private long? _hsAreaHash;                     // the area hash last seen ready
-    private const double HsAwaitAreaMs = 3000;     // after a load, how long area.ready waits for the area data to move on
+    // LONG LOAD (wording by Fable): a warn toast once per load past 60 s, the bridge's own (agents never toast loads: the MCP's
+    // stuckLoading note says so). ExileCore2 ticks and renders the bridge during load screens (seen live), so it shows there.
+    // Taken down when the load ends (phase ready, which area.ready follows, or menu).
+    private const double HsLongLoadMs = 60000, HsLongLoadHoldSec = 10;
+    private const string HsLongLoadTitle = "LONG LOAD", HsLongLoadTag = "hudstate:longload";
+    private static string HsLongLoadText(long sec, string? from) =>
+        from != null ? $"Load screen for {sec} s (from {from}) - the game, not the HUD. Agents wait."
+                     : $"Load screen for {sec} s - the game, not the HUD. Agents wait.";
+    private const double HsAwaitAreaMs = 3000;    // after a load, how long area.ready waits for the area data to move on
     private bool _hsAwaitArea;                     // a load ended but the area data still shows the area we left
     private long _hsAwaitTs;
     private long? _hsAwaitLoadMs;
@@ -86,7 +100,9 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
             {
                 _hs = new HudStateDto
                 {
-                    Game = GameId, Phase = "starting", PrevPhase = prev?.Phase, Since = now, Seq = (prev?.Seq ?? 0) + 1, Heartbeat = now,
+                    // A reload's closing load already wrote starting (reloading): keep the phase it came from.
+                    Game = GameId, Phase = "starting", PrevPhase = _hsReload && prev!.Reloading == true ? prev.PrevPhase : prev?.Phase, Since = now,
+                    Reloading = _hsReload ? true : null, Seq = (prev?.Seq ?? 0) + 1, Heartbeat = now,
                     InGame = false, Loading = false,
                     LastArea = prev?.Area ?? prev?.LastArea, Area = null, AreaChangedAt = prev?.AreaChangedAt, LastLoadMs = prev?.LastLoadMs,
                     HudPid = pid, ListenerUp = false,
@@ -102,7 +118,8 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 _hsLoadTs = 0;
                 _hsAreaHash = null;
                 Volatile.Write(ref _hsClosed, false);
-                _hsDirty = true;
+                Volatile.Write(ref _hsCloseDone, 0);
+                _hsDirtyVer++;
             }
             HudStateWrite();
         }
@@ -139,13 +156,22 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
     private void HudStateClose()
     {
         HudStateStopTimer();
+        // Once per load: the HUD calls OnClose twice on shutdown (PluginWrapper.Close, then BaseSettingsPlugin.Dispose; seen
+        // live 2026-10-13 as hud.phase restarting -> restarting).
+        if (Interlocked.Exchange(ref _hsCloseDone, 1) == 1) return;
         Volatile.Write(ref _hsClosed, true);   // a tick still running writes and publishes nothing from here on
         try
         {
-            string phase, reason;
+            string phase;
+            string? reason;
+            // The HUD calls OnClose for a plugin reload too (PluginWrapper.Close: OnPluginDestroyForHotReload, then OnClose).
+            // A reload is no HUD close: phase starting with reloading = true, no closeReason; the next load keeps it.
+            var reload = HsCloseIsReload(out var via);
+            LogQuiet(reload ? $"[HudState] bridge reload ({via}): phase starting (reloading), not a close" : $"[HudState] HUD close ({via})");
+            if (reload) { phase = "starting"; reason = null; }
             // The outage first: its own stop (restart-hud.ps1 -Outage) also writes restart-state.json 'stopping'
             // (seen live 2026-10-13: a user restart closed as agent-restart).
-            if (OutageOpenOnBoard(out _, out var outagePhase) && outagePhase is ("down" or "waitingGame")) { phase = "user-restart"; reason = "user-restart"; }
+            else if (OutageOpenOnBoard(out _, out var outagePhase) && outagePhase is ("down" or "waitingGame")) { phase = "user-restart"; reason = "user-restart"; }
             else if (HudStateAgentRestartNow()) { phase = "restarting"; reason = "agent-restart"; }
             else { phase = "closed"; reason = "unknown"; }
             HudPhaseEvent ev;
@@ -157,17 +183,61 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 _hs.Since = now;
                 _hs.Seq++;
                 _hs.CloseReason = reason;
+                _hs.Reloading = reload ? true : null;
                 _hs.ListenerUp = false;
                 _hs.Loading = false;
                 _hs.Heartbeat = now;
                 _hsSinceTs = Stopwatch.GetTimestamp();
-                _hsDirty = true;
+                _hsDirtyVer++;
                 ev = new HudPhaseEvent { Phase = phase, Prev = _hs.PrevPhase, Since = now, InGame = _hs.InGame, Area = _hs.Area };
             }
+            // The timer is stopped: nothing retries after this, so a failed final write gets one more try, then is logged.
+            _hsWriteError = null;   // judge only this write (a tick's earlier failure is not the final write's)
             HudStateWrite(final: true);
+            if (_hsWriteError != null) { Thread.Sleep(50); HudStateWrite(final: true); }
+            if (_hsWriteError != null) LogFault($"[HudState] close: the final {phase} write failed, hud-state.json keeps the last live phase: {_hsWriteError}");
             HudStatePublish("hud.phase", ev);   // appended to events.jsonl: the next bridge load reads it back
         }
-        catch (Exception ex) { LogFault($"[HudState] close: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Volatile.Write(ref _hsCloseDone, 0);   // the second OnClose (Dispose) tries again
+            LogFault($"[HudState] close: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Is this OnClose a plugin reload (the HUD keeps running) rather than the HUD shutting down? Both come through
+    /// PluginWrapper.Close; the caller tells them apart: PluginManager.CloseAllPlugins on shutdown, UnloadAssemblyPlugins /
+    /// ReloadSourcePlugin / ReloadChangedDll / a ReloadPluginDll lambda on a reload (small ones such as
+    /// UnloadAssemblyPlugins may be inlined out of the stack). `via` names the frame that decided, or the frames seen when
+    /// none did (then a close, as before); HudStateClose logs it either way.
+    /// </summary>
+    private static bool HsCloseIsReload(out string via)
+    {
+        try
+        {
+            var frames = new StackTrace(1, false).GetFrames();
+            // Shutdown wins wherever it is in the stack (a Reload* helper called under CloseAllPlugins is still a shutdown).
+            foreach (var f in frames)
+                if (f.GetMethod() is { Name: "CloseAllPlugins" } cm && cm.DeclaringType?.Name == "PluginManager") { via = "PluginManager.CloseAllPlugins"; return false; }
+            var seen = new List<string>();
+            foreach (var f in frames)
+            {
+                var m = f.GetMethod();
+                if (m == null) continue;
+                var name = m.Name;
+                if (seen.Count < 16) seen.Add($"{m.DeclaringType?.Name}.{name}");
+                // Only the HUD's PluginManager decides (its compiler-generated lambdas sit in a nested type).
+                var owner = m.DeclaringType?.Name == "PluginManager" ? m.DeclaringType : m.DeclaringType?.DeclaringType;
+                if (owner?.Name != "PluginManager") continue;
+                if (name == "CloseAllPlugins") { via = $"PluginManager.{name}"; return false; }
+                if (name == "UnloadAssemblyPlugins" || name.StartsWith("Reload", StringComparison.Ordinal) || name.StartsWith("<Reload", StringComparison.Ordinal))
+                { via = $"PluginManager.{name}"; return true; }
+            }
+            via = $"no CloseAllPlugins / Reload frame in {frames.Length}: {string.Join(" < ", seen)}";
+            return false;
+        }
+        catch (Exception ex) { via = $"StackTrace: {ex.GetType().Name}: {ex.Message}"; return false; }
     }
 
     private bool HudStateAgentRestartNow()
@@ -202,7 +272,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 while (_hs.RecentStartupSec.Count > HsStartupKeep) _hs.RecentStartupSec.RemoveAt(0);
                 _hs.TypicalStartupSec = HsMedian(_hs.RecentStartupSec);
             }
-            _hsDirty = true;
+            _hsDirtyVer++;
         }
     }
 
@@ -247,7 +317,8 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
             var tcpWanted = Settings.EnableTcp.Value;
 
             var events = new List<(string kind, object data)>();
-            bool write;
+            bool write, retireLongLoad = false;
+            string? longLoad = null;
             string phaseNow;
             lock (_hsLock)
             {
@@ -294,6 +365,16 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                             _hsAwaitArea = true; _hsAwaitTs = nowTs; _hsAwaitLoadMs = loadMs; _hsAwaitFrom = from;
                             _hs.Area = null;
                         }
+                        else if (prevPhase == "starting" && (area == null || from == null || area == from))
+                        {
+                            // The HUD (or the bridge) came up in the area the previous file last saw: no arrival, so
+                            // hud.phase only (seen live 2026-10-13: "Ngakanu from Ngakanu" after every restart). The area is
+                            // adopted quietly. A different area (the player zoned while the HUD or bridge was down) is an
+                            // arrival: area.ready below, loadMs null.
+                            _hs.Area = area;
+                            _hs.LastArea = area ?? from;
+                            _hsAreaHash = hash;
+                        }
                         else
                         {
                             events.Add(("area.ready", new AreaReadyEvent { Area = area, From = from, LoadMs = loadMs }));
@@ -310,8 +391,11 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                     _hs.Since = now;
                     _hs.Seq++;
                     _hs.CloseReason = null;
+                    _hs.Reloading = null;   // a reload's starting ends with its first phase change
                     _hsSinceTs = nowTs;
-                    _hsDirty = true;
+                    _hsDirtyVer++;
+                    if (prevPhase == "loading" && _hsLongLoadPosted) retireLongLoad = true;   // the load is over
+                    if (phase == "loading") _hsLongLoadPosted = false;
                     events.Add(("hud.phase", new HudPhaseEvent { Phase = phase, Prev = prevPhase, Since = now, InGame = _hs.InGame, Area = _hs.Area }));
                 }
                 else if (phase == "ready" && _hsAwaitArea && err == null
@@ -323,7 +407,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                     _hs.Area = area;
                     _hs.LastArea = area ?? _hsAwaitFrom;
                     _hsAreaHash = hash;
-                    _hsDirty = true;
+                    _hsDirtyVer++;
                 }
                 else if (phase == "ready" && !_hsAwaitArea && err == null && hash != null && _hsAreaHash != null && hash != _hsAreaHash)
                 {
@@ -334,38 +418,52 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                     _hs.Area = area;
                     _hs.LastArea = area ?? from;
                     _hsAreaHash = hash;
-                    _hsDirty = true;
+                    _hsDirtyVer++;
                 }
                 else if (phase == "ready" && !_hsAwaitArea && err == null && area != null && _hs.Area == null)
                 {
-                    _hs.Area = area; _hs.LastArea = area; _hsAreaHash ??= hash; _hsDirty = true;   // the name arrived after the phase
+                    _hs.Area = area; _hs.LastArea = area; _hsAreaHash ??= hash; _hsDirtyVer++;   // the name arrived after the phase
                 }
-                write = _hsDirty || Stopwatch.GetElapsedTime(_hsWrittenTs, nowTs).TotalMilliseconds >= HsHeartbeatMs;
+                if (phase == "loading" && !_hsLongLoadPosted && _hsLoadTs != 0
+                    && Stopwatch.GetElapsedTime(_hsLoadTs, nowTs).TotalMilliseconds >= HsLongLoadMs)
+                {
+                    _hsLongLoadPosted = true;
+                    longLoad = HsLongLoadText((long)Stopwatch.GetElapsedTime(_hsLoadTs, nowTs).TotalSeconds, _hs.LastArea);
+                }
+                write = HsDirtyLocked || Stopwatch.GetElapsedTime(_hsWrittenTs, nowTs).TotalMilliseconds >= HsHeartbeatMs;
                 phaseNow = _hs.Phase;
             }
             if (write) HudStateWrite();
             foreach (var (kind, data) in events) HudStatePublish(kind, data);
+            if (retireLongLoad) GuideToastRetire(HsLongLoadTag);
+            if (longLoad != null) OutageToast("warn", HsLongLoadTitle, longLoad, HsLongLoadHoldSec, HsLongLoadTag);
             OutageLeaseTick(phaseNow);
         }
         catch (Exception ex) { _hsReadError = $"hud-state tick: {ex.GetType().Name}: {ex.Message}"; }
         finally { Volatile.Write(ref _hsBusy, 0); }
     }
 
-    /// <summary>Serialize under the state lock, write temp + replace under the write lock.</summary>
+    /// <summary>
+    /// Under the write lock (lock order: write, then state): serialize under the state lock, write temp + replace. Serializing
+    /// inside the write lock keeps two writers from landing an older snapshot last; the dirty mark clears only up to the
+    /// version this write serialized, so a change made while the file was being written is written by the next tick.
+    /// </summary>
     private void HudStateWrite(bool final = false)
     {
-        string json;
-        lock (_hsLock)
-        {
-            _hs.Heartbeat = DateTime.UtcNow;
-            _hs.TickAt = HsTickAt();
-            json = JsonConvert.SerializeObject(_hs, Formatting.Indented);
-        }
         lock (_hsWriteLock)
         {
+            if (Volatile.Read(ref _hsClosed) && !final) return;   // a tick racing OnClose never overwrites the final phase
+            string json;
+            long ver;
+            lock (_hsLock)
+            {
+                _hs.Heartbeat = DateTime.UtcNow;
+                _hs.TickAt = HsTickAt();
+                json = JsonConvert.SerializeObject(_hs, Formatting.Indented);
+                ver = _hsDirtyVer;
+            }
             var path = HudStateFilePath;
             var tmp = path + ".tmp";
-            if (Volatile.Read(ref _hsClosed) && !final) return;   // a tick racing OnClose never overwrites the final phase
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
@@ -373,7 +471,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 File.Move(tmp, path, overwrite: true);
                 _hsWriteError = null;
                 _hsWrites++;
-                lock (_hsLock) { _hsWrittenTs = Stopwatch.GetTimestamp(); _hsDirty = false; }
+                lock (_hsLock) { _hsWrittenTs = Stopwatch.GetTimestamp(); if (ver > _hsWrittenVer) _hsWrittenVer = ver; }
             }
             catch (Exception ex) { _hsWriteError = $"writing {path}: {ex.GetType().Name}: {ex.Message}"; }   // retried next tick (still dirty)
         }
