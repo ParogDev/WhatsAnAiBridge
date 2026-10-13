@@ -39,6 +39,7 @@ public partial class WhatsAnAiBridge
                                      // a repeat restarts the life (At) without replaying the entry; only the chip bumps
         public bool Summary;         // the "N updates" toast after a combat hold (shown whatever its kind's setting)
         public double Life = GuideToastSec;   // how long it shows (guide.log holdSec, C3); over GuideToastSec it never merges
+        public GuideLogEntry? Source;  // the line it came from when that line carries a tag (GuideToastRetire)
     }
 
     // Repeats merge while the next equal line comes within this long of the last one (a toast lives 3 s, so a merged
@@ -129,6 +130,10 @@ public partial class WhatsAnAiBridge
             }
         }
 
+        // Retired tagged lines (GuideToastRetire): their toasts go at once.
+        for (var i = _toasts.Count - 1; i >= 0; i--)
+            if (_toasts[i].Source is { Retired: true }) _toasts.RemoveAt(i);
+
         // New lines since the last one fed (the log keeps 40: when the last one fed was trimmed away, everything still
         // young enough to be a toast is new).
         var start = -1;
@@ -162,7 +167,7 @@ public partial class WhatsAnAiBridge
 
     private void OfferGuideToast(in GuideSnap g, GuideLogEntry e, in GuideAttention at, List<HighlightLayerView> hl)
     {
-        if (!ToastShown(e.Kind)) return;   // verbosity first: a kind that is off is neither shown nor counted
+        if (!ToastShown(e.Kind) || e.Retired) return;   // verbosity first: a kind that is off is neither shown nor counted
         if (at.ToastHold && GuideHeldKind(e.Kind))
         {
             _toastHeld++;
@@ -183,6 +188,7 @@ public partial class WhatsAnAiBridge
             return;
         }
         PushGuideToast(g, e.Kind, e.Title, e.Text, e.At, false, 1, e.Hold);
+        if (e.Tag != null) _toasts[^1].Source = e;
     }
 
     private void PushGuideToast(in GuideSnap g, string kind, string? title, string text, DateTime at, bool summary, int count, double life)

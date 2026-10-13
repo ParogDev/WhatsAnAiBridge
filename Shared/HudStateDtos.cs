@@ -172,6 +172,10 @@ public sealed class OutageParty
     [JsonProperty("doing", NullValueHandling = NullValueHandling.Ignore)] public string? Doing { get; set; }
     /// <summary>busy only: a lease it holds.</summary>
     [JsonProperty("lease", NullValueHandling = NullValueHandling.Ignore)] public string? Lease { get; set; }
+    /// <summary>busy only, optional: when its work ends (a lease's TTL, a step's deadline); the card shows "(2m 00s left)".</summary>
+    [JsonProperty("until", NullValueHandling = NullValueHandling.Ignore)] public DateTime? Until { get; set; }
+    /// <summary>busy only, optional: since when it is busy; the card shows "(for 1m 40s)" when no until is known.</summary>
+    [JsonProperty("since", NullValueHandling = NullValueHandling.Ignore)] public DateTime? Since { get; set; }
     [JsonExtensionData] public IDictionary<string, JToken>? Extra { get; set; }
 }
 
@@ -184,7 +188,13 @@ public sealed class OutageSetParams
     [JsonProperty("phase")] public string? Phase { get; set; }
     [JsonProperty("reason")] public string? Reason { get; set; }
     [JsonProperty("by")] public string? By { get; set; }
+    /// <summary>The requester's readable label (requestedByLabel): the name shown when `by` is not a connected session.</summary>
+    [JsonProperty("byLabel")] public string? ByLabel { get; set; }
     [JsonProperty("stopOnly")] public bool? StopOnly { get; set; }
+    /// <summary>Phase down: when the runner stops the HUD (ISO UTC). While in the future the card counts down to it, with
+    /// Cancel (outage.answer notNow). Kept while the phase stays the same and stopAt is omitted; a phase change without
+    /// it clears it.</summary>
+    [JsonProperty("stopAt")] public DateTime? StopAt { get; set; }
     [JsonProperty("clear")] public bool Clear { get; set; }
     [JsonProperty("busy")] public List<OutageParty>? Busy { get; set; }
     [JsonProperty("ready")] public List<OutageParty>? Ready { get; set; }
@@ -202,6 +212,9 @@ public sealed class OutageStateDto
     [JsonProperty("reason")] public string? Reason { get; set; }
     [JsonProperty("by")] public string? By { get; set; }
     [JsonProperty("stopOnly")] public bool StopOnly { get; set; }
+    [JsonProperty("byLabel", NullValueHandling = NullValueHandling.Ignore)] public string? ByLabel { get; set; }
+    /// <summary>Phase down: when the runner stops the HUD (the card's countdown), else null.</summary>
+    [JsonProperty("stopAt")] public DateTime? StopAt { get; set; }
     /// <summary>The card's answer: null | now | notNow.</summary>
     [JsonProperty("answer")] public string? Answer { get; set; }
     [JsonProperty("answeredAt")] public DateTime? AnsweredAt { get; set; }
@@ -240,6 +253,18 @@ public sealed class IncidentOutageDto
     [JsonProperty("game")] public string? Game { get; set; }
     /// <summary>announced | holding | down | waitingGame | back | cancelled</summary>
     [JsonProperty("phase")] public string? Phase { get; set; }
+    /// <summary>When the phase was entered; for phase down the HUD stop, which the back toast's elapsed time counts from.</summary>
+    [JsonProperty("phaseAt")] public DateTime? PhaseAt { get; set; }
     [JsonProperty("reason")] public string? Reason { get; set; }
+    /// <summary>Who takes part, by session id; the toasts count every one not gone.</summary>
+    [JsonProperty("participants")] public Dictionary<string, IncidentParticipantDto>? Participants { get; set; }
+    [JsonExtensionData] public IDictionary<string, JToken>? Extra { get; set; }
+}
+
+public sealed class IncidentParticipantDto
+{
+    [JsonProperty("label")] public string? Label { get; set; }
+    /// <summary>busy | ready | idle | gone</summary>
+    [JsonProperty("state")] public string? State { get; set; }
     [JsonExtensionData] public IDictionary<string, JToken>? Extra { get; set; }
 }
