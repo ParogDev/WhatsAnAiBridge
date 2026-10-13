@@ -224,18 +224,15 @@ public partial class WhatsAnAiBridge
 
     // ── PluginBridge ─────────────────────────────────────────────────
 
-    /// <summary>From Initialise: AIBridge.WorkList and AIBridge.HighlightFor.</summary>
-    private void WorkRegister()
-    {
-        _workClosed = false;
-        GameController.PluginBridge.SaveMethod(WorkListMethodName, (Func<string>)WorkListFromPlugin);
-        GameController.PluginBridge.SaveMethod(HighlightForMethodName, (Func<string, string, string>)HighlightForFromPlugin);
-    }
+    // _workClosed is reset by RegisterBridgeExports (WhatsAnAiBridge.cs) right before the exports are saved.
 
     /// <summary>From OnClose / hot reload: delegates other plugins still hold answer bridge_reloaded.</summary>
     private void WorkClose() => _workClosed = true;
 
+    #pragma warning disable HXB007 // legacy AIBridge.* name: see the HXB007 note in WhatsAnAiBridge.csproj
+    [BridgeExport(WorkListMethodName)]
     private string WorkListFromPlugin()
+    #pragma warning restore HXB007
     {
         try
         {
@@ -254,7 +251,10 @@ public partial class WhatsAnAiBridge
     /// session had called guide.highlight: its asked targets queue behind its attention turn, its lifetime and the big-panel
     /// rule apply. durationSec defaults to the default life (25 s): a step highlight never lingers.
     /// </summary>
+    #pragma warning disable HXB007 // legacy AIBridge.* name: see the HXB007 note in WhatsAnAiBridge.csproj
+    [BridgeExport(HighlightForMethodName)]
     private string HighlightForFromPlugin(string ownerSession, string json)
+    #pragma warning restore HXB007
     {
         try
         {

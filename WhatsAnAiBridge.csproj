@@ -71,6 +71,16 @@
     <None Include="$(PkgLib_Harmony)\lib\$(TargetFramework.Replace('-windows', ''))\0Harmony.dll" Link="0Harmony.dll"
           CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
+  <!-- Hexile.BridgeExports source generator: [BridgeExport] -> BridgeExports.Register / BridgeExports.Names at compile time
+       (PubSub.cs, Work.cs). Vendored (built from the scaffolding repo's tools/generators) so this repo builds on its own.
+       Vendored copy: version 1.1.2, source = scaffolding tools/generators at 38f1bbb (PR #255, unchanged since); the DLL's
+       ProductVersion 1.1.2+fcf6cc5 is the PR branch HEAD it was built on. SHA-256 FAE60CE93A4E22451428EE39F772A3825DA995A313718E9D689EA4BE5EAFBABC,
+       byte-identical to Whats A Health Bar's and Whats A Route's copies. Check it with tools/generators/vendor-generator.ps1 -Check.
+       HXB007 (name not prefixed by the plugin class) is suppressed per export with #pragma in PubSub.cs / Work.cs: the
+       AIBridge.* names predate the convention and other plugins look them up by those strings. -->
+  <ItemGroup>
+    <Analyzer Include="Analyzers\Hexile.BridgeExports.Generator.dll" />
+  </ItemGroup>
   <!-- Roslyn scripting for script.run (Shared\ScriptRunner.cs): both HUDs ship these DLLs. -->
   <ItemGroup>
     <Reference Include="Microsoft.CodeAnalysis">

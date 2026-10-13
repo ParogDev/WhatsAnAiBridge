@@ -11,10 +11,28 @@ using Newtonsoft.Json.Linq;
 namespace WhatsAnAiBridge;
 
 /// <summary>
+/// Marks a setting that gives bridge clients power (C# scripts, HUD instrumentation, plugin reload): settings.set
+/// refuses to change it without allowPermission. Matched by type name, so another plugin can declare its own copy.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
+internal sealed class SettingPermissionAttribute : Attribute { }
+
+/// <summary>
+/// Marks a settings property settings.describe leaves out (panel-own state or a legacy key kept for old saves, which the
+/// control center and hud_settings should not offer as a setting); settings.set still reaches it by path. Matched by type
+/// name like [SettingPermission]. The HUD's [IgnoreMenu] alone does not hide a node from describe.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
+internal sealed class HiddenFromDescribeAttribute : Attribute { }
+
+/// <summary>
 /// Settings of every loaded plugin, described and changed by reflection: no per-plugin code. A node is recognised by
 /// shape (ToggleNode, RangeNode&lt;T&gt;, TextNode, ListNode, ColorNode, HotkeyNode*, ButtonNode); labels and tooltips
-/// come from the HUD's own [Menu] attribute when a plugin uses it, and for this bridge from Meta below. Nested settings
-/// objects become groups.
+/// come from the HUD's own [Menu] attribute, the group from a nested settings object's label, else from the property's
+/// [MenuTab] (the SettingsMenu renderer's tab), [SettingPermission] marks a permission setting and [MenuReadOnly] a
+/// read-only one, and [HiddenFromDescribe] leaves a property out of describe (settings.set still reaches it by path); the bridge's own settings use the same attributes
+/// (Shared\WhatsAnAiBridgeSettings.cs). The
+/// renderer's attributes are copied per plugin, so they are matched by type name, never by type.
 ///   settings.describe {plugin?}                        -> {game, plugins: [{plugin, enabled, settings: [node]}]}
 ///   settings.set {plugin, path, value, allowPermission?} -> {plugin, setting, previous}
 /// Changes run on the main thread (start of Render), like the menu would make them. Permission settings (the switches
@@ -24,43 +42,6 @@ namespace WhatsAnAiBridge;
 /// </summary>
 public partial class WhatsAnAiBridge
 {
-    /// <summary>Labels, groups and descriptions for this bridge's own settings (it has no [Menu] attributes).</summary>
-    private static readonly Dictionary<string, (string label, string group, string description, bool permission)> Meta = new()
-    {
-        ["Enable"] = ("Enabled", "Bridge", "Turn the whole bridge on or off.", false),
-        ["BridgeDirectory"] = ("Bridge folder", "Bridge", "Folder (in the HUD folder) for the port and token files, recordings, experiments and the observer journal.", false),
-        ["PollIntervalMs"] = ("File request poll (ms)", "Bridge", "How often the legacy file IPC checks for a request.", false),
-        ["EnableTcp"] = ("TCP server", "Bridge", "Serve bridge clients (the MCP server) on 127.0.0.1.", false),
-        ["TcpPort"] = ("TCP port", "Bridge", "Port of the TCP server (written to bridge-port.txt).", false),
-        ["EnableFileIpc"] = ("File IPC (legacy)", "Bridge", "Answer requests written as files.", false),
-        ["ShowStatusHud"] = ("Status line", "In game", "The small bridge status line on the HUD.", false),
-        ["HudX"] = ("Status line X", "In game", "", false),
-        ["HudY"] = ("Status line Y", "In game", "", false),
-        ["MaxEntityRange"] = ("Entity range", "Limits", "How far entity queries look (grid units).", false),
-        ["MaxDeepStats"] = ("Stats per deep scan", "Limits", "", false),
-        ["MaxUiChildren"] = ("UI children per element", "Limits", "", false),
-        ["RecordingIntervalMs"] = ("Recording interval (ms)", "Recording", "", false),
-        ["RecordingEntityRange"] = ("Recording entity range", "Recording", "", false),
-        ["AutoDeepScanBosses"] = ("Deep-scan bosses", "Recording", "Record bosses' full stats automatically.", false),
-        ["RecordingMaxDeepStats"] = ("Stats per recorded boss", "Recording", "", false),
-        ["AllowPluginReload"] = ("Allow plugin reload", "Permissions", "Lets agents recompile a source plugin in place (the HUD pauses while it compiles).", true),
-        ["AllowCSharpScripts"] = ("Allow C# scripts", "Permissions", "Lets agents run arbitrary C# inside the HUD process.", true),
-        ["AllowHudInstrumentation"] = ("Allow HUD instrumentation", "Permissions", "Lets traces and profiles patch the HUD's own code for a few seconds (Harmony).", true),
-        ["StatsPanelVitalsOpen"] = ("Stats panel: vitals open", "Player stats panel", "", false),
-        ["StatsPanelResistsOpen"] = ("Stats panel: resistances open", "Player stats panel", "", false),
-        ["StatsPanelPinnedOpen"] = ("Stats panel: pinned open", "Player stats panel", "", false),
-        ["StatsPanelShowKeys"] = ("Stats panel: show keys", "Player stats panel", "Show Stats.dat keys instead of the in-game text.", false),
-        ["ShowAgentGuide"] = ("Agent guide card", "Agent guide", "The card that shows what the agent asks you to do in game.", false),
-        ["GuideLogOpen"] = ("Guide log open", "Agent guide", "", false),
-        ["AgentLogHotkey"] = ("Agent log hotkey", "Agent guide", "Toggles the agent log sheet. Set it in game.", false),
-        ["ToastAgent"] = ("Toasts: agent activity", "Agent guide", "Show a toast for every agent tool call (the grey ones). Off: they only go to the log.", false),
-        ["ToastStep"] = ("Toasts: steps", "Agent guide", "Show a toast when a guided step starts or is queued.", false),
-        ["ToastResult"] = ("Toasts: results", "Agent guide", "Show a toast for results and done receipts.", false),
-        ["ToastWarn"] = ("Toasts: warnings", "Agent guide", "", false),
-        ["ToastError"] = ("Toasts: errors", "Agent guide", "", false),
-        ["RestartHoldSec"] = ("HUD restart hold (s)", "Agent guide", "An agent's HUD restart that nothing blocks still waits this long on the card, with Not now. 0 = at once.", false),
-    };
-
     private readonly ConcurrentQueue<Action> _mainActions = new();
 
     private string? ProcessSettingsMethod(string method, JToken? p) => method switch
@@ -87,7 +68,7 @@ public partial class WhatsAnAiBridge
             var settings = Prop(Prop(w, "Plugin"), "_Settings");
             if (settings == null) continue;
             var nodes = new JArray();
-            Walk(settings, "", null, ReferenceEquals(Prop(w, "Plugin"), this), nodes, 0);
+            Walk(settings, "", null, nodes, 0);
             plugins.Add(new JObject
             {
                 ["plugin"] = w.Name,
@@ -102,24 +83,26 @@ public partial class WhatsAnAiBridge
     private static bool SamePlugin(string a, string b) =>
         string.Equals(a, b, StringComparison.OrdinalIgnoreCase) || string.Equals(a.Replace(" ", ""), b.Replace(" ", ""), StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Every node under obj, depth-first; nested settings objects become groups named by their label.</summary>
-    private static void Walk(object obj, string prefix, string? group, bool isBridge, JArray into, int depth)
+    /// <summary>Every node under obj, depth-first; nested settings objects become groups named by their label, and a
+    /// node outside any (a flat settings class) takes its [MenuTab] as its group.</summary>
+    private static void Walk(object obj, string prefix, string? group, JArray into, int depth)
     {
         if (depth > 4) return;
         foreach (var (prop, v) in SettingsMembers(obj))
         {
             if (v == null) continue;
             var path = prefix + prop.Name;
-            var (menuName, tooltip) = MenuOf(prop.Property!);
+            var menu = MenuOf(prop.Property!);
+            if (menu.Hidden) continue;   // [HiddenFromDescribe]: not offered as a setting
             if (IsNode(v.GetType()))
             {
-                into.Add(Describe(prop.Name, path, v, group, menuName, tooltip, isBridge));
+                into.Add(Describe(prop.Name, path, v, group ?? menu.Tab, menu));
                 continue;
             }
             // A nested settings object (a class holding nodes): its nodes go into a group named after it.
             var t = v.GetType();
             if (t.IsClass && t != typeof(string) && v is not IEnumerable && MemberIndex.Of(t).AllProperties.Any(pp => IsNode(pp.PropertyType)))
-                Walk(v, path + ".", menuName ?? Words(prop.Name), isBridge, into, depth + 1);
+                Walk(v, path + ".", menu.Name ?? Words(prop.Name), into, depth + 1);
         }
     }
 
@@ -143,17 +126,38 @@ public partial class WhatsAnAiBridge
     private static bool IsNode(Type t) => BaseName(t).EndsWith("Node", StringComparison.Ordinal);
     private static string BaseName(Type t) => t.Name.Contains('`') ? t.Name[..t.Name.IndexOf('`')] : t.Name;
 
-    /// <summary>The HUD's [Menu(name, tooltip)] on a settings property (fields MenuName / Tooltip on both HUDs).</summary>
-    private static (string? name, string? tooltip) MenuOf(PropertyInfo p)
+    /// <summary>What a settings property's attributes say about it: label and description, tab, permission, read-only.</summary>
+    private readonly record struct MenuInfo(string? Name, string? Tooltip, string? Tab, bool Permission, bool ReadOnly, string? ReadOnlyNote, bool Hidden);
+
+    /// <summary>
+    /// The attributes on a settings property, by type name: the HUD's [Menu(name, tooltip)] (MenuName / Tooltip on both
+    /// HUDs), and SettingsMenu's [MenuTab(tab)] and [MenuReadOnly(note)] plus the bridge's [SettingPermission], which
+    /// each plugin declares in its own namespace (copied, never referenced).
+    /// </summary>
+    private static MenuInfo MenuOf(PropertyInfo p)
     {
-        var a = p.GetCustomAttributes(true).FirstOrDefault(x => x.GetType().Name == "MenuAttribute");
-        if (a == null) return (null, null);
-        return (MemberIndex.TryGet(a, "MenuName") as string, MemberIndex.TryGet(a, "Tooltip") as string);
+        string? name = null, tooltip = null, tab = null, roNote = null;
+        bool permission = false, readOnly = false, hidden = false;
+        foreach (var a in p.GetCustomAttributes(true))
+        {
+            switch (a.GetType().Name)
+            {
+                case "MenuAttribute":
+                    name = MemberIndex.TryGet(a, "MenuName") as string;
+                    tooltip = MemberIndex.TryGet(a, "Tooltip") as string;
+                    break;
+                case "MenuTabAttribute": tab = MemberIndex.TryGet(a, "Tab") as string; break;
+                case "MenuReadOnlyAttribute": readOnly = true; roNote = MemberIndex.TryGet(a, "Note") as string; break;
+                case "SettingPermissionAttribute": permission = true; break;
+                case "HiddenFromDescribeAttribute": hidden = true; break;
+            }
+        }
+        return new MenuInfo(name, string.IsNullOrWhiteSpace(tooltip) ? null : tooltip, string.IsNullOrWhiteSpace(tab) ? null : tab.Trim(), permission, readOnly, roNote, hidden);
     }
 
     private static string Words(string name) => System.Text.RegularExpressions.Regex.Replace(name, "(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ");
 
-    private static JObject Describe(string name, string path, object node, string? group, string? menuName, string? tooltip, bool isBridge)
+    private static JObject Describe(string name, string path, object node, string? group, MenuInfo menu)
     {
         var t = node.GetType();
         var baseName = BaseName(t);
@@ -162,16 +166,18 @@ public partial class WhatsAnAiBridge
             "ToggleNode" => "toggle", "RangeNode" => "range", "TextNode" => "text", "ListNode" => "list", "ColorNode" => "color",
             "ButtonNode" => "button", _ when baseName.StartsWith("Hotkey", StringComparison.Ordinal) => "hotkey", _ => "unknown",
         };
-        var meta = isBridge && Meta.TryGetValue(path, out var m) ? m : default;
+        var description = menu.Tooltip;
+        if (menu.ReadOnly)
+            description = ((description ?? "") + " (read-only: " + (string.IsNullOrWhiteSpace(menu.ReadOnlyNote) ? "the plugin sets it itself" : menu.ReadOnlyNote) + ")").Trim();
         var o = new JObject
         {
             ["path"] = path,
-            ["label"] = meta.label ?? menuName ?? Words(name),
-            ["group"] = meta.group ?? group,
-            ["description"] = string.IsNullOrEmpty(meta.description) ? tooltip : meta.description,
+            ["label"] = menu.Name ?? Words(name),
+            ["group"] = group,
+            ["description"] = description,
             ["kind"] = kind,
-            ["permission"] = meta.permission,
-            ["readOnly"] = kind is "hotkey" or "button" or "unknown",
+            ["permission"] = menu.Permission,
+            ["readOnly"] = menu.ReadOnly || kind is "hotkey" or "button" or "unknown",
         };
         var value = NodeMember(node, "Value");
         o["value"] = value switch
@@ -233,9 +239,9 @@ public partial class WhatsAnAiBridge
         var pm = Core.Current?.pluginManager;
         var w = pm?.Plugins.FirstOrDefault(x => SamePlugin(x.Name, plugin));
         if (w == null) return Err("unknown_plugin", $"No loaded plugin '{plugin}'.");
-        var isBridge = ReferenceEquals(Prop(w, "Plugin"), this);
         object? owner = Prop(Prop(w, "Plugin"), "_Settings");
         MemberIndex.Member? prop = null;
+        MemberIndex.Member? parentProp = null;   // the nested settings object holding the node (its label is the group)
         var parts = path.Split('.');
         if (owner == null) return Err("unknown_setting", $"{w.Name} has no settings object (_Settings is null).");
         for (var i = 0; i < parts.Length; i++)
@@ -244,6 +250,7 @@ public partial class WhatsAnAiBridge
             if (prop is not { CanRead: true })
                 return Err("unknown_setting", $"'{parts[i]}' is not a setting of {w.Name} ({(i == 0 ? "at the settings root" : $"under {string.Join('.', parts.Take(i))}")}, type {owner.GetType().Name}).");
             if (i == parts.Length - 1) break;
+            parentProp = prop;
             try { owner = prop.Get(owner); }
             catch (Exception ex)
             {
@@ -255,12 +262,14 @@ public partial class WhatsAnAiBridge
         var node = prop!.Get(owner);
         if (node == null) return Err("unknown_setting", $"{path} of {w.Name} is null.");
         if (!IsNode(node.GetType())) return Err("unknown_setting", $"{path} of {w.Name} is a {node.GetType().Name}, not a settings node.");
-        var (menuName, tooltip) = MenuOf(prop!.Property!);
-        var before = Describe(prop.Name, path, node, null, menuName, tooltip, isBridge);
+        var menu = MenuOf(prop!.Property!);
+        // The group Walk gives it: the innermost nested object's label, else the node's own [MenuTab].
+        var group = parentProp == null ? menu.Tab : MenuOf(parentProp.Property!).Name ?? Words(parentProp.Name);
+        var before = Describe(prop.Name, path, node, group, menu);
         if (before["permission"]?.Value<bool>() == true && !allowPermission)
             return Err("permission_setting", $"{before["label"]} gives bridge clients power, so it can't be changed through MCP tools. Change it in game or in the Hexile control center (it asks you to confirm).");
         if (before["readOnly"]?.Value<bool>() == true)
-            return Err("read_only", $"{before["label"]} ({before["kind"]}) can only be changed in game.");
+            return Err("read_only", menu.ReadOnly ? $"{before["label"]} is read-only: {menu.ReadOnlyNote ?? "the plugin sets it itself"}." : $"{before["label"]} ({before["kind"]}) can only be changed in game.");
 
         var vp = MemberIndex.Property(node.GetType(), "Value");
         if (vp == null || !vp.CanWrite) return Err("read_only", $"{path} has no writable Value.");
@@ -271,7 +280,7 @@ public partial class WhatsAnAiBridge
         return new JObject
         {
             ["ok"] = true, ["plugin"] = w.Name, ["previous"] = before["value"],
-            ["setting"] = Describe(prop.Name, path, node, before["group"]?.ToString(), menuName, tooltip, isBridge),
+            ["setting"] = Describe(prop.Name, path, node, group, menu),
         };
     }
 

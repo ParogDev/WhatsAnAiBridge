@@ -56,11 +56,10 @@ public partial class WhatsAnAiBridge
 
     private string PubFile => Path.Combine(_bridgeDir, "pubsub", "events.jsonl");
 
-    /// <summary>From Initialise: the two PluginBridge methods other plugins call, and the log read off the main thread.</summary>
+    /// <summary>From Initialise: the log read off the main thread. The two PluginBridge methods other plugins call
+    /// (PubPublishFromPlugin, PubSubscribeLocal) are [BridgeExport]s, saved by BridgeExports.Register in Initialise.</summary>
     private void PubRegister()
     {
-        GameController.PluginBridge.SaveMethod(PublishMethodName, (Func<string, string, string>)PubPublishFromPlugin);
-        GameController.PluginBridge.SaveMethod(SubscribeMethodName, (Func<string, string, Action<string>?, string>)PubSubscribeLocal);
         System.Threading.ThreadPool.QueueUserWorkItem(_ => { lock (_pubLock) PubLoadLocked(); });
     }
 
@@ -236,7 +235,10 @@ public partial class WhatsAnAiBridge
 
     // ── PluginBridge ─────────────────────────────────────────────────
 
+    #pragma warning disable HXB007 // legacy AIBridge.* name: see the HXB007 note in WhatsAnAiBridge.csproj
+    [BridgeExport(PublishMethodName)]
     private string PubPublishFromPlugin(string kind, string json)
+    #pragma warning restore HXB007
     {
         try
         {
@@ -250,7 +252,10 @@ public partial class WhatsAnAiBridge
         catch (Exception ex) { return Err("publish_failed", ex.Message).ToString(Formatting.None); }
     }
 
+    #pragma warning disable HXB007 // legacy AIBridge.* name: see the HXB007 note in WhatsAnAiBridge.csproj
+    [BridgeExport(SubscribeMethodName)]
     private string PubSubscribeLocal(string subscriber, string kindsCsv, Action<string>? handler)
+    #pragma warning restore HXB007
     {
         if (string.IsNullOrWhiteSpace(subscriber))
             return Err("bad_subscription", $"{SubscribeMethodName}(subscriber, kindsCsv, handler): subscriber is required.").ToString(Formatting.None);

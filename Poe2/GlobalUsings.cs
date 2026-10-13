@@ -5,6 +5,7 @@ global using ExileCore2.PoEMemory.Components;
 global using ExileCore2.PoEMemory.MemoryObjects;
 global using ExileCore2.PoEMemory.FilesInMemory;
 global using ExileCore2.Shared.Enums;
+global using ExileCore2.Shared.Attributes;
 global using ExileCore2.Shared.Interfaces;
 global using ExileCore2.Shared.Nodes;
 global using Actor = ExileCore2.PoEMemory.Components.Actor;
