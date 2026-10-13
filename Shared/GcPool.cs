@@ -35,10 +35,10 @@ public partial class WhatsAnAiBridge
             return Err("instrumentation_disabled", "Enable 'Allow HUD Instrumentation' in the bridge settings (Dev Loop) to change the pool.");
         if (want is < 8 or > 4096) return Err("bad_request", "maxArraysPerPartition must be 8-4096 (the runtime default is 32).");
 
-        const BindingFlags inst = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        // The pool's fields are declared links (HudLinks.cs), preflighted at load.
         var pool = System.Buffers.ArrayPool<byte>.Shared;
-        if (pool.GetType().GetField("_buckets", inst)?.GetValue(pool) is not Array buckets)
-            return Err("broken", $"{pool.GetType().Name} has no _buckets field (runtime {Environment.Version}): the pool layout changed");
+        if (HudLinks.PoolBuckets.FieldOn(pool.GetType())?.GetValue(pool) is not Array buckets)
+            return Err("broken", $"{HudLinks.PoolBuckets.Broken(pool.GetType())} (runtime {Environment.Version}): the pool layout changed");
 
         var rows = new JArray();
         var changed = 0;
@@ -47,15 +47,15 @@ public partial class WhatsAnAiBridge
             var size = 16 << i;
             var bucket = buckets.GetValue(i);
             if (bucket == null) continue;   // created on first use
-            if (bucket.GetType().GetField("_partitions", inst)?.GetValue(bucket) is not Array parts)
-                return Err("broken", $"{bucket.GetType().Name} has no _partitions field: the pool layout changed");
+            if (HudLinks.PoolPartitions.FieldOn(bucket.GetType())?.GetValue(bucket) is not Array parts)
+                return Err("broken", $"{HudLinks.PoolPartitions.Broken(bucket.GetType())}: the pool layout changed");
             int cap = 0, pooled = 0;
             foreach (var part in parts)
             {
-                var arraysField = part.GetType().GetField("_arrays", inst);
-                var countField = part.GetType().GetField("_count", inst);
+                var arraysField = HudLinks.PoolArrays.FieldOn(part.GetType());
+                var countField = HudLinks.PoolCount.FieldOn(part.GetType());
                 if (arraysField == null || countField == null)
-                    return Err("broken", $"{part.GetType().Name} has no _arrays/_count field: the pool layout changed");
+                    return Err("broken", $"{(arraysField == null ? HudLinks.PoolArrays : HudLinks.PoolCount).Broken(part.GetType())}: the pool layout changed");
                 Monitor.Enter(part);   // the lock the pool itself takes around push and pop
                 try
                 {
@@ -95,14 +95,14 @@ public partial class WhatsAnAiBridge
     {
         try
         {
-            const BindingFlags inst = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+            // A broken link gives null here; the preflight (HudLinks.Pool*) names it.
             var pool = System.Buffers.ArrayPool<byte>.Shared;
-            if (pool.GetType().GetField("_buckets", inst)?.GetValue(pool) is not Array buckets) return null;
+            if (HudLinks.PoolBuckets.FieldOn(pool.GetType())?.GetValue(pool) is not Array buckets) return null;
             var i = System.Numerics.BitOperations.Log2((uint)bytes) - 4;
             if (i < 0 || i >= buckets.Length || buckets.GetValue(i) is not { } bucket) return null;
-            if (bucket.GetType().GetField("_partitions", inst)?.GetValue(bucket) is not Array parts) return null;
+            if (HudLinks.PoolPartitions.FieldOn(bucket.GetType())?.GetValue(bucket) is not Array parts) return null;
             var cap = 0;
-            foreach (var part in parts) cap += (part.GetType().GetField("_arrays", inst)?.GetValue(part) as Array)?.Length ?? 0;
+            foreach (var part in parts) cap += (HudLinks.PoolArrays.FieldOn(part.GetType())?.GetValue(part) as Array)?.Length ?? 0;
             return cap;
         }
         catch { return null; }

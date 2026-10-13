@@ -977,4 +977,8 @@ public class HelloDto
 
     [JsonProperty("unsupported")]
     public List<string> Unsupported { get; set; } = new();
+
+    /// <summary>The HUD-update drift preflight of this load: counts and the links that aren't ok (Preflight.cs).</summary>
+    [JsonProperty("reflection", NullValueHandling = NullValueHandling.Ignore)]
+    public ReflectionPreflightDto? Reflection { get; set; }
 }

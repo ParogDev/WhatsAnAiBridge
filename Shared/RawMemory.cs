@@ -24,12 +24,19 @@ public partial class WhatsAnAiBridge
         _rawReadTried = true;
         try
         {
-            const BindingFlags inst = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+            // The links are declared (and preflighted at load) in HudLinks.cs.
             var mem = (object)GameController.Memory;
-            var paged = mem.GetType().GetField("_backend", inst)?.GetValue(mem);
-            var leaf = paged?.GetType().GetFields(inst).FirstOrDefault(f => f.FieldType.Name == "IMemoryBackend")?.GetValue(paged) ?? paged;
-            var m = leaf?.GetType().GetMethod("TryReadMemory", [typeof(IntPtr), typeof(Span<byte>)]);
+            if (HudLinks.MemoryBackend.FieldOn(mem.GetType()) is not { } backendField)
+            {
+                LogFault($"[RawMemory] {HudLinks.MemoryBackend.Broken(mem.GetType())}: using Memory.Read");
+                return null;
+            }
+            var paged = backendField.GetValue(mem);
+            // No inner backend (not the paged one, e.g. caching disabled): read from the backend itself.
+            var leaf = paged == null ? null : HudLinks.PagedInner.FieldOn(paged.GetType())?.GetValue(paged) ?? paged;
+            var m = leaf == null ? null : HudLinks.BackendRead.MethodOn(leaf.GetType());
             if (leaf != null && m != null) _rawRead = (RawReadFn)Delegate.CreateDelegate(typeof(RawReadFn), leaf, m);
+            else LogFault($"[RawMemory] {(leaf == null ? "Memory._backend is null" : HudLinks.BackendRead.Broken(leaf.GetType()))}: using Memory.Read");
         }
         catch (Exception ex) { LogFault($"[RawMemory] leaf backend not reachable, using Memory.Read: {ex.Message}"); }
         return _rawRead;

@@ -207,18 +207,15 @@ public partial class WhatsAnAiBridge
 
     // ── Binding: the patched copy must use the patched load's own types ──
 
-    private static readonly string[] MonoModCaches = ["AssemblyCache", "AssembliesCache", "ResolveReflectionCache"];
-
+    /// <summary>MonoMod's by-name caches (declared links HudLinks.MonoModCaches, preflighted at load).</summary>
     private static IEnumerable<IDictionary> MonoModCacheDicts(out string? broken)
     {
         broken = null;
-        var rh = typeof(Harmony).Assembly.GetType("MonoMod.Utils.ReflectionHelper");
-        if (rh == null) { broken = "MonoMod.Utils.ReflectionHelper not found in 0Harmony"; return []; }
         var list = new List<IDictionary>();
-        foreach (var n in MonoModCaches)
+        foreach (var link in HudLinks.MonoModCaches)
         {
-            if (rh.GetField(n, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(null) is IDictionary d) list.Add(d);
-            else { broken = $"MonoMod.Utils.ReflectionHelper.{n} not found (0Harmony changed)"; return []; }
+            if (link.Field?.GetValue(null) is IDictionary d) list.Add(d);
+            else { broken = $"{link.Broken(link.DeclaredType)} (0Harmony changed)"; return []; }
         }
         return list;
     }
@@ -273,20 +270,19 @@ public partial class WhatsAnAiBridge
     private static HarmonyInternals? HarmonyInternalsOrBroken()
     {
         if (_harmonyInternals != null) return _harmonyInternals;
-        const BindingFlags sf = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
-        var h = typeof(Harmony).Assembly;
-        object? F(string type, string field)
+        // Declared links (HudLinks.cs), preflighted at load.
+        object? F(HudLink link)
         {
-            var t = h.GetType(type);
-            if (t == null) { _instrRestoreBroken = $"{type} not found in 0Harmony"; return null; }
-            var v = t.GetField(field, sf)?.GetValue(null);
-            if (v == null) _instrRestoreBroken = $"{type}.{field} not found (0Harmony changed)";
+            var f = link.Field;
+            if (f == null) { _instrRestoreBroken = $"{link.Broken(link.DeclaredType)} (0Harmony changed)"; return null; }
+            var v = f.GetValue(null);
+            if (v == null) _instrRestoreBroken = $"{link.TypeLabel}.{link.Member} is null";
             return v;
         }
-        if (F("HarmonyLib.PatchTools", "detours") is not IDictionary detours) return null;
-        if (F("HarmonyLib.HarmonySharedState", "state") is not IDictionary state) return null;
-        if (F("HarmonyLib.HarmonySharedState", "originals") is not IDictionary originals) return null;
-        if (F("HarmonyLib.PatchProcessor", "locker") is not { } locker) return null;
+        if (F(HudLinks.HarmonyDetours) is not IDictionary detours) return null;
+        if (F(HudLinks.HarmonyState) is not IDictionary state) return null;
+        if (F(HudLinks.HarmonyOriginals) is not IDictionary originals) return null;
+        if (F(HudLinks.HarmonyLocker) is not { } locker) return null;
         _instrRestoreBroken = null;
         return _harmonyInternals = new HarmonyInternals(detours, state, originals, locker);
     }
@@ -411,12 +407,8 @@ public partial class WhatsAnAiBridge
         catch { return null; }   // the HUD changed the list while we read it (a reload): next tick
     }
 
-    /// <summary>A PluginWrapper's plugin object (property Plugin, or field _plugin).</summary>
-    private static object? PluginObject(object w)
-    {
-        const BindingFlags any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-        return w.GetType().GetProperty("Plugin", any)?.GetValue(w) ?? w.GetType().GetField("_plugin", any)?.GetValue(w);
-    }
+    /// <summary>A PluginWrapper's plugin object (the public PluginWrapper.Plugin on both HUDs: no reflection needed).</summary>
+    private static object? PluginObject(PluginWrapper w) => w.Plugin;
 
     /// <summary>
     /// Methods Harmony still patches for a bridge owner that no live set holds (orphans: a previous bridge load, or a set

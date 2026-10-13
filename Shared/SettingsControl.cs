@@ -241,9 +241,15 @@ public partial class WhatsAnAiBridge
         for (var i = 0; i < parts.Length; i++)
         {
             prop = MemberIndex.Find(owner.GetType(), parts[i], kinds: MemberIndex.Kinds.Property);
-            if (prop is not { CanRead: true }) return Err("unknown_setting", $"'{parts[i]}' is not a setting of {w.Name} (at {string.Join('.', parts.Take(i))}).");
+            if (prop is not { CanRead: true })
+                return Err("unknown_setting", $"'{parts[i]}' is not a setting of {w.Name} ({(i == 0 ? "at the settings root" : $"under {string.Join('.', parts.Take(i))}")}, type {owner.GetType().Name}).");
             if (i == parts.Length - 1) break;
-            owner = prop.Get(owner);
+            try { owner = prop.Get(owner); }
+            catch (Exception ex)
+            {
+                var inner = ex is System.Reflection.TargetInvocationException { InnerException: { } ie } ? ie : ex;
+                return Err("unknown_setting", $"reading '{string.Join('.', parts.Take(i + 1))}' of {w.Name} threw {inner.GetType().Name}: {inner.Message} (segment {i + 1} of {parts.Length}).");
+            }
             if (owner == null) return Err("unknown_setting", $"'{string.Join('.', parts.Take(i + 1))}' of {w.Name} is null (segment {i + 1} of {parts.Length}), so '{parts[i + 1]}' can't be reached.");
         }
         var node = prop!.Get(owner);

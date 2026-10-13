@@ -106,10 +106,10 @@ public partial class WhatsAnAiBridge
         var o = new JObject();
         foreach (var (prop, v) in SettingsMembers(obj))
         {
-            if (o.Count >= 150) break;
-            if (v == null) { o[prop.Name] = JValue.CreateNull(); continue; }
             // SettingValue redacts string values under secret-looking names (bools, numbers, enums stay).
-            o[prop.Name] = SettingValue(prop.Name, v, depth, seen);
+            o[prop.Name] = v == null ? JValue.CreateNull() : SettingValue(prop.Name, v, depth, seen);
+            // Stop here, not at the top: the iterator reads the next member's getter before the loop body runs.
+            if (o.Count >= 150) break;
         }
         return o;
     }
@@ -158,20 +158,24 @@ public partial class WhatsAnAiBridge
     // ── PluginBridge registry ────────────────────────────────────────
 
     /// <summary>PluginBridge's private registry, or null when this HUD build has no _methods dictionary (the one accessor: listing, calls, stale cleanup).</summary>
-    private IDictionary? BridgeRegistry() =>
-        MemberIndex.TryGet(GameController.PluginBridge, "_methods", BindingFlags.NonPublic | BindingFlags.Instance, MemberIndex.Kinds.Field) as IDictionary;
+    private IDictionary? BridgeRegistry()
+    {
+        var bridge = GameController.PluginBridge;
+        if (bridge == null) return null;
+        try { return HudLinks.BridgeMethods.FieldOn(bridge.GetType())?.GetValue(bridge) as IDictionary; }
+        catch { return null; }
+    }
 
     /// <summary>Names the link that broke when <see cref="BridgeRegistry"/> gave null.</summary>
     private JObject BridgeUnavailable()
     {
-        const BindingFlags nonPublic = BindingFlags.NonPublic | BindingFlags.Instance;
         var bridge = GameController.PluginBridge;
         string link;
         if (bridge == null) link = "GameController.PluginBridge is null";
-        else if (MemberIndex.Find(bridge.GetType(), "_methods", nonPublic, MemberIndex.Kinds.Field) is not { } f) link = $"{bridge.GetType().Name} has no _methods field in this HUD build";
+        else if (HudLinks.BridgeMethods.FieldOn(bridge.GetType()) is not { } f) link = $"{HudLinks.BridgeMethods.Broken(bridge.GetType())} in this HUD build";
         else
         {
-            try { link = f.Get(bridge) is { } v ? $"PluginBridge._methods is a {v.GetType().Name}, not an IDictionary" : "PluginBridge._methods is null"; }
+            try { link = f.GetValue(bridge) is { } v ? $"PluginBridge._methods is a {v.GetType().Name}, not an IDictionary" : "PluginBridge._methods is null"; }
             catch (Exception ex) { link = $"reading PluginBridge._methods threw {(ex.InnerException ?? ex).GetType().Name}"; }
         }
         return new() { ["error"] = "unavailable", ["message"] = $"PluginBridge registry unreachable: {link} (check with hud_type)." };

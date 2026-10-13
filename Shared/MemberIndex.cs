@@ -158,7 +158,7 @@ internal static class MemberIndex
         /// shows once, as its most-derived declaration, where its name first appears.
         /// </summary>
         public Member[] ReadableProperties => _readableProperties ??= AllProperties
-            .Where(p => p.GetIndexParameters().Length == 0 && p.GetMethod != null)
+            .Where(p => p.GetIndexParameters().Length == 0 && p.GetGetMethod() != null)   // a public getter (not `{ private get; set; }`)
             .GroupBy(p => p.Name, StringComparer.Ordinal)
             .Select(g => g.OrderByDescending(p => Depth(p.DeclaringType)).First())
             .Select(For).ToArray();

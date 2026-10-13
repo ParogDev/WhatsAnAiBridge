@@ -91,6 +91,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         Force = true;
         UpdatePaths();
         HudStateStart();   // hud-state.json phase starting, as early as possible (HudState.cs)
+        // Every private/internal reflection target against this HUD build, before anything uses one (Preflight.cs).
+        try { PreflightAtLoad(); } catch (Exception ex) { LogFault($"[Preflight] check failed: {ex.GetType().Name}: {ex.Message}", "preflight"); }
 
         if (Settings.EnableTcp.Value)
             StartTcpServer();
@@ -310,7 +312,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
                          ?? ProcessTraceMethod(method, parameters) ?? ProcessTrackerMethod(method, parameters)
                          ?? ProcessLayoutMethod(method, parameters) ?? ProcessMotionMethod(method, parameters)
                          ?? ProcessLabMethod(method, parameters) ?? ProcessProfileMethod(method, parameters)
-                         ?? ProcessSelfPerfMethod(method, parameters) ?? ProcessGcPoolMethod(method, parameters)
+                         ?? ProcessSelfPerfMethod(method, parameters) ?? ProcessGcPoolMethod(method, parameters) ?? ProcessPreflightMethod(method, parameters)
                          ?? ProcessSettingsMethod(method, parameters) ?? ProcessFocusMethod(method, parameters)
                          ?? ProcessSessionMethod(method, parameters) ?? ProcessInstrumentMethod(method, parameters)
                          ?? ProcessPubSubMethod(method, parameters);
@@ -561,6 +563,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             BridgeBuild = typeof(WhatsAnAiBridge).Assembly.GetName().Version?.ToString() ?? "",
             InGame = GameController.InGame,
             Unsupported = UnsupportedFeatures.ToList(),
+            Reflection = PreflightSummary(),
         };
     }
 
