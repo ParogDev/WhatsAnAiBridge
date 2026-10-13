@@ -56,8 +56,16 @@ internal sealed class HudLink
     /// <summary>The owner type the preflight checks (call sites may pass the runtime type instead).</summary>
     public Type? DeclaredType
     {
-        get { try { return _typeOf(); } catch { return null; } }
+        get
+        {
+            try { var t = _typeOf(); _typeError = null; return t; }
+            // Kept for Broken(null): a resolver that threw is said with its exception, never as a bare "type not found".
+            catch (Exception ex) { _typeError = $"{ex.GetType().Name}: {ex.Message}"; return null; }
+        }
     }
+
+    /// <summary>The exception of the last <see cref="DeclaredType"/> that threw, or null (the last one resolved or gave null).</summary>
+    private volatile string? _typeError;
 
     public string Expected => Kind switch
     {
@@ -98,7 +106,10 @@ internal sealed class HudLink
     /// <summary>Why <see cref="On"/> gave null for <paramref name="t"/>: the link, what was expected and what is there instead.</summary>
     public string Broken(Type? t)
     {
-        if (t == null) return $"{TypeLabel}: type not found (expected it to declare {Expected})";
+        if (t == null)
+            return _typeError is { } threw
+                ? $"{TypeLabel}: finding the type threw {threw} (expected it to declare {Expected})"
+                : $"{TypeLabel}: type not found (expected it to declare {Expected})";
         var hit = Lookup(t, Member, out var why);
         return hit == null
             ? $"{Name(t)}.{Member}: expected {Expected}; {why}"

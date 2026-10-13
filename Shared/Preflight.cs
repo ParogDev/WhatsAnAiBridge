@@ -45,6 +45,10 @@ public class ReflectionPreflightDto
     [JsonProperty("recovered", NullValueHandling = NullValueHandling.Ignore)] public List<string>? Recovered { get; set; }
     [JsonProperty("links", NullValueHandling = NullValueHandling.Ignore)] public List<LinkCheckDto>? Links { get; set; }
     [JsonProperty("simulated", NullValueHandling = NullValueHandling.Ignore)] public string? Simulated { get; set; }
+    /// <summary>True when the check itself failed: nothing was checked, so the zero counts mean "unknown", never "0 broken".
+    /// Absent otherwise. <see cref="Error"/> says why.</summary>
+    [JsonProperty("failed", NullValueHandling = NullValueHandling.Ignore)] public bool? Failed { get; set; }
+    [JsonProperty("error", NullValueHandling = NullValueHandling.Ignore)] public string? Error { get; set; }
 }
 
 /// <summary>What the bridge saves between loads to tell a new build from the last one checked.</summary>
@@ -78,6 +82,9 @@ public partial class WhatsAnAiBridge
     private string? ProcessPreflightMethod(string method, JToken? p)
     {
         if (method != "reflection.preflight") return null;
+        // A test of the failed-check shape (failed: true + error): answered, never cached, so hello is untouched.
+        if (p?["simulateFailed"]?.Value<bool>() == true)
+            return Serialize(FailedReport(BuildStamp(), new InvalidOperationException("simulated preflight failure (simulateFailed)")));
         var simulate = p?["simulateBroken"]?.Value<string>();
         if (simulate != null)
         {
@@ -116,12 +123,12 @@ public partial class WhatsAnAiBridge
             return new ReflectionPreflightDto
             {
                 Stamp = r.Stamp, ChangedFrom = r.ChangedFrom, CheckedAt = r.CheckedAt, Ms = r.Ms, Targets = r.Targets,
-                Ok = r.Ok, Broken = r.Broken, NotNow = r.NotNow, Blocked = r.Blocked, Problems = r.Problems.ToList(), Recovered = r.Recovered?.ToList(),   // copies: hello never shares the cached report's lists
+                Ok = r.Ok, Broken = r.Broken, NotNow = r.NotNow, Blocked = r.Blocked, Problems = r.Problems.ToList(), Recovered = r.Recovered?.ToList(), Failed = r.Failed, Error = r.Error,   // copies: hello never shares the cached report's lists
                 // The rows that aren't ok, typed (status field): readers classify by status, never by parsing problems.
                 Links = r.Links?.Where(l => l.Status != "ok").ToList(),
             };
         }
-        catch (Exception ex) { return new ReflectionPreflightDto { CheckedAt = DateTime.UtcNow, Problems = { $"preflight failed: {ex.GetType().Name}: {ex.Message}" } }; }
+        catch (Exception ex) { return FailedReport(null, ex); }
     }
 
     /// <summary>Check every link now, compare with the stamp saved by the last check, save, and say it loudly when something broke.</summary>
@@ -148,7 +155,7 @@ public partial class WhatsAnAiBridge
                 // previous file stays the baseline.
                 string stamp;
                 try { stamp = BuildStamp(); } catch (Exception sx) { stamp = $"? ({sx.GetType().Name})"; }
-                r = new ReflectionPreflightDto { Stamp = stamp, CheckedAt = DateTime.UtcNow, Problems = { $"preflight failed: {ex.GetType().Name}: {ex.Message}" } };
+                r = FailedReport(stamp, ex);
                 _preflight = r;
                 var failLine = $"[Preflight] check failed: {ex.GetType().Name}: {ex.Message}";
                 if (failLine != _preflightLoggedLine) { _preflightLoggedLine = failLine; LogFault(failLine, "preflight"); }
@@ -184,6 +191,13 @@ public partial class WhatsAnAiBridge
             }
             return r;
         }
+    }
+
+    /// <summary>The report of a check that failed: <c>failed: true</c> and the error, so no reader takes its zero counts for "0 broken".</summary>
+    private static ReflectionPreflightDto FailedReport(string? stamp, Exception ex)
+    {
+        var error = $"{ex.GetType().Name}: {ex.Message}";
+        return new ReflectionPreflightDto { Stamp = stamp ?? "", CheckedAt = DateTime.UtcNow, Failed = true, Error = error, Problems = { $"preflight failed: {error}" } };
     }
 
     private ReflectionPreflightDto RunPreflight(PreflightStateDto? prev, HudLink? simulated)
