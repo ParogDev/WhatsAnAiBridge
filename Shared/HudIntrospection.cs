@@ -118,8 +118,9 @@ public partial class WhatsAnAiBridge
         {
             if (o.Count >= MaxSettingsPerGroup)
             {
-                // A 151st member exists (peeked: one extra getter read): this group is cut, said in the result's "truncated".
-                truncated.Add(path);
+                // A 151st member exists (peeked: one extra getter read; a throwing getter is skipped by SettingsMembers, never
+                // thrown): this group is cut, said in the result's "truncated". List elements share their list's path: once.
+                if (!truncated.Contains(path)) truncated.Add(path);
                 break;
             }
             var (prop, v) = members.Current;

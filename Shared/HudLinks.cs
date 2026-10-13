@@ -99,8 +99,22 @@ internal sealed class HudLink
     public string Broken(Type? t)
     {
         if (t == null) return $"{TypeLabel}: type not found (expected it to declare {Expected})";
-        Lookup(t, Member, out var why);
-        return $"{Name(t)}.{Member}: expected {Expected}; {why ?? "found"}";
+        var hit = Lookup(t, Member, out var why);
+        return hit == null
+            ? $"{Name(t)}.{Member}: expected {Expected}; {why}"
+            // The member is there with the expected shape: whatever failed was its value (use BrokenValue at such sites).
+            : $"{Name(t)}.{Member}: the member is there ({Describe(hit)}); its value is what failed";
+    }
+
+    /// <summary>
+    /// Why reading this link gave nothing usable: the member is missing or reshaped (broken, <see cref="Broken"/>), or it is
+    /// there and its value is null (not now) or of another type than the code needs (broken).
+    /// </summary>
+    public string BrokenValue(Type? t, object? value)
+    {
+        if (On(t) is not { } m) return Broken(t);
+        if (value == null) return $"{Name(t!)}.{Member} is there ({Describe(m)}) but null right now (not set yet)";
+        return $"{Name(t!)}.{Member} is there ({Describe(m)}) but holds a {Name(value.GetType())}, not a {(ValueType != null ? Name(ValueType) : "usable value")}";
     }
 
     private MemberInfo? Lookup(Type t, string name, out string? why)
@@ -266,9 +280,20 @@ internal static class HudLinks
         () => LiveBackendType() ?? Concrete<IMemoryBackend>(t => t.Name == "PagedMemoryBackend") ?? Concrete<IMemoryBackend>(t => t.GetFields(Inst).Any(f => f.FieldType == typeof(IMemoryBackend))),
         valueType: typeof(IMemoryBackend));
 
+    /// <summary>The class RawMemory reads through right now: the paged backend's inner one, else Memory._backend's own; null before the HUD has a Memory.</summary>
+    private static Type? LiveLeafType()
+    {
+        var mem = LiveMemory();
+        var backend = mem == null ? null : MemoryBackend.FieldOn(mem.GetType())?.GetValue(mem);
+        if (backend == null) return null;
+        return (PagedInner.FieldOn(backend.GetType())?.GetValue(backend) ?? backend).GetType();
+    }
+
+    // Checked on the live leaf class, the type RawMemory resolves it on (the interface method when the class implements it
+    // explicitly; IMemoryBackend itself only before the HUD has a Memory).
     internal static readonly HudLink BackendRead = new("memory.try_read", "raw reads (RawMemory)",
-        "IMemoryBackend", "TryReadMemory", LinkKind.Method, BindingFlags.Instance | BindingFlags.Public,
-        () => typeof(IMemoryBackend), valueType: typeof(bool), parameters: [typeof(IntPtr), typeof(Span<byte>)]);
+        "the leaf IMemoryBackend (what RawMemory reads through)", "TryReadMemory", LinkKind.Method, BindingFlags.Instance | BindingFlags.Public,
+        () => LiveLeafType() ?? typeof(IMemoryBackend), valueType: typeof(bool), parameters: [typeof(IntPtr), typeof(Span<byte>)]);
 
     // ── HUD core ──
 
@@ -284,7 +309,7 @@ internal static class HudLinks
     internal static readonly HudLink CoreLogger = new("hud.core_logger", "bridge lines in the HUD log file (HudLog)",
         "Core", "Logger", LinkKind.Property, BindingFlags.Static | BindingFlags.Public,
         () => typeof(Core),
-        notNow: () => typeof(Core).GetProperty("Logger", BindingFlags.Static | BindingFlags.Public)?.GetValue(null) == null ? "Core.Logger is not set yet" : null);
+        notNow: () => CoreLogger!.Property?.GetValue(null) == null ? "Core.Logger is not set yet" : null);   // runs only after the link resolved
 
     internal static readonly HudLink LoggerInformation = new("hud.logger_information", "bridge lines in the HUD log file (HudLog)",
         "Core.Logger's type", "Information", LinkKind.Method, BindingFlags.Instance | BindingFlags.Public,

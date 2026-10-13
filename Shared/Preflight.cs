@@ -111,7 +111,7 @@ public partial class WhatsAnAiBridge
             return new ReflectionPreflightDto
             {
                 Stamp = r.Stamp, ChangedFrom = r.ChangedFrom, CheckedAt = r.CheckedAt, Ms = r.Ms, Targets = r.Targets,
-                Ok = r.Ok, Broken = r.Broken, NotNow = r.NotNow, Blocked = r.Blocked, Problems = r.Problems, Recovered = r.Recovered,
+                Ok = r.Ok, Broken = r.Broken, NotNow = r.NotNow, Blocked = r.Blocked, Problems = r.Problems.ToList(), Recovered = r.Recovered?.ToList(),   // copies: hello never shares the cached report's lists
             };
         }
         catch (Exception ex) { return new ReflectionPreflightDto { Problems = { $"preflight failed: {ex.GetType().Name}: {ex.Message}" } }; }

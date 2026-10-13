@@ -37,8 +37,10 @@ public partial class WhatsAnAiBridge
 
         // The pool's fields are declared links (HudLinks.cs), preflighted at load.
         var pool = System.Buffers.ArrayPool<byte>.Shared;
-        if (HudLinks.PoolBuckets.FieldOn(pool.GetType())?.GetValue(pool) is not Array buckets)
-            return Err("broken", $"{HudLinks.PoolBuckets.Broken(pool.GetType())} (runtime {Environment.Version}): the pool layout changed");
+        var bucketsValue = HudLinks.PoolBuckets.FieldOn(pool.GetType())?.GetValue(pool);
+        if (bucketsValue is not Array buckets)
+            return Err(bucketsValue == null && HudLinks.PoolBuckets.FieldOn(pool.GetType()) != null ? "not_now" : "broken",
+                $"{HudLinks.PoolBuckets.BrokenValue(pool.GetType(), bucketsValue)} (runtime {Environment.Version})");
 
         var rows = new JArray();
         var changed = 0;
@@ -47,8 +49,9 @@ public partial class WhatsAnAiBridge
             var size = 16 << i;
             var bucket = buckets.GetValue(i);
             if (bucket == null) continue;   // created on first use
-            if (HudLinks.PoolPartitions.FieldOn(bucket.GetType())?.GetValue(bucket) is not Array parts)
-                return Err("broken", $"{HudLinks.PoolPartitions.Broken(bucket.GetType())}: the pool layout changed");
+            var partsValue = HudLinks.PoolPartitions.FieldOn(bucket.GetType())?.GetValue(bucket);
+            if (partsValue is not Array parts)
+                return Err("broken", $"{HudLinks.PoolPartitions.BrokenValue(bucket.GetType(), partsValue)}: the pool layout changed");
             int cap = 0, pooled = 0;
             foreach (var part in parts)
             {

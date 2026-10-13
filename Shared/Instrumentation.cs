@@ -214,8 +214,9 @@ public partial class WhatsAnAiBridge
         var list = new List<IDictionary>();
         foreach (var link in HudLinks.MonoModCaches)
         {
-            if (link.Field?.GetValue(null) is IDictionary d) list.Add(d);
-            else { broken = $"{link.Broken(link.DeclaredType)} (0Harmony changed)"; return []; }
+            var v = link.Field?.GetValue(null);
+            if (v is IDictionary d) list.Add(d);
+            else { broken = $"{link.BrokenValue(link.DeclaredType, v)}{(link.Field == null || v != null ? " (0Harmony changed)" : "")}"; return []; }
         }
         return list;
     }
