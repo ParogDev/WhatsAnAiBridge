@@ -236,46 +236,93 @@ public partial class WhatsAnAiBridge
         return s.Count(c => c < 128) * 10 >= s.Length * 8;
     }
 
-    // Record ranges of every loaded .dat table, to resolve foreign keys. Rebuilt at most once a minute (tables reload
-    // on patch / area changes rarely; a stale entry only costs a missing ref name).
-    private static (DateTime at, List<(long start, long end, long len, string file, RawDatFile dat)> ranges)? _datRanges;
+    // Record ranges of every loaded .dat table, to resolve foreign keys (memory.read classifies every heap pointer with
+    // this, data.read every slot). Rebuilding meant walking all ~26k AllFiles keys, a FileInMemory per table (~2 KB of
+    // FrameCaches each) and three reads per table: ~1 MB and 1-3 ms, and memory.read at agent pace (calls more than a
+    // minute apart) paid it on nearly every call. Now the table list is redone only when the HUD's file list changes
+    // (it swaps in a new dictionary on reload; Count catches additions), keeping the entry, and its range, of a table
+    // whose name and pointer are unchanged; only new tables are read. A hit re-reads that one table's bounds, so a
+    // table that moved never names a row from stale bounds; a table that moved without the file list changing is found
+    // again by the full re-read every 10 minutes (until then it costs a missing name, never a wrong one).
+    private sealed class DatRange
+    {
+        public required string File;
+        public required long Ptr;
+        public required RawDatFile Dat;
+        public long Start, End, Len; // Len: 0 = not worked out yet, -1 = no fixed stride
+    }
+
+    private sealed record DatRangeCache(object Files, int Count, DateTime FullAt, Dictionary<string, DatRange> ByName, DatRange[] Ranges);
+
+    private static DatRangeCache? _datRanges;
+
+    private static bool IsDat(string name) =>
+        name.Length >= 4 && name[^4] == '.' && (name[^3] | 0x20) == 'd' && (name[^2] | 0x20) == 'a' && (name[^1] | 0x20) == 't';
+
+    private static bool ReadBounds(DatRange r)
+    {
+        try
+        {
+            long first = r.Dat.First, last = r.Dat.Last;
+            if (first <= 0 || last <= first) return false;
+            if (first != r.Start || last != r.End) (r.Start, r.End, r.Len) = (first, last, 0);
+            return true;
+        }
+        catch { return false; }
+    }
+
+    private DatRangeCache DatRanges()
+    {
+        var files = GameController.Files.AllFiles;
+        var cache = _datRanges;
+        var full = cache == null || (DateTime.UtcNow - cache.FullAt).TotalMinutes > 10;
+        if (!full && ReferenceEquals(cache!.Files, files) && cache.Count == files.Count) return cache;
+        // Only First/Last here: asking the HUD for a table's record count or length makes it work out the stride, and it
+        // logs (on screen) "Cannot calculate stride" for every table it can't - so that is done lazily, in RowAt, only for
+        // the one table a pointer falls into.
+        var m = GameController.Memory;
+        var byName = new Dictionary<string, DatRange>(cache?.ByName.Count ?? 512, StringComparer.Ordinal);
+        var ranges = new List<DatRange>(cache?.Ranges.Length ?? 512);
+        foreach (var (name, info) in files)
+        {
+            if (!IsDat(name)) continue;
+            long p;
+            try { p = info.Ptr; } catch { continue; }
+            if (cache != null && cache.ByName.TryGetValue(name, out var known) && known.Ptr == p)
+            {
+                byName[name] = known;
+                // A kept table keeps its bounds (re-checked on every hit); the 10-minute pass re-reads them all.
+                if (full ? ReadBounds(known) : known.End > known.Start) ranges.Add(known);
+                continue;
+            }
+            try
+            {
+                var r = new DatRange { File = name, Ptr = p, Dat = new RawDatFile(m, () => info.Ptr) };
+                byName[name] = r;
+                if (ReadBounds(r)) ranges.Add(r);
+            }
+            catch { }
+        }
+        cache = new DatRangeCache(files, files.Count, full ? DateTime.UtcNow : cache!.FullAt, byName, ranges.ToArray());
+        _datRanges = cache;
+        return cache;
+    }
 
     private string? RowAt(long ptr)
     {
-        var cache = _datRanges;
-        if (cache == null || (DateTime.UtcNow - cache.Value.at).TotalSeconds > 60)
+        var ranges = DatRanges().Ranges;
+        for (int i = 0; i < ranges.Length; i++)
         {
-            // Only First/Last here: asking the HUD for a table's record count or length makes it work out the stride, and it
-            // logs (on screen) "Cannot calculate stride" for every table it can't - so that is done lazily, below, only for
-            // the one table a pointer falls into.
-            var list = new List<(long, long, long, string, RawDatFile)>();
-            var m = GameController.Memory;
-            foreach (var (name, info) in GameController.Files.AllFiles)
+            var r = ranges[i];
+            if (ptr < r.Start || ptr >= r.End) continue;
+            // The bounds may be stale: re-read them before naming a row from them.
+            if (!ReadBounds(r) || ptr < r.Start || ptr >= r.End) continue;
+            if (r.Len == 0)
             {
-                if (!name.EndsWith(".dat", StringComparison.OrdinalIgnoreCase)) continue;
-                try
-                {
-                    var d = new RawDatFile(m, () => info.Ptr);
-                    long first = d.First, last = d.Last;
-                    if (first > 0 && last > first) list.Add((first, last, 0, name, d));
-                }
-                catch { }
+                try { r.Len = r.Dat.Length; } catch { r.Len = -1; }
             }
-            cache = (DateTime.UtcNow, list);
-            _datRanges = cache;
-        }
-        var ranges = cache.Value.ranges;
-        for (int i = 0; i < ranges.Count; i++)
-        {
-            var (start, end, len, file, dat) = ranges[i];
-            if (ptr < start || ptr >= end) continue;
-            if (len == 0)
-            {
-                try { len = dat.Length; } catch { len = -1; }
-                ranges[i] = (start, end, len, file, dat);
-            }
-            if (len <= 0 || (ptr - start) % len != 0) continue;
-            var row = (ptr - start) / len;
+            if (r.Len <= 0 || (ptr - r.Start) % r.Len != 0) continue;
+            var row = (ptr - r.Start) / r.Len;
             // Label with the row's first text field when it has one.
             string label = "";
             try
@@ -284,7 +331,7 @@ public partial class WhatsAnAiBridge
                 if (first > 0x10000 && first < 0x7FFF_FFFF_FFFF && GameController.Memory.ReadStringU(first, 64) is { } t && LooksLikeText(t)) label = $" \"{t}\"";
             }
             catch { }
-            return $"{file.Replace("Data/", "")}[{row}]{label}";
+            return $"{r.File.Replace("Data/", "")}[{row}]{label}";
         }
         return null;
     }
