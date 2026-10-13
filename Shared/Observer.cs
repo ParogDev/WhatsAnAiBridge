@@ -116,6 +116,7 @@ public partial class WhatsAnAiBridge
         "observe.layer_set" => SafeMemory(() => LayerSet(p)),
         "observe.layer_remove" => SafeMemory(() => LayerRemove(p)),
         "observe.layer_map" => SafeMemory(() => LayerMap(p)),
+        "observe.ui_catalogue" => SafeMemory(() => UiCatalogueQuery(p)),
         "observe.server_map" => SafeMemory(() => LayerMap(new JObject((p as JObject)?.Properties().ToArray() ?? []) { ["layer"] = "server" })),
         _ => null,
     };
@@ -130,6 +131,7 @@ public partial class WhatsAnAiBridge
                 s.Enabled = on;
                 s.Since = on ? DateTime.UtcNow : null;
                 _obsVisible = null;   // re-baseline: what is open now is not an event
+                _ucOpen.Clear();
                 SaveObs();
             }
         }
@@ -216,6 +218,7 @@ public partial class WhatsAnAiBridge
         try { ObserveLayers(now); } catch (Exception ex) { LogFault($"[Observe] layers: {ex.Message}"); }
         // Panels at 10 Hz once the visibility bit is calibrated (8 bytes per panel), so a panel lines up with 10 Hz
         // server changes; 2 Hz while it falls back to IsVisibleLocal (~3.6 KB allocated per panel).
+        try { UcTick(now); } catch (Exception ex) { LogFault($"[Observe] ui catalogue: {ex.Message}", "obs-uc"); }
         var panelsDue = (now - _obsLastPanels).TotalMilliseconds >= (_obsFlagOff >= 0 ? 100 : 500);
         var slowDue = (now - _obsLastTick).TotalMilliseconds >= 500;
         if (!panelsDue && !slowDue) return;
@@ -227,7 +230,7 @@ public partial class WhatsAnAiBridge
             if ((now - _obsLastEntities).TotalSeconds >= 2) { _obsLastEntities = now; ObserveEntities(); }
         }
         catch (Exception ex) { LogFault($"[Observe] {ex.Message}"); }
-        if (slowDue) ObsFlush();
+        if (slowDue) { ObsFlush(); UcFlush(); }
     }
 
     private void ObserveArea()
@@ -238,6 +241,7 @@ public partial class WhatsAnAiBridge
             if (_obsArea != null) ObsEmit(new JObject { ["kind"] = "area", ["from"] = _obsArea, ["to"] = area });
             _obsArea = area;
             _obsVisible = null;   // the UI tree is rebuilt on area change
+            _ucOpen.Clear();
         }
         var level = GameController.Player?.GetComponent<Player>()?.Level ?? -1;
         if (level > 0 && level != _obsLevel)
@@ -329,6 +333,7 @@ public partial class WhatsAnAiBridge
                 if (bytes != null) ev["snapshot"] = Convert.ToBase64String(bytes);
             }
             ObsEmit(ev);
+            UcPanelChanged(addr, e, vis, mapped);
         }
     }
 

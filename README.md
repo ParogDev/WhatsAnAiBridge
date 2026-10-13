@@ -121,6 +121,14 @@ The MCP server registers three tool classes. Each tool is a thin wrapper that se
 - `recording_search(term)` -- find frames containing a substring
 - `recording_summary` -- unique paths, unique buff names, frame count, time range
 
+### UI catalogue (`ui_catalogue`, bridge `observe.ui_catalogue`)
+While `observe` is on, every game panel that opens (NPC dialogues, travel menus, choice and reward panels...) gets one bounded, read-only content snapshot a few frames after it opens and again after each mouse click while it stays open. Each distinct interface becomes one entry in `<BridgeDirectory>\observe\ui-catalogue.json`, keyed by a stable fingerprint (`NpcDialog|The Hooded One`, else `<mapped HUD property or panel>|<title>`; never the panel index, which shifts between sessions), with how to recognise it, the areas it was seen in and its visible texts (child path, rect, a clickable guess).
+
+**Pointing at an option in a catalogued interface:**
+1. `ui_catalogue query="Hooded One"` (or `key=`) and pick the option, e.g. `Travel to Ogham`.
+2. When that interface is open, pass the option's `highlight` object as a target: `highlight targets=[{text:"Travel to Ogham", within:"GameController.IngameState.IngameUi.NpcDialog", label:"this one", tier:"primary"}] durationSec=8`. Texts unique in their view get `text` + `within` (the mapped panel's path, or the panel's title for unmapped panels); repeated texts get `panel` (title) + `child` (indexes inside the panel).
+3. A highlight that fails names the broken link (`within: no open panel contains ...`, `child [..] does not exist`): the interface is closed or its layout changed; the next opening refreshes the entry.
+
 </details>
 
 <details>
