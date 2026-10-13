@@ -36,9 +36,6 @@ public class ExpressionWalker
 
     private readonly GameController _gc;
 
-    // Cache of component type lookups
-    private static Dictionary<string, Type>? _componentTypeCache;
-
     public ExpressionWalker(GameController gc)
     {
         _gc = gc;
@@ -71,10 +68,10 @@ public class ExpressionWalker
     internal object? Resolve(string expression, out string? error)
     {
         error = null;
-        // The first GetComponent<T> scans every loaded assembly for component types; that one-off
+        // The first GetComponent<T> builds the type index (every loaded assembly's types); that one-off
         // cost must not count against the path's deadline (it timed out the first call after a HUD start).
-        if (_componentTypeCache == null && expression.Contains("Component<", StringComparison.Ordinal))
-            ResolveComponentType("Life");
+        if (expression.Contains("Component<", StringComparison.Ordinal))
+            _ = MemberIndex.Types;
         var deadline = DateTime.UtcNow.AddMilliseconds(TimeoutMs);
         var segments = ParseExpression(expression);
         if (segments.Count == 0) { error = "Empty expression"; return null; }
@@ -99,9 +96,8 @@ public class ExpressionWalker
             }
             else
             {
-                var prop = currentType.GetProperty(seg.Name, BindingFlags.Public | BindingFlags.Instance);
-                if (prop != null && prop.GetIndexParameters().Length == 0) current = prop.GetValue(current);
-                else if (currentType.GetField(seg.Name, BindingFlags.Public | BindingFlags.Instance) is { } field) current = field.GetValue(current);
+                // Most-derived property (never an indexer), else field; ambiguity-safe (NormalInventoryItem.Item vs this[int]).
+                if (MemberIndex.Find(currentType, seg.Name) is { CanRead: true } member) current = member.Get(current);
                 else { error = $"No public property or field '{seg.Name}' on type '{currentType.Name}'"; return null; }
             }
 
@@ -234,43 +230,27 @@ public class ExpressionWalker
             return null;
         }
 
-        if (seg.Name == "GetComponent" && seg.GenericArg != null)
+        if (seg.Name is "GetComponent" or "HasComponent" && seg.GenericArg != null)
         {
             var compType = ResolveComponentType(seg.GenericArg);
             if (compType == null)
             {
-                error = $"Could not resolve component type '{seg.GenericArg}'";
+                var ti = MemberIndex.Types;
+                var other = ti.Candidates(seg.GenericArg).Length;   // same name outside the HUD namespaces
+                error = $"Could not resolve component type '{seg.GenericArg}' (looked in ExileCore*/GameOffsets* types of the HUD's own "
+                        + $"{ti.AssemblyCount} assemblies, type index build {ti.Build}; plugin assemblies are not indexed"
+                        + (other > 0 ? $"; {other} type(s) of that name exist outside those namespaces" : "") + ")";
                 return null;
             }
 
-            var method = targetType.GetMethod("GetComponent", Type.EmptyTypes);
-            if (method == null)
+            // Closed generic method cached per (type, component); throws on a constraint violation like MakeGenericMethod.
+            var generic = MemberIndex.GenericMethod(targetType, seg.Name, compType);
+            if (generic == null)
             {
-                error = $"No GetComponent method found on {targetType.Name}";
+                error = $"No {seg.Name} method found on {targetType.Name}";
                 return null;
             }
 
-            var generic = method.MakeGenericMethod(compType);
-            return generic.Invoke(target, null);
-        }
-
-        if (seg.Name == "HasComponent" && seg.GenericArg != null)
-        {
-            var compType = ResolveComponentType(seg.GenericArg);
-            if (compType == null)
-            {
-                error = $"Could not resolve component type '{seg.GenericArg}'";
-                return null;
-            }
-
-            var method = targetType.GetMethod("HasComponent", Type.EmptyTypes);
-            if (method == null)
-            {
-                error = $"No HasComponent method found on {targetType.Name}";
-                return null;
-            }
-
-            var generic = method.MakeGenericMethod(compType);
             return generic.Invoke(target, null);
         }
 
@@ -282,7 +262,7 @@ public class ExpressionWalker
                 return null;
             }
 
-            var method = targetType.GetMethod("GetChildAtIndex", [typeof(int)]);
+            var method = MemberIndex.Method(targetType, "GetChildAtIndex", typeof(int));
             if (method == null)
             {
                 error = $"No GetChildAtIndex method on {targetType.Name}";
@@ -301,32 +281,27 @@ public class ExpressionWalker
         return null;
     }
 
+    /// <summary>
+    /// A HUD type (ExileCore*/GameOffsets* namespaces) by simple or full name. Several types share a simple name
+    /// (e.g. "Player", "Buffs"): a component (a subclass of the HUD's Component) wins, then a class in a
+    /// *.Components namespace; the old cache kept whichever loaded last.
+    /// </summary>
     internal static Type? ResolveComponentType(string typeName)
-    {
-        if (_componentTypeCache == null)
-        {
-            _componentTypeCache = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                try
-                {
-                    foreach (var type in asm.GetTypes())
-                    {
-                        if (type.Namespace?.StartsWith("ExileCore") == true
-                            || type.Namespace?.StartsWith("GameOffsets") == true)
-                        {
-                            _componentTypeCache[type.Name] = type;
-                            if (type.FullName != null)
-                                _componentTypeCache[type.FullName] = type;
-                        }
-                    }
-                }
-                catch { }
-            }
-        }
+        => MemberIndex.Types.Resolve(typeName, IsHudType, ComponentRank)
+           // A miss may be a HUD assembly loaded after the index was built: rebuild once per assembly-count change.
+           ?? (MemberIndex.RefreshTypes() ? MemberIndex.Types.Resolve(typeName, IsHudType, ComponentRank) : null);
 
-        _componentTypeCache.TryGetValue(typeName, out var result);
-        return result;
+    private static bool IsHudType(Type t)
+        => t.Namespace?.StartsWith("ExileCore", StringComparison.Ordinal) == true
+           || t.Namespace?.StartsWith("GameOffsets", StringComparison.Ordinal) == true;
+
+    private static int ComponentRank(Type t)
+    {
+        var rank = 0;
+        for (var b = t.BaseType; b != null; b = b.BaseType)
+            if (b.Name == "Component" && IsHudType(b)) { rank += 2; break; }
+        if (t.Namespace?.EndsWith(".Components", StringComparison.Ordinal) == true) rank++;
+        return rank;
     }
 
     // ── Indexer application ────────────────────────────────────────────
@@ -349,7 +324,7 @@ public class ExpressionWalker
                 return intIndex < list.Count ? list[intIndex] : throw new IndexOutOfRangeException($"Index {intIndex} out of range (count: {list.Count})");
 
             // Try indexer property
-            var indexer = type.GetProperty("Item", [typeof(int)]);
+            var indexer = MemberIndex.Indexer(type, typeof(int));
             if (indexer != null)
                 return indexer.GetValue(collection, [intIndex]);
         }
@@ -372,22 +347,40 @@ public class ExpressionWalker
             return null;
         }
 
-        // Try generic IDictionary with enum keys
-        var indexerProp = type.GetProperty("Item");
-        if (indexerProp != null)
-        {
-            var keyType = indexerProp.GetIndexParameters().FirstOrDefault()?.ParameterType;
-            if (keyType?.IsEnum == true && Enum.TryParse(keyType, indexValue, true, out var enumKey))
-                return indexerProp.GetValue(collection, [enumKey]);
-        }
+        // Enum-keyed indexers (generic dictionaries, InventoryElement[InventoryIndex]); a type may have several
+        // indexers (InventoryElement: this[InventoryIndex] and Element's this[int]), most-derived first.
+        // Two passes: a defined value first (Enum.TryParse also accepts any number, which would bind [1] to whichever
+        // enum indexer comes first), then any value that parses, as before.
+        List<string>? enumKeys = null;
+        for (var pass = 0; pass < 2; pass++)
+            foreach (var indexerProp in MemberIndex.Indexers(type))
+            {
+                var ps = indexerProp.GetIndexParameters();
+                if (ps.Length != 1 || !indexerProp.CanRead) continue;
+                var keyType = ps[0].ParameterType;
+                if (!keyType.IsEnum) continue;
+                if (Enum.TryParse(keyType, indexValue, true, out var enumKey) && (pass == 1 || Enum.IsDefined(keyType, enumKey!)))
+                    return indexerProp.GetValue(collection, [enumKey]);
+                if (pass == 1) (enumKeys ??= []).Add(keyType.Name);
+            }
 
-        error = $"Cannot apply indexer [{indexValue}] to type {type.Name}";
+        // Name the link: the type has an enum indexer, the key just isn't one of its values (e.g. a PoE1 name on PoE2).
+        error = enumKeys != null
+            ? $"Cannot apply indexer [{indexValue}] to type {type.Name}: '{indexValue}' is not a {string.Join(" or ", enumKeys)} value"
+            : $"Cannot apply indexer [{indexValue}] to type {type.Name}";
         return null;
     }
 
     // ── Type safety ────────────────────────────────────────────────────
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Type, object> _allowedCache = new();
+    private static readonly object Allowed = true, NotAllowed = false;
+
+    /// <summary>Whether the walker may read members of this type (cached per type).</summary>
     internal static bool IsTypeAllowed(Type type)
+        => (bool)_allowedCache.GetValue(type, t => ComputeTypeAllowed(t) ? Allowed : NotAllowed);
+
+    private static bool ComputeTypeAllowed(Type type)
     {
         var ns = type.Namespace;
         if (ns == null) return false;
@@ -490,13 +483,14 @@ public class ExpressionWalker
         // Compiler-generated anonymous types (script results) have unreadable names; omit them.
         var result = type.Name.Contains("AnonymousType") ? new JObject() : new JObject { ["_type"] = type.Name };
 
-        var props = type.GetProperties(BindingFlags.Public | BindingFlags.Instance);
+        // Reflection's own list and order (cached), so the first 50 are the same as ever; reads use compiled getters.
+        var props = MemberIndex.Of(type).AllProperties;
         foreach (var prop in props.Take(50))
         {
             try
             {
                 if (prop.GetIndexParameters().Length > 0) continue; // Skip indexed properties
-                var val = prop.GetValue(obj);
+                var val = MemberIndex.For(prop).Get(obj);
                 result[prop.Name] = val == null ? JValue.CreateNull() : SerializeValue(val, depth + 1);
             }
             catch (Exception ex)
@@ -541,7 +535,7 @@ public class ExpressionWalker
         };
 
         var props = new JArray();
-        foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance).OrderBy(p => p.Name))
+        foreach (var prop in MemberIndex.Of(type).AllProperties.OrderBy(p => p.Name))
         {
             if (prop.GetIndexParameters().Length > 0) continue; // Skip indexed
             props.Add(new JObject
@@ -582,7 +576,7 @@ public class ExpressionWalker
         result["methods"] = methods;
 
         var fields = new JArray();
-        foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance).OrderBy(f => f.Name))
+        foreach (var field in MemberIndex.Of(type).AllFields.OrderBy(f => f.Name))
         {
             fields.Add(new JObject
             {

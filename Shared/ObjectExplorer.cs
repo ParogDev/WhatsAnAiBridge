@@ -107,14 +107,11 @@ public partial class WhatsAnAiBridge
         }
         else if (!type.IsPrimitive && !type.IsEnum && value is not string)
         {
-            var members = type.GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                .Where(m => m.GetIndexParameters().Length == 0 && m.GetMethod != null)
-                .Select(m => (name: m.Name, declared: m.PropertyType, read: (Func<object?>)(() => m.GetValue(value))))
-                .Concat(type.GetFields(BindingFlags.Public | BindingFlags.Instance)
-                    .Select(f => (name: f.Name, declared: f.FieldType, read: (Func<object?>)(() => f.GetValue(value)))))
-                .OrderBy(m => m.name, StringComparer.Ordinal);
-            foreach (var (name, declared, read) in members)
+            // Readable public instance members, one per name (most-derived: a `new` property hides its base), by name.
+            foreach (var member in MemberIndex.Readable(type))
             {
+                var name = member.Name;
+                var declared = member.Type;
                 var childPath = $"{path}.{name}";
                 // Members of a struct take '.': inside a ?. chain the struct isn't nullable, and '?.' on it is CS0023.
                 var childCs = type.IsValueType ? $"{csharp}.{name}" : $"{csharp}?.{name}";
@@ -126,7 +123,7 @@ public partial class WhatsAnAiBridge
                 }
                 var t0 = sw.ElapsedMilliseconds;
                 object? v;
-                try { v = read(); }
+                try { v = member.Get(value); }
                 catch (Exception ex)
                 {
                     children.Add(new JObject { ["name"] = name, ["type"] = ExpressionWalker.FormatTypeName(declared), ["error"] = Message(ex), ["path"] = childPath, ["csharp"] = childCs });
@@ -193,9 +190,9 @@ public partial class WhatsAnAiBridge
     private static JArray? Components(object entity, string path, string csharp)
     {
         if (entity.GetType().Name != "Entity") return null;
-        var cache = entity.GetType().GetProperty("CacheComp", BindingFlags.Public | BindingFlags.Instance);
+        var cache = MemberIndex.Find(entity.GetType(), "CacheComp", kinds: MemberIndex.Kinds.Property);
         IDictionary? names;
-        try { names = cache?.GetValue(entity) as IDictionary; } catch { return null; }
+        try { names = cache?.Get(entity) as IDictionary; } catch { return null; }
         if (names == null) return null;
         var rows = new List<JObject>();
         foreach (var key in names.Keys)
@@ -240,17 +237,18 @@ public partial class WhatsAnAiBridge
             return text.Length > 80 ? text[..77] + "..." : text;
         }
         var parts = new List<string>();
-        foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.Instance))
+        var tm = MemberIndex.Of(t);
+        foreach (var f in tm.AllFields)
         {
             if (parts.Count >= 6) break;
-            if (f.FieldType.IsPrimitive && f.FieldType != typeof(bool)) parts.Add($"{f.Name}={Number(f.GetValue(v)!)}");
+            if (f.FieldType.IsPrimitive && f.FieldType != typeof(bool)) parts.Add($"{f.Name}={Number(MemberIndex.For(f).Get(v)!)}");
         }
         if (parts.Count == 0)
-            foreach (var p in t.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            foreach (var p in tm.AllProperties)
             {
                 if (parts.Count >= 6) break;
                 if (!p.PropertyType.IsPrimitive || p.PropertyType == typeof(bool) || p.GetIndexParameters().Length > 0) continue;
-                try { parts.Add($"{p.Name}={Number(p.GetValue(v)!)}"); } catch { }
+                try { parts.Add($"{p.Name}={Number(MemberIndex.For(p).Get(v)!)}"); } catch { }
             }
         if (parts.Count > 0) return string.Join(" ", parts);
         var s = v.ToString() ?? t.Name;
@@ -264,22 +262,24 @@ public partial class WhatsAnAiBridge
     private static string ObjectPreview(object v, Type t)
     {
         var sb = new StringBuilder(t.Name);
-        foreach (var name in new[] { "RenderName", "Name", "Text", "Path", "Id" })
+        foreach (var name in PreviewNames)
         {
-            var p = t.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
-            if (p == null || p.GetIndexParameters().Length > 0 || !(p.PropertyType == typeof(string) || p.PropertyType.IsPrimitive)) continue;
+            var p = MemberIndex.Find(t, name, kinds: MemberIndex.Kinds.Property);
+            if (p == null || !p.CanRead || !(p.Type == typeof(string) || p.Type.IsPrimitive)) continue;
             try
             {
-                var val = p.GetValue(v);
+                var val = p.Get(v);
                 if (val is string s && s.Length == 0) continue;
                 if (val != null) { sb.Append(' ').Append(name).Append('=').Append(val is string str ? Quote(str) : Number(val)); break; }
             }
             catch { }
         }
-        if (t.GetProperty("IsVisible", BindingFlags.Public | BindingFlags.Instance) is { } vis && vis.PropertyType == typeof(bool))
-            try { sb.Append((bool)vis.GetValue(v)! ? " visible" : " hidden"); } catch { }
+        if (MemberIndex.Find(t, "IsVisible", kinds: MemberIndex.Kinds.Property) is { CanRead: true } vis && vis.Type == typeof(bool))
+            try { sb.Append((bool)vis.Get(v)! ? " visible" : " hidden"); } catch { }
         return sb.ToString();
     }
+
+    private static readonly string[] PreviewNames = ["RenderName", "Name", "Text", "Path", "Id"];
 
     // ── C# accessors ─────────────────────────────────────────────────
 
