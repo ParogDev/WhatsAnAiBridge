@@ -50,7 +50,8 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
     private long _hsWrittenTs;                     // Stopwatch timestamp of the last successful write
     private long _hsDirtyVer, _hsWrittenVer;       // +1 per change of _hs; the version the last successful write serialized
     private bool HsDirtyLocked => _hsDirtyVer != _hsWrittenVer;   // a change not yet written (a write failed, or raced one)
-    private bool _hsLongLoadPosted;                // this load's LONG LOAD toast is out (once per load)
+    private int _hsCloseDone;                      // 1 once HudStateClose ran for this load
+    private bool _hsLongLoadPosted;               // this load's LONG LOAD toast is out (once per load)
     private bool _hsReload;                        // this load is a bridge reload in the same HUD process
     private bool _hsClosed;                        // OnClose wrote the final phase: a late timer tick writes nothing
     private long? _hsAreaHash;                     // the area hash last seen ready
@@ -154,6 +155,9 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
     private void HudStateClose()
     {
         HudStateStopTimer();
+        // Once per load: the HUD calls OnClose twice on shutdown (PluginWrapper.Close, then BaseSettingsPlugin.Dispose; seen
+        // live 2026-10-13 as hud.phase restarting -> restarting).
+        if (Interlocked.Exchange(ref _hsCloseDone, 1) == 1) return;
         Volatile.Write(ref _hsClosed, true);   // a tick still running writes and publishes nothing from here on
         try
         {
