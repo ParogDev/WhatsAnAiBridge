@@ -46,6 +46,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
     private long _hsWrittenTs;                     // Stopwatch timestamp of the last successful write
     private bool _hsDirty;                         // a phase change not yet written (a write failed)
     private bool _hsReload;                        // this load is a bridge reload in the same HUD process
+    private bool _hsClosed;                        // OnClose wrote the final phase: a late timer tick writes nothing
     private long? _hsAreaHash;                     // the area hash last seen ready
     private string? _hsReadError, _hsWriteError, _hsPublishError;
     private long _hsReadErrors, _hsWrites, _hsTicks;
@@ -91,6 +92,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 _hsSinceTs = Stopwatch.GetTimestamp();
                 _hsLoadTs = 0;
                 _hsAreaHash = null;
+                Volatile.Write(ref _hsClosed, false);
                 _hsDirty = true;
             }
             HudStateWrite();
@@ -126,6 +128,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
     private void HudStateClose()
     {
         HudStateStopTimer();
+        Volatile.Write(ref _hsClosed, true);   // a tick still running writes and publishes nothing from here on
         try
         {
             string phase, reason;
@@ -148,7 +151,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 _hsDirty = true;
                 ev = new HudPhaseEvent { Phase = phase, Prev = _hs.PrevPhase, Since = now, InGame = _hs.InGame, Area = _hs.Area };
             }
-            HudStateWrite();
+            HudStateWrite(final: true);
             HudStatePublish("hud.phase", ev);   // appended to events.jsonl: the next bridge load reads it back
         }
         catch (Exception ex) { LogError($"[HudState] close: {ex.GetType().Name}: {ex.Message}"); }
@@ -219,11 +222,14 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 }
             }
             catch (Exception ex) { err = $"{step}: {ex.GetType().Name}: {ex.Message}"; }
+            // The game's pid: once (the HUD stays attached to one process), retried every 5 s while unknown. Its failure
+            // is reported but never holds the phase.
             int? gamePid = null;
-            if (_hs.GamePid == null)
+            if (_hs.GamePid == null && _hsTicks % 20 == 1)
                 try { gamePid = GameController.Window.Process.Id; }
-                catch (Exception ex) { err ??= $"GameController.Window.Process.Id: {ex.GetType().Name}: {ex.Message}"; }
+                catch (Exception ex) { _hsReadError = $"GameController.Window.Process.Id: {ex.GetType().Name}: {ex.Message}"; _hsReadErrors++; }
             if (err != null) { _hsReadError = err; _hsReadErrors++; }
+            if (Volatile.Read(ref _hsClosed)) return;   // OnClose wrote the final phase
             HudStateNoteListener();
             var tcpWanted = Settings.EnableTcp.Value;
 
@@ -310,7 +316,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
     }
 
     /// <summary>Serialize under the state lock, write temp + replace under the write lock.</summary>
-    private void HudStateWrite()
+    private void HudStateWrite(bool final = false)
     {
         string json;
         lock (_hsLock)
@@ -323,6 +329,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
         {
             var path = HudStateFilePath;
             var tmp = path + ".tmp";
+            if (Volatile.Read(ref _hsClosed) && !final) return;   // a tick racing OnClose never overwrites the final phase
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
