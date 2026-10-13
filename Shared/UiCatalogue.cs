@@ -119,17 +119,20 @@ public partial class WhatsAnAiBridge
 
     private System.Threading.Tasks.Task? _ucLoading;
 
-    /// <summary>JIT-compiles the capture path ahead of its first frame (pool thread).</summary>
-    private static void UcPrepare()
+    /// <summary>Runs the capture path once off the frame (pool thread), so its JIT compiling (the callees and generic
+    /// instantiations too, ~6 ms measured live) never lands in a frame: a short walk of IngameUi merged into a scratch
+    /// catalogue. Read-only memory reads; anything failing just leaves the JIT to the first real capture.</summary>
+    private void UcPrepare()
     {
-        foreach (var name in new[] { nameof(UcStep), nameof(UcFinish), nameof(UcMerge), nameof(UiDetectsHover) })
-            try
-            {
-                var m = typeof(WhatsAnAiBridge).GetMethod(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static
-                                                                | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
-                if (m != null) System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(m.MethodHandle);
-            }
-            catch { }
+        try
+        {
+            if (GameController?.IngameState?.IngameUi is not UiElement root) return;
+            var o = new UcOpen { E = root, OpenedAt = DateTime.UtcNow, Walk = new UcWalk() };
+            o.Walk.Queue.Enqueue((root, [], false));
+            UcStep(o, Stopwatch.StartNew(), 3000);
+            if (o.Walk.Found.Count > 0) UcMerge(new UiCatalogueFile(), root, o, o.Walk.Found);
+        }
+        catch { }
     }
     private readonly object _ucLock = new();   // the catalogue: merges (main thread), the writer and queries
 
@@ -211,12 +214,12 @@ public partial class WhatsAnAiBridge
 
     /// <summary>Walks until the slice budget is spent; true when the walk is complete. Breadth-first over visible
     /// children, as guide.highlight's text search walks them, so a recipe finds the same element.</summary>
-    private bool UcStep(UcOpen o, Stopwatch sw)
+    private bool UcStep(UcOpen o, Stopwatch sw, double budgetUs = UcSliceUs)
     {
         var w = o.Walk!;
         while (w.Queue.Count > 0 && w.Visited < UcMaxVisit && w.Found.Count < UcMaxTexts)
         {
-            if (sw.Elapsed.TotalMilliseconds * 1000 > UcSliceUs) return false;
+            if (sw.Elapsed.TotalMilliseconds * 1000 > budgetUs) return false;
             var (e, path, parentHovers) = w.Queue.Dequeue();
             w.Visited++;
             // The panel root and big containers detect hover too: only the element itself or its direct parent count.
@@ -244,7 +247,7 @@ public partial class WhatsAnAiBridge
         {
             // The writer may hold the lock while it serializes: never wait in a frame, merge on a later one.
             if (!System.Threading.Monitor.TryEnter(_ucLock)) return false;
-            try { UcMerge(o.E, o, w.Found); }
+            try { UcMerge(Uc(), o.E, o, w.Found); }
             finally { System.Threading.Monitor.Exit(_ucLock); }
             o.LastHash = hash;
         }
@@ -252,7 +255,7 @@ public partial class WhatsAnAiBridge
         return true;
     }
 
-    private void UcMerge(UiElement root, UcOpen o, List<(string text, int[] path, float[]? rect, bool hover)> found)
+    private void UcMerge(UiCatalogueFile cat, UiElement root, UcOpen o, List<(string text, int[] path, float[]? rect, bool hover)> found)
     {
         // The title is the first visible text breadth-first: among the first texts guide.highlight's panel lookup reads
         // (PanelTexts, breadth-first too), so panel:title finds it. Not PanelTexts itself: it walks hidden children as well
@@ -265,7 +268,6 @@ public partial class WhatsAnAiBridge
         // An NPC dialogue is one panel for every NPC: its identity is the NPC.
         var key = o.Mapped == "NpcDialog" && !string.IsNullOrEmpty(npc) ? $"NpcDialog|{npc}" : $"{o.Mapped ?? "panel"}|{title}";
         var now = DateTime.UtcNow;
-        var cat = Uc();
         var entry = cat.Entries.FirstOrDefault(x => x.Key == key);
         if (entry == null)
         {
@@ -305,7 +307,7 @@ public partial class WhatsAnAiBridge
                 ? new UiHighlightRecipe { Text = text, Within = within }
                 : new UiHighlightRecipe { Panel = title, Child = path };
         }
-        _ucDirty = true;
+        if (cat == _uc) _ucDirty = true;
     }
 
     /// <summary>From ObsFlush: writes the catalogue when it changed (at most every 500 ms).</summary>
