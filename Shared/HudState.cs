@@ -97,7 +97,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
             }
             HudStateWrite();
         }
-        catch (Exception ex) { _hsWriteError = $"hud-state start: {ex.GetType().Name}: {ex.Message}"; LogError($"[HudState] {_hsWriteError}"); }
+        catch (Exception ex) { _hsWriteError = $"hud-state start: {ex.GetType().Name}: {ex.Message}"; LogFault($"[HudState] {_hsWriteError}", "hudstate"); }
     }
 
     /// <summary>End of Initialise: hook the listener, record listener-up, adopt a user restart from the board, start the timer.</summary>
@@ -111,7 +111,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
             _hsTimer?.Dispose();
             _hsTimer = new Timer(_ => HudStateTick(), null, HsTickMs, HsTickMs);
         }
-        catch (Exception ex) { LogError($"[HudState] after init: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[HudState] after init: {ex.GetType().Name}: {ex.Message}"); }
     }
 
     /// <summary>Bridge reload: stop the timer (the next load writes starting and carries the history over).</summary>
@@ -154,7 +154,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
             HudStateWrite(final: true);
             HudStatePublish("hud.phase", ev);   // appended to events.jsonl: the next bridge load reads it back
         }
-        catch (Exception ex) { LogError($"[HudState] close: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[HudState] close: {ex.GetType().Name}: {ex.Message}"); }
     }
 
     private bool HudStateAgentRestartNow()

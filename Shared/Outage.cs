@@ -242,7 +242,7 @@ public partial class WhatsAnAiBridge
     private void OutageToast(string kind, string title, string text, double holdSec, string? tag = null)
     {
         try { GuideLog(new JObject { ["text"] = text, ["kind"] = kind, ["title"] = title, ["holdSec"] = holdSec }, tag); }
-        catch (Exception ex) { LogError($"[Outage] toast '{title}': {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[Outage] toast '{title}': {ex.GetType().Name}: {ex.Message}"); }
     }
 
     // ── The incident board ───────────────────────────────────────────
@@ -300,7 +300,7 @@ public partial class WhatsAnAiBridge
         _outageResumeDownAt = phase == "down" ? inc!.Outage!.PhaseAt?.ToUniversalTime() : null;
         _outageResumeAgents = inc!.Outage!.Participants?.Values.Count(x => x != null && x.State is "busy" or "ready" or "idle") ?? 0;
         _outageResumeUpPosted = false;
-        LogMessage($"[Outage] {id} ({phase}): holding agents' HUD restarts until the player is in game");
+        LogQuiet($"[Outage] {id} ({phase}): holding agents' HUD restarts until the player is in game");
     }
 
     /// <summary>From the hud-state tick: renew the adopted lease while not in game, release it once ready; the resume toasts.</summary>
@@ -321,7 +321,7 @@ public partial class WhatsAnAiBridge
             }
             else l.Until = DateTime.UtcNow + OutageLeaseSpan;
         }
-        if (released != null) LogMessage($"[Outage] {released}: the player is in game, agents' HUD restarts are free again");
+        if (released != null) LogQuiet($"[Outage] {released}: the player is in game, agents' HUD restarts are free again");
     }
 
     /// <summary>
