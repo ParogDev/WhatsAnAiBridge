@@ -97,12 +97,16 @@ public partial class WhatsAnAiBridge
     private const int UcMaxVisit = 600, UcMaxDepth = 14, UcMaxTexts = 80, UcMaxEntries = 400, UcMaxOptions = 120, UcMaxCaptures = 40;
     /// <summary>Walk budget per frame, us: ~13 us per element, so ~40 elements a frame.</summary>
     private const double UcSliceUs = 500;
+    /// <summary>Child visibility checks per capture: bounds a panel with thousands of hidden children.</summary>
+    private const int UcMaxChildChecks = 3000;
+    /// <summary>An element with more children than this is not opened (counted in cost.lastSkippedBig).</summary>
+    private const int UcMaxChildren = 300;
     private readonly Dictionary<long, UcOpen> _ucOpen = new();
     private UiCatalogueFile? _uc;
     private bool _ucDirty, _ucMouseWasDown;
     private double _ucLastUs, _ucMaxUs, _ucMaxFrameUs, _ucFirstFrameUs;
     private long _ucLastBytes, _ucMaxBytes;
-    private int _ucLastVisited, _ucLastFrames, _ucCaptures;
+    private int _ucLastVisited, _ucLastFrames, _ucLastSkippedBig, _ucCaptures;
     private string? _ucLastError;
 
     private string UcPath => Path.Combine(ObsDir, "ui-catalogue.json");
@@ -215,7 +219,7 @@ public partial class WhatsAnAiBridge
         w.Us += us; w.Bytes += bytes; w.Frames++;
         if (done)
         {
-            (_ucLastUs, _ucLastBytes, _ucLastVisited, _ucLastFrames) = (w.Us, w.Bytes, w.Visited, w.Frames);
+            (_ucLastUs, _ucLastBytes, _ucLastVisited, _ucLastFrames, _ucLastSkippedBig) = (w.Us, w.Bytes, w.Visited, w.Frames, w.SkippedBig);
             _ucMaxUs = Math.Max(_ucMaxUs, w.Us);
             _ucMaxBytes = Math.Max(_ucMaxBytes, w.Bytes);
             _ucCaptures++;
@@ -226,7 +230,10 @@ public partial class WhatsAnAiBridge
     {
         public readonly Queue<(UiElement e, int[] path, bool parentHovers)> Queue = new();
         public readonly List<(string text, int[] path, float[]? rect, bool hover)> Found = [];
-        public int Visited, Frames;
+        public int Visited, Frames, KidIdx, KidChecks, SkippedBig;
+        public IList<UiElement>? Kids;   // children of the last element dequeued, checked a few per budget test
+        public int[] KidsPath = [];
+        public bool KidsHover;
         public double Us;
         public long Bytes;
     }
@@ -236,9 +243,19 @@ public partial class WhatsAnAiBridge
     private bool UcStep(UcOpen o, Stopwatch sw, double budgetUs = UcSliceUs)
     {
         var w = o.Walk!;
-        while (w.Queue.Count > 0 && w.Visited < UcMaxVisit && w.Found.Count < UcMaxTexts)
+        while (true)
         {
             if (sw.Elapsed.TotalMilliseconds * 1000 > budgetUs) return false;
+            // Children are checked a few at a time (a panel can hold thousands, each visibility check reads the element):
+            // measured live, enumerating one big panel's children in one go took 8 ms.
+            if (w.Kids != null)
+            {
+                for (var n = 0; n < 8 && w.KidIdx < w.Kids.Count; n++, w.KidIdx++, w.KidChecks++)
+                    if (w.Kids[w.KidIdx] is { Address: not 0 } c && c.IsVisibleLocal) w.Queue.Enqueue((c, [.. w.KidsPath, w.KidIdx], w.KidsHover));
+                if (w.KidIdx < w.Kids.Count && w.KidChecks < UcMaxChildChecks) continue;
+                w.Kids = null;
+            }
+            if (w.Queue.Count == 0 || w.Visited >= UcMaxVisit || w.Found.Count >= UcMaxTexts) break;
             var (e, path, parentHovers) = w.Queue.Dequeue();
             w.Visited++;
             // The panel root and big containers detect hover too: only the element itself or its direct parent count.
@@ -249,10 +266,10 @@ public partial class WhatsAnAiBridge
             if (!string.IsNullOrEmpty(t) && t.Length <= 120) { float[]? r = null; try { var cr = e.GetClientRect(); r = [cr.X, cr.Y, cr.Width, cr.Height]; } catch { } w.Found.Add((t, path, r, hovers || parentHovers)); }
             if (path.Length >= UcMaxDepth) continue;
             IList<UiElement>? cs = null;
-            try { cs = e.Children; } catch { }
-            if (cs == null) continue;
-            for (var i = 0; i < cs.Count; i++)
-                if (cs[i] is { Address: not 0 } c && c.IsVisibleLocal) w.Queue.Enqueue((c, [.. path, i], hovers));
+            // Listing children builds one wrapper per child in one call: an element with hundreds (world labels, item
+            // grids' backing lists) is a container, not an option list, and is not opened.
+            try { if (e.ChildCount is > 0 and <= UcMaxChildren) cs = e.Children; else if (e.ChildCount > UcMaxChildren) w.SkippedBig++; } catch { }
+            if (cs is { Count: > 0 } && w.KidChecks < UcMaxChildChecks) (w.Kids, w.KidsPath, w.KidIdx, w.KidsHover) = (cs, path, 0, hovers);
         }
         return true;
     }
@@ -393,7 +410,7 @@ public partial class WhatsAnAiBridge
             {
                 ["captures"] = _ucCaptures, ["lastUs"] = Math.Round(_ucLastUs), ["maxUs"] = Math.Round(_ucMaxUs),
                 ["lastBytes"] = _ucLastBytes, ["maxBytes"] = _ucMaxBytes, ["lastVisited"] = _ucLastVisited,
-                ["lastFrames"] = _ucLastFrames, ["maxFrameUs"] = Math.Round(_ucMaxFrameUs), ["firstCaptureFrameUs"] = Math.Round(_ucFirstFrameUs), ["sliceUs"] = UcSliceUs,
+                ["lastFrames"] = _ucLastFrames, ["lastSkippedBig"] = _ucLastSkippedBig, ["maxFrameUs"] = Math.Round(_ucMaxFrameUs), ["firstCaptureFrameUs"] = Math.Round(_ucFirstFrameUs), ["sliceUs"] = UcSliceUs,
             },
             ["openNow"] = _ucOpen.Count,
         };
