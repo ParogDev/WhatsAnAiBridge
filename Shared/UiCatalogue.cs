@@ -103,7 +103,8 @@ public partial class WhatsAnAiBridge
     private const int UcMaxChildren = 300;
     private readonly Dictionary<long, UcOpen> _ucOpen = new();
     private UiCatalogueFile? _uc;
-    private bool _ucDirty, _ucMouseWasDown;
+    private bool _ucDirty, _ucMouseWasDown, _ucWarmed;
+    private double _ucWarmUs;
     private double _ucLastUs, _ucMaxUs, _ucMaxFrameUs, _ucFirstFrameUs;
     private long _ucLastBytes, _ucMaxBytes;
     private int _ucLastVisited, _ucLastFrames, _ucLastSkippedBig, _ucCaptures;
@@ -168,6 +169,28 @@ public partial class WhatsAnAiBridge
     /// <summary>From ObserveTick, every frame while observing: due captures, and a capture after each click.</summary>
     private void UcTick(DateTime now)
     {
+        if (!_ucWarmed)
+        {
+            // First observer tick of this HUD load (the HUD is just starting: its own startup hitches dwarf this): one
+            // short real walk of IngameUi on this thread JIT-compiles the HUD element calls the walk makes. Measured live,
+            // leaving that to the first capture cost one 6.5-8.5 ms frame while playing; pool-thread warm-ups that touch
+            // no UI only got part of it, and a walk off the render thread races the HUD's element caches.
+            _ucWarmed = true;
+            _ucLoading ??= System.Threading.Tasks.Task.Run(() => { UcPrepare(); Uc(); });
+            var sw0 = Stopwatch.StartNew();
+            try
+            {
+                if (GameController?.IngameState?.IngameUi is UiElement ui)
+                {
+                    var wo = new UcOpen { E = ui, OpenedAt = DateTime.UtcNow, Walk = new UcWalk() };
+                    wo.Walk.Queue.Enqueue((ui, [], false));
+                    UcStep(wo, sw0, 3000);
+                }
+            }
+            catch { }
+            _ucWarmUs = sw0.Elapsed.TotalMilliseconds * 1000;
+            return;
+        }
         if (_ucOpen.Count == 0) { _ucMouseWasDown = false; return; }
         // The catalogue file is read (and Newtonsoft warmed up) on a pool thread, never in a frame.
         // The capture code is JIT-compiled there too: its first run in a frame cost ~7 ms of compiling, measured live.
@@ -410,7 +433,7 @@ public partial class WhatsAnAiBridge
             {
                 ["captures"] = _ucCaptures, ["lastUs"] = Math.Round(_ucLastUs), ["maxUs"] = Math.Round(_ucMaxUs),
                 ["lastBytes"] = _ucLastBytes, ["maxBytes"] = _ucMaxBytes, ["lastVisited"] = _ucLastVisited,
-                ["lastFrames"] = _ucLastFrames, ["lastSkippedBig"] = _ucLastSkippedBig, ["maxFrameUs"] = Math.Round(_ucMaxFrameUs), ["firstCaptureFrameUs"] = Math.Round(_ucFirstFrameUs), ["sliceUs"] = UcSliceUs,
+                ["lastFrames"] = _ucLastFrames, ["lastSkippedBig"] = _ucLastSkippedBig, ["maxFrameUs"] = Math.Round(_ucMaxFrameUs), ["firstCaptureFrameUs"] = Math.Round(_ucFirstFrameUs), ["warmUpUs"] = Math.Round(_ucWarmUs), ["sliceUs"] = UcSliceUs,
             },
             ["openNow"] = _ucOpen.Count,
         };
