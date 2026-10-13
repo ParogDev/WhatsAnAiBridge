@@ -27,6 +27,7 @@ public partial class WhatsAnAiBridge
 {
     private static readonly HashSet<string> WalkPlumbingTypes = new(StringComparer.Ordinal) { "Memory", "IMemory", "GameController", "TheGame" };
     private const int WalkMaxErrors = 20;
+    private const int WalkMaxAliases = 30;
 
     private string? ProcessObjectSearchMethod(string method, JToken? p) => method switch
     {
@@ -86,6 +87,7 @@ public partial class WhatsAnAiBridge
         result.Budget = walk.Budget;
         result.Truncated = walk.Truncated;
         result.Errors = walk.Errors;
+        result.Aliases = walk.Aliases;
         return Serialize(result);
     }
 
@@ -143,6 +145,7 @@ public partial class WhatsAnAiBridge
         result.Budget = walk.Budget;
         result.Truncated = walk.Truncated;
         result.Errors = walk.Errors;
+        result.Aliases = walk.Aliases;
         return Serialize(result);
     }
 
@@ -202,9 +205,11 @@ public partial class WhatsAnAiBridge
         public readonly ObjectWalkBudgetDto Budget;
         public ObjectWalkTruncationDto? Truncated;
         public List<ObjectWalkErrorDto>? Errors;
+        public List<ObjectWalkAliasDto>? Aliases;
 
-        private readonly HashSet<object> _seenRefs = new(ReferenceEqualityComparer.Instance);
-        private readonly HashSet<(Type, long)> _seenAddr = new();
+        // Value -> where it was first met (walker path, else C#).
+        private readonly Dictionary<object, string> _seenRefs = new(ReferenceEqualityComparer.Instance);
+        private readonly Dictionary<(Type, long), string> _seenAddr = new();
         private readonly Stopwatch _sw = new();
 
         public ObjectWalk(int depth, int maxNodes, int timeMs, int listLimit, bool components)
@@ -221,7 +226,7 @@ public partial class WhatsAnAiBridge
             try
             {
                 if (root == null || !IsExpandableValue(root)) return;
-                Remember(root);
+                Remember(root, path, out _);
                 var queue = new Queue<Node>();
                 queue.Enqueue(new Node { Value = root, Path = path, Csharp = csharp, Key = "", Level = 0 });
                 var kids = new List<WalkChild>();
@@ -249,7 +254,11 @@ public partial class WhatsAnAiBridge
                         {
                             if (child.Name == "Owner" || WalkPlumbingTypes.Contains(child.Value.GetType().Name)) { Budget.Plumbing++; child.Skipped = true; }
                             else if (child.Level >= Depth) Budget.AtDepthLimit++;
-                            else if (!Remember(child.Value)) { Budget.Cycles++; child.Skipped = true; }
+                            else if (!Remember(child.Value, child.Path ?? child.Csharp, out var first))
+                            {
+                                Budget.Cycles++; child.Skipped = true;
+                                Alias(child.Path ?? child.Csharp, first!);
+                            }
                             else
                             {
                                 child.WillOpen = true;
@@ -273,13 +282,30 @@ public partial class WhatsAnAiBridge
         private void Stop(string reason, Node at, int pending, string hint)
             => Truncated = new ObjectWalkTruncationDto { Reason = reason, At = at.Path ?? at.Csharp, Pending = pending, Hint = hint };
 
-        /// <summary>False when the value was opened before (same reference, or same type at the same nonzero Address).</summary>
-        private bool Remember(object value)
+        /// <summary>
+        /// False when the value was queued before (same reference, or same type at the same nonzero Address); then
+        /// <paramref name="first"/> is where. Reference types only: a boxed struct is a new box per read.
+        /// </summary>
+        private bool Remember(object value, string label, out string? first)
         {
+            first = null;
             var t = value.GetType();
-            if (!t.IsValueType && !_seenRefs.Add(value)) return false;
-            if (!t.IsValueType && value is not ICollection && MemoryObjects.Address(value) is { } a && a != 0 && !_seenAddr.Add((t, a))) return false;
+            if (t.IsValueType) return true;
+            if (_seenRefs.TryGetValue(value, out first)) return false;
+            if (value is not ICollection && MemoryObjects.Address(value) is { } a && a != 0)
+            {
+                if (_seenAddr.TryGetValue((t, a), out first)) return false;
+                _seenAddr[(t, a)] = label;
+            }
+            _seenRefs[value] = label;
             return true;
+        }
+
+        /// <summary>A second path to an object already opened elsewhere (not a back-reference to an ancestor): worth naming.</summary>
+        private void Alias(string label, string first)
+        {
+            if (label.StartsWith(first, StringComparison.Ordinal)) return;   // a member pointing back up its own chain
+            if ((Aliases ??= new()).Count < WalkMaxAliases) Aliases.Add(new ObjectWalkAliasDto { Path = label, SameAs = first });
         }
 
         /// <summary>Reads the node's children into <paramref name="into"/>; false when the time budget ran out part way.</summary>

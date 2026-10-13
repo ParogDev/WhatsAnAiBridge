@@ -1079,6 +1079,18 @@ public class ObjectWalkErrorDto
     public string Message { get; set; } = "";
 }
 
+/// <summary>An object reached by a second path and not opened again (the cycle guard): matches inside it are listed under SameAs.</summary>
+public class ObjectWalkAliasDto
+{
+    /// <summary>The second path (walker path, else C#).</summary>
+    [JsonProperty("path")]
+    public string Path { get; set; } = "";
+
+    /// <summary>Where the walk opened it first.</summary>
+    [JsonProperty("sameAs")]
+    public string SameAs { get; set; } = "";
+}
+
 public class ObjectFindMatchDto
 {
     /// <summary>Walker path; null where the walker cannot address it (items of an indexed path, sequences).</summary>
@@ -1136,6 +1148,10 @@ public class ObjectFindResponse
     [JsonProperty("errors", NullValueHandling = NullValueHandling.Ignore)]
     public List<ObjectWalkErrorDto>? Errors { get; set; }
 
+    /// <summary>Objects reached again by another path (first 30): matches inside them appear under sameAs only.</summary>
+    [JsonProperty("aliases", NullValueHandling = NullValueHandling.Ignore)]
+    public List<ObjectWalkAliasDto>? Aliases { get; set; }
+
     [JsonProperty("game")]
     public string Game { get; set; } = "";
 }
@@ -1168,6 +1184,10 @@ public class ObjectSnapshotResponse
 
     [JsonProperty("errors", NullValueHandling = NullValueHandling.Ignore)]
     public List<ObjectWalkErrorDto>? Errors { get; set; }
+
+    /// <summary>Objects reached again by another path (first 30): matches inside them appear under sameAs only.</summary>
+    [JsonProperty("aliases", NullValueHandling = NullValueHandling.Ignore)]
+    public List<ObjectWalkAliasDto>? Aliases { get; set; }
 
     [JsonProperty("game")]
     public string Game { get; set; } = "";
