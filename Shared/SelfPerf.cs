@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using Newtonsoft.Json.Linq;
@@ -18,6 +19,28 @@ public partial class WhatsAnAiBridge
     private long _selfFrames, _selfSince = Stopwatch.GetTimestamp();
 
     private static (long t, long a) SelfStart() => (Stopwatch.GetTimestamp(), GC.GetAllocatedBytesForCurrentThread());
+
+    // Bridge requests (eval, explore, ...) per kind: they run outside the Render steps (Tick, or the watchdog thread),
+    // one at a time under _requestLock. Key: the method, "query:<type>" for queries (eval, describe, entities...).
+    private readonly Dictionary<string, long[]> _selfRequests = new(StringComparer.Ordinal);
+
+    private void SelfRequest(string method, JToken? p, (long t, long a) s)
+    {
+        var ticks = Stopwatch.GetTimestamp() - s.t;
+        var bytes = GC.GetAllocatedBytesForCurrentThread() - s.a;
+        var key = method;
+        if (method == "query" && p?["type"]?.Type == JTokenType.String)
+        {
+            var type = p["type"]!.Value<string>()!;
+            var colon = type.IndexOf(':');
+            key = "query:" + (colon < 0 ? type : type[..colon]);
+        }
+        lock (_selfRequests)
+        {
+            if (!_selfRequests.TryGetValue(key, out var row)) _selfRequests[key] = row = new long[3];
+            row[0]++; row[1] += ticks; row[2] += bytes;
+        }
+    }
 
     private void SelfEnd(int step, (long t, long a) s)
     {
@@ -46,6 +69,17 @@ public partial class WhatsAnAiBridge
             ["statsRawCheck"] = JObject.FromObject(StatsRawStatus()),
             ["hudState"] = HudStateSelfPerf(),   // the phase tracker (HudState.cs): reads, writes, the broken link
         };
+        lock (_selfRequests)
+        {
+            // Bridge requests since the previous call (outside the per-frame steps): calls, average us and bytes per call.
+            o["requests"] = new JObject(_selfRequests.OrderByDescending(kv => kv.Value[1]).Select(kv => new JProperty(kv.Key, new JObject
+            {
+                ["calls"] = kv.Value[0],
+                ["usPerCall"] = Math.Round(kv.Value[1] * 1e6 / Stopwatch.Frequency / kv.Value[0], 1),
+                ["bytesPerCall"] = kv.Value[2] / kv.Value[0],
+            })));
+            _selfRequests.Clear();
+        }
         Array.Clear(_selfTicks); Array.Clear(_selfBytes); _selfFrames = 0; _selfSince = Stopwatch.GetTimestamp();
         return o.ToString(Newtonsoft.Json.Formatting.None);
     }

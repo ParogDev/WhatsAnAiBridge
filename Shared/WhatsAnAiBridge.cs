@@ -268,7 +268,9 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             {
                 _reqClientId = request.ClientId;   // who is asking (Sessions.cs); requests run one at a time under _requestLock
                 SessionTouch();
+                var perf = SelfStart();
                 var result = ProcessTcpRequest(request.Method, request.Params);
+                SelfRequest(request.Method, request.Params, perf);   // bridge.self_perf "requests"
                 request.Response.TrySetResult(result);
 
                 _status.TotalQueries++;
