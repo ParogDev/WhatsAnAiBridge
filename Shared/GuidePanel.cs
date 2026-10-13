@@ -97,6 +97,7 @@ public partial class WhatsAnAiBridge
         // sheet - or above the card when there is no room), and its wrapped content, rebuilt only when the texts change.
         public float HoverX, HoverBelowY, HoverAboveY;
         public string? HoverTitleSrc, HoverBodySrc, HoverNoteSrc, HoverFootSrc, HoverTitleCaps;
+        public string? HoverTitleClipSrc; public float HoverTitleClipW = -1, HoverTitleClipF = -1; public string HoverTitleClip = "";   // the caps title clipped to the panel
         public readonly List<string> HoverLines = new();
         public readonly List<byte> HoverKinds = new();   // per line: 0 body, 1 note, 2 foot
         public float HoverTextW;
@@ -1020,7 +1021,13 @@ public partial class WhatsAnAiBridge
         var y = min.Y + pad;
         if (u.HoverTitleCaps != null)
         {
-            var t = GuideClipTracked(u.HoverTitleCaps, font, f, GuideToastTitleTrack, w - GuideToastStripe - pad * 2);
+            var tw = w - GuideToastStripe - pad * 2;
+            if (!ReferenceEquals(u.HoverTitleClipSrc, u.HoverTitleCaps) || u.HoverTitleClipW != tw || u.HoverTitleClipF != f)
+            {
+                u.HoverTitleClipSrc = u.HoverTitleCaps; u.HoverTitleClipW = tw; u.HoverTitleClipF = f;
+                u.HoverTitleClip = GuideClipTracked(u.HoverTitleCaps, font, f, GuideToastTitleTrack, tw);
+            }
+            var t = u.HoverTitleClip;
             var tcol = U(GuideToastText);
             GuideTrackedText(dl, font, f, new Vector2(x, y), tcol, t, GuideToastTitleTrack);
             GuideTrackedText(dl, font, f, new Vector2(x + 0.6f, y), tcol, t, GuideToastTitleTrack);

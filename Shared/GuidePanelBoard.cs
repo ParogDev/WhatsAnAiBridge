@@ -209,7 +209,14 @@ public partial class WhatsAnAiBridge
                 ? "MCP " + build + ": all " + ro.Total + " on it" : "MCP " + build + ": " + ro.OnDeployed + " of " + ro.Total + " on it";
             if (ro.Behind.Length > 0) foot += ", " + ro.Behind.Length + " swapping";
             if (ro.Local.Length > 0) foot += ", " + ro.Local.Length + " local";
-            if (ro.Unsupervised.Length > 0) foot += ", " + ro.Unsupervised.Length + " need a session restart (" + string.Join(", ", Array.ConvertAll(ro.Unsupervised, l => ag.NameOf(l))) + ")";
+            if (ro.Unsupervised.Length > 0)
+            {
+                // A loop, not a lambda: a lambda capturing a parameter makes the compiler allocate its closure at the method's
+                // entry, so every frame paid for it, the early return included.
+                sb.Clear().Append(foot).Append(", ").Append(ro.Unsupervised.Length).Append(" need a session restart (");
+                for (var i = 0; i < ro.Unsupervised.Length; i++) sb.Append(i > 0 ? ", " : "").Append(ag.NameOf(ro.Unsupervised[i]));
+                foot = sb.Append(')').ToString();
+            }
             b.Foot1 = foot;
         }
         b.Foot2 = infra != null ? "Shared server: " + infra : b.Empty ? BoardEmptyFoot : null;
