@@ -42,6 +42,7 @@ public partial class WhatsAnAiBridge
     private readonly Dictionary<string, (DateTime at, int skipped, string last)> _faultSeen = new();
     private readonly HashSet<string> _faultToasted = new();
     private Timer? _faultFlushTimer;
+    private bool _faultClosed;   // HudLogStop ran: this instance is closing or being replaced by a reload
 
     /// <summary>Routine diagnostics: the HUD log file only (hud_log), never the player's screen.</summary>
     internal void LogQuiet(string msg)
@@ -60,13 +61,17 @@ public partial class WhatsAnAiBridge
         var now = DateTime.UtcNow;
         lock (_faultLock)
         {
-            if (_faultSeen.TryGetValue(key, out var seen) && (now - seen.at).TotalSeconds < FaultRepeatSec)
+            // Once closing (HudLogStop), every fault is written and no timer starts: it would keep this instance alive.
+            if (!_faultClosed)
             {
-                _faultSeen[key] = (seen.at, seen.skipped + 1, msg);
-                return;
+                if (_faultSeen.TryGetValue(key, out var seen) && (now - seen.at).TotalSeconds < FaultRepeatSec)
+                {
+                    _faultSeen[key] = (seen.at, seen.skipped + 1, msg);
+                    return;
+                }
+                _faultSeen[key] = (now, 0, msg);
+                _faultFlushTimer ??= new Timer(_ => FlushFaultRepeats(), null, 1000, 1000);
             }
-            _faultSeen[key] = (now, 0, msg);
-            _faultFlushTimer ??= new Timer(_ => FlushFaultRepeats(), null, 1000, 1000);
         }
         if (!WriteLogFile(true, LogPrefix + msg)) LogError(msg);
     }
@@ -103,7 +108,7 @@ public partial class WhatsAnAiBridge
     private void HudLogStop()
     {
         Timer? t;
-        lock (_faultLock) { t = _faultFlushTimer; _faultFlushTimer = null; }
+        lock (_faultLock) { _faultClosed = true; t = _faultFlushTimer; _faultFlushTimer = null; }
         t?.Dispose();
         FlushFaultRepeatsNow();
     }
@@ -129,7 +134,11 @@ public partial class WhatsAnAiBridge
             if (key == ToastKeyF8 && _faultToasted.Contains(ToastKeyTcp)) return;
             if (!_faultToasted.Add(key)) return;
         }
-        try { GuideLog(new Newtonsoft.Json.Linq.JObject { ["text"] = toast, ["kind"] = kind, ["title"] = title, ["holdSec"] = holdSec }); }
+        try
+        {
+            var r = GuideLog(new Newtonsoft.Json.Linq.JObject { ["text"] = toast, ["kind"] = kind, ["title"] = title, ["holdSec"] = holdSec });
+            if (r["error"] != null) LogFault($"[Toast] '{title}' could not be posted: {r["error"]}");
+        }
         catch (Exception ex) { LogFault($"[Toast] '{title}' could not be posted: {ex.GetType().Name}: {ex.Message}"); }
     }
 
