@@ -76,6 +76,9 @@ public class HudStateDto
     [JsonProperty("typicalStartupSec")] public double? TypicalStartupSec { get; set; }
     /// <summary>On restarting | user-restart | closed: agent-restart | user-restart | unknown.</summary>
     [JsonProperty("closeReason")] public string? CloseReason { get; set; }
+    /// <summary>The previous HUD's closeReason (agent-restart | user-restart | unknown), null when it wrote none. Set in
+    /// Initialise and kept in every write of this HUD run, so restart-hud.ps1's post-start hold can tell a manual restart.</summary>
+    [JsonProperty("prevCloseReason")] public string? PrevCloseReason { get; set; }
     /// <summary>The last off-thread read that failed, naming the link (null while reads work).</summary>
     [JsonProperty("error")] public string? Error { get; set; }
     [JsonExtensionData] public IDictionary<string, JToken>? Extra { get; set; }

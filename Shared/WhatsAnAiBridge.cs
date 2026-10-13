@@ -263,7 +263,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         while (processed < 5 && sw.ElapsedMilliseconds < 150 && server.PendingRequests.TryDequeue(out var request))
         {
             processed++;
-            if (request.Abandoned) continue;   // answered from the listener already (-32010 hud_loading, HudState.cs)
+            if (!request.TryClaimRun()) continue;   // answered from the listener already (-32010 hud_loading / timeout, HudState.cs)
             try
             {
                 _reqClientId = request.ClientId;   // who is asking (Sessions.cs); requests run one at a time under _requestLock

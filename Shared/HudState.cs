@@ -23,7 +23,8 @@ namespace WhatsAnAiBridge;
 ///     the previous file; a bridge reload in the same HUD process keeps the previous startup and adds no sample) and
 ///     typicalStartupSec (their median).
 ///   - OnClose writes restarting (restart-state.json phase stopping in the last 3 min: an agent or script restart),
-///     user-restart (an open outage incident for this game on the board) or closed, with closeReason.
+///     user-restart (an open outage incident for this game on the board in phase down | waitingGame) or closed, with
+///     closeReason. Initialise carries the previous file's closeReason as prevCloseReason for the whole HUD run.
 ///   - the listener (TcpBridgeServer.Live) answers hud.state itself, adds phase / phaseSinceMs / tickAgeMs to status, answers
 ///     a queued request still waiting after ~1.5 s with -32010 hud_loading while the phase is loading or starting, and
 ///     gives the 10 s timeout a message and data that say frozen vs loading vs busy.
@@ -88,6 +89,9 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                     Startup = _hsReload && prev!.Startup != null ? prev.Startup : new HudStartupDto { ProcessStartedAt = processStart, InitAt = now },
                     RecentStartupSec = recent, TypicalStartupSec = HsMedian(recent),
                     Error = _hsReadError,
+                    // Why the previous HUD closed, kept for this whole HUD run (restart-hud.ps1's post-start hold reads it).
+                    // A bridge reload's previous file is this run's own close: carry the run's value instead.
+                    PrevCloseReason = _hsReload ? prev!.PrevCloseReason : prev?.CloseReason,
                 };
                 _hsSinceTs = Stopwatch.GetTimestamp();
                 _hsLoadTs = 0;
@@ -123,7 +127,9 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
 
     /// <summary>
     /// OnClose: restarting (an agent or script restart: restart-state.json phase stopping in the last 3 min), user-restart
-    /// (an open outage incident for this game on the board) or closed (by hand, unannounced), written synchronously.
+    /// (an open outage incident for this game on the board in phase down or waitingGame: the user restarts by hand) or
+    /// closed (by hand, unannounced), written synchronously. An outage still announced / holding is not the user's restart
+    /// yet: that close follows the ordinary rules.
     /// </summary>
     private void HudStateClose()
     {
@@ -133,7 +139,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
         {
             string phase, reason;
             if (HudStateAgentRestartNow()) { phase = "restarting"; reason = "agent-restart"; }
-            else if (OutageOpenOnBoard(out _, out _)) { phase = "user-restart"; reason = "user-restart"; }
+            else if (OutageOpenOnBoard(out _, out var outagePhase) && outagePhase is ("down" or "waitingGame")) { phase = "user-restart"; reason = "user-restart"; }
             else { phase = "closed"; reason = "unknown"; }
             HudPhaseEvent ev;
             lock (_hsLock)
@@ -242,7 +248,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 var nowTs = Stopwatch.GetTimestamp();
                 var prevPhase = _hs.Phase;
                 var phase = tcpWanted && !_hs.ListenerUp ? "starting"
-                    : err != null ? (prevPhase is "starting" ? "menu" : prevPhase)   // a failed read keeps what we knew
+                    : err != null ? prevPhase   // a failed read keeps what we knew (starting stays starting until a read works)
                     : loading ? "loading" : !inGame ? "menu" : "ready";
                 if (gamePid != null) _hs.GamePid = gamePid;
                 _hs.Error = err;
