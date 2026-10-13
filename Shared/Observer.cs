@@ -34,8 +34,7 @@ public partial class WhatsAnAiBridge
     private long _obsSeq;
     private DateTime _obsLastTick = DateTime.MinValue, _obsLastEntities = DateTime.MinValue, _obsLastPanels = DateTime.MinValue;
     private Dictionary<long, bool>? _obsVisible;              // top-level panel address -> visible
-    private Dictionary<long, (int index, UiElement e)>? _obsKids;   // top-level panels by address, listed once a second
-    private DateTime _obsKidsAt;
+    private DateTime _obsKidsAt;   // top-level panels (ObservePanelsRaw.cs) re-listed once a second
     private readonly HashSet<string> _obsUnmappedSeen = new();   // by first text (stable when indexes shift), else "#index"
     private readonly Dictionary<long, string> _obsPanelNames = new();   // address -> property name seen when it opened
     private readonly HashSet<string> _obsEntityTypes = new();
@@ -292,28 +291,26 @@ public partial class WhatsAnAiBridge
     {
         var ui = GameController.IngameState?.IngameUi;
         if (ui == null) return;
-        // The top-level children (~120 wrapper objects, ~13 KB) are listed once a second, not on every 10 Hz scan:
-        // panels are created at area load and then only shown and hidden.
+        // The top-level children are re-listed once a second, not on every 10 Hz scan (panels are created at area load
+        // and then only shown and hidden); the slots and the batched read plan are rebuilt only when the list changed.
         var at = DateTime.UtcNow;
-        if (_obsKids == null || _obsVisible == null || (at - _obsKidsAt).TotalSeconds >= 1)
+        if (_obsKidAddr.Length == 0 || _obsVisible == null || (at - _obsKidsAt).TotalSeconds >= 1)
         {
             _obsKidsAt = at;
-            var kids = ui.Children;
-            _obsKids = new Dictionary<long, (int index, UiElement e)>();
-            for (int i = 0; i < kids.Count; i++)
-                if (kids[i] is { Address: not 0 } k) _obsKids[k.Address] = (i, k);
+            ObsRelistKids(ui.Children);
         }
-        var now = _obsKids;
-        if (_obsFlagOff == -1) ObsCalibrateFlag(now.Values.Select(v => v.e).ToList());
+        if (_obsFlagOff == -1) ObsCalibrateFlag(_obsKidEl.ToList());
+        ObsReadVisible();
         if (_obsVisible == null)
         {
-            _obsVisible = now.ToDictionary(kv => kv.Key, kv => ObsVisible(kv.Value.e));
+            _obsVisible = new Dictionary<long, bool>(_obsKidAddr.Length);
+            for (var i = 0; i < _obsKidAddr.Length; i++) _obsVisible[_obsKidAddr[i]] = _obsVisNow[i];
             return;
         }
         Dictionary<long, string>? names = null;
-        foreach (var (addr, (index, e)) in now)
+        for (var slot = 0; slot < _obsKidAddr.Length; slot++)
         {
-            var vis = ObsVisible(e);
+            var (addr, index, e, vis) = (_obsKidAddr[slot], _obsKidIdx[slot], _obsKidEl[slot], _obsVisNow[slot]);
             var known = _obsVisible.TryGetValue(addr, out var was);
             if (known && was == vis) continue;
             _obsVisible[addr] = vis;
