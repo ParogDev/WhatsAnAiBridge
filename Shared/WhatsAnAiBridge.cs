@@ -99,19 +99,51 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         InstrStartup();   // patches a previous load of the bridge left in this HUD process (Instrumentation.cs)
         try { PubRegister(); } catch (Exception ex) { ToastF8RegisterFailed($"[PubSub] queueing the pub/sub log read failed: {ex.Message}"); }
         WorkRegister();
-        // The PluginBridge methods other plugins call ([BridgeExport] in PubSub.cs, Work.cs; generated at compile time).
-        try
-        {
-            if (GameController.PluginBridge == null) ToastF8RegisterFailed($"[PluginBridge] GameController.PluginBridge is null: {string.Join(", ", BridgeExports.All)} not registered");
-            else BridgeExports.Register(this, GameController.PluginBridge);
-        }
-        catch (Exception ex) { ToastF8RegisterFailed($"[PluginBridge] registering {string.Join(", ", BridgeExports.All)} failed: {ex.Message}"); }
+        RegisterBridgeExports();
 
         HudStateAfterInit();   // listener-side hud.state, the 4 Hz phase tracker, a user restart adopted from the board (HudState.cs, Outage.cs)
         // Build the type-by-name index off the main thread now, so the first GetComponent<T> / explore doesn't pay for it.
         System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { _ = MemberIndex.Types; } catch (Exception ex) { LogFault($"[MemberIndex] type index build failed: {ex.Message}"); } });
 
         return true;
+    }
+
+    /// <summary>
+    /// The PluginBridge methods other plugins call ([BridgeExport] in PubSub.cs, Work.cs; the registrar is generated at
+    /// compile time). The generated Register saves all four in one call, so it is followed by the lookup each consumer
+    /// does, typed as the consumers type it: every export a consumer's GetMethod&lt;T&gt; would miss (not saved, another
+    /// delegate type, still an earlier load's delegate) is named on its own, whatever happened to the others.
+    /// </summary>
+    private void RegisterBridgeExports()
+    {
+        var bridge = GameController.PluginBridge;
+        if (bridge == null)
+        {
+            ToastF8RegisterFailed($"[PluginBridge] GameController.PluginBridge is null: {string.Join(", ", BridgeExports.All)} not registered");
+            return;
+        }
+        string? registerError = null;
+        try { BridgeExports.Register(this, bridge); }
+        catch (Exception ex) { registerError = $"{ex.GetType().Name}: {ex.Message}"; }
+
+        var failed = new List<string>(0);
+        void Check<T>(string name) where T : Delegate
+        {
+            object? saved;
+            try { saved = bridge.GetMethod<object>(name); }
+            catch (Exception ex) { failed.Add($"{name} (lookup threw {ex.GetType().Name}: {ex.Message})"); return; }
+            if (saved == null) failed.Add($"{name} (not saved)");
+            else if (saved is not T typed) failed.Add($"{name} (saved as {saved.GetType().Name}, consumers ask for {typeof(T).Name})");
+            else if (!ReferenceEquals(typed.Target, this)) failed.Add($"{name} (still the delegate of an earlier bridge load)");
+        }
+        // The types other plugins pass to GetMethod<T> (README / CLAUDE.md "Plugin pub/sub" and "Work items").
+        Check<Func<string, string, string>>(PublishMethodName);
+        Check<Func<string, string, Action<string>?, string>>(SubscribeMethodName);
+        Check<Func<string>>(WorkListMethodName);
+        Check<Func<string, string, string>>(HighlightForMethodName);
+        if (failed.Count > 0 || registerError != null)
+            ToastF8RegisterFailed($"[PluginBridge] {failed.Count} of 4 exports unusable: {(failed.Count > 0 ? string.Join("; ", failed) : "none")}"
+                + (registerError != null ? $" (BridgeExports.Register threw {registerError})" : ""));
     }
 
     private void StartTcpServer()
@@ -142,6 +174,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         HudLogStop();   // the repeat-count timer (HudLog.cs)
         PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
         WorkClose();  // and AIBridge.WorkList / AIBridge.HighlightFor (Work.cs)
+        SettingsMenu.FaultSink = null;   // a static holding this load's LogFault; DrawSettings sets it again
         _tcpServer?.Dispose();
         _tcpServer = null;
         RecordingCut("hud_closing");
@@ -159,6 +192,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         HudLogStop();   // the repeat-count timer (HudLog.cs)
         PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
         WorkClose();  // and AIBridge.WorkList / AIBridge.HighlightFor (Work.cs)
+        SettingsMenu.FaultSink = null;
         _tcpServer?.Dispose();
         _tcpServer = null;
         RecordingCut("bridge_reload");
@@ -481,12 +515,10 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void DrawSettings()
     {
-        if (_settingsUi == null)
-        {
-            SettingsMenu.FaultSink = msg => LogFault(msg, "settings-menu");   // never the HUD's top-left lines
-            _settingsUi = new WhatsAnAiBridgeSettingsUi { SetStatsPanelOpen = open => SetStatsView(null, null, open) };
-        }
-        _settingsUi.Draw(Settings, _status, _queryLog);
+        // Checked every draw, not only when the UI is created: OnClose clears the static so it never pins this load.
+        SettingsMenu.FaultSink ??= msg => LogFault(msg, "settings-menu");   // never the HUD's top-left lines
+        _settingsUi ??= new WhatsAnAiBridgeSettingsUi { SetStatsPanelOpen = open => SetStatsView(null, null, open) };
+        _settingsUi.Draw(Settings, _status, _queryLog, _bridgeDir);
     }
 
     // ── Query processor ─────────────────────────────────────────────

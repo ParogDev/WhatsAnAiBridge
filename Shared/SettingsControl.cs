@@ -22,7 +22,9 @@ internal sealed class SettingPermissionAttribute : Attribute { }
 /// shape (ToggleNode, RangeNode&lt;T&gt;, TextNode, ListNode, ColorNode, HotkeyNode*, ButtonNode); labels and tooltips
 /// come from the HUD's own [Menu] attribute, the group from a nested settings object's label, else from the property's
 /// [MenuTab] (the SettingsMenu renderer's tab), [SettingPermission] marks a permission setting and [MenuReadOnly] a
-/// read-only one; the bridge's own settings use the same attributes (Shared\WhatsAnAiBridgeSettings.cs). The
+/// read-only one, and a property with the HUD's [IgnoreMenu] (hidden in game: legacy or panel-own state) is left out
+/// of describe too (settings.set still reaches it by path); the bridge's own settings use the same attributes
+/// (Shared\WhatsAnAiBridgeSettings.cs). The
 /// renderer's attributes are copied per plugin, so they are matched by type name, never by type.
 ///   settings.describe {plugin?}                        -> {game, plugins: [{plugin, enabled, settings: [node]}]}
 ///   settings.set {plugin, path, value, allowPermission?} -> {plugin, setting, previous}
@@ -84,6 +86,7 @@ public partial class WhatsAnAiBridge
             if (v == null) continue;
             var path = prefix + prop.Name;
             var menu = MenuOf(prop.Property!);
+            if (menu.Ignore) continue;   // [IgnoreMenu]: hidden in game (legacy or panel-own state), so not offered as a setting either
             if (IsNode(v.GetType()))
             {
                 into.Add(Describe(prop.Name, path, v, group ?? menu.Tab, menu));
@@ -117,7 +120,7 @@ public partial class WhatsAnAiBridge
     private static string BaseName(Type t) => t.Name.Contains('`') ? t.Name[..t.Name.IndexOf('`')] : t.Name;
 
     /// <summary>What a settings property's attributes say about it: label and description, tab, permission, read-only.</summary>
-    private readonly record struct MenuInfo(string? Name, string? Tooltip, string? Tab, bool Permission, bool ReadOnly, string? ReadOnlyNote);
+    private readonly record struct MenuInfo(string? Name, string? Tooltip, string? Tab, bool Permission, bool ReadOnly, string? ReadOnlyNote, bool Ignore);
 
     /// <summary>
     /// The attributes on a settings property, by type name: the HUD's [Menu(name, tooltip)] (MenuName / Tooltip on both
@@ -127,7 +130,7 @@ public partial class WhatsAnAiBridge
     private static MenuInfo MenuOf(PropertyInfo p)
     {
         string? name = null, tooltip = null, tab = null, roNote = null;
-        bool permission = false, readOnly = false;
+        bool permission = false, readOnly = false, ignore = false;
         foreach (var a in p.GetCustomAttributes(true))
         {
             switch (a.GetType().Name)
@@ -139,9 +142,10 @@ public partial class WhatsAnAiBridge
                 case "MenuTabAttribute": tab = MemberIndex.TryGet(a, "Tab") as string; break;
                 case "MenuReadOnlyAttribute": readOnly = true; roNote = MemberIndex.TryGet(a, "Note") as string; break;
                 case "SettingPermissionAttribute": permission = true; break;
+                case "IgnoreMenuAttribute": ignore = true; break;
             }
         }
-        return new MenuInfo(name, string.IsNullOrWhiteSpace(tooltip) ? null : tooltip, string.IsNullOrWhiteSpace(tab) ? null : tab.Trim(), permission, readOnly, roNote);
+        return new MenuInfo(name, string.IsNullOrWhiteSpace(tooltip) ? null : tooltip, string.IsNullOrWhiteSpace(tab) ? null : tab.Trim(), permission, readOnly, roNote, ignore);
     }
 
     private static string Words(string name) => System.Text.RegularExpressions.Regex.Replace(name, "(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ");
@@ -230,6 +234,7 @@ public partial class WhatsAnAiBridge
         if (w == null) return Err("unknown_plugin", $"No loaded plugin '{plugin}'.");
         object? owner = Prop(Prop(w, "Plugin"), "_Settings");
         MemberIndex.Member? prop = null;
+        MemberIndex.Member? parentProp = null;   // the nested settings object holding the node (its label is the group)
         var parts = path.Split('.');
         if (owner == null) return Err("unknown_setting", $"{w.Name} has no settings object (_Settings is null).");
         for (var i = 0; i < parts.Length; i++)
@@ -238,6 +243,7 @@ public partial class WhatsAnAiBridge
             if (prop is not { CanRead: true })
                 return Err("unknown_setting", $"'{parts[i]}' is not a setting of {w.Name} ({(i == 0 ? "at the settings root" : $"under {string.Join('.', parts.Take(i))}")}, type {owner.GetType().Name}).");
             if (i == parts.Length - 1) break;
+            parentProp = prop;
             try { owner = prop.Get(owner); }
             catch (Exception ex)
             {
@@ -250,7 +256,9 @@ public partial class WhatsAnAiBridge
         if (node == null) return Err("unknown_setting", $"{path} of {w.Name} is null.");
         if (!IsNode(node.GetType())) return Err("unknown_setting", $"{path} of {w.Name} is a {node.GetType().Name}, not a settings node.");
         var menu = MenuOf(prop!.Property!);
-        var before = Describe(prop.Name, path, node, parts.Length == 1 ? menu.Tab : null, menu);
+        // The group Walk gives it: the innermost nested object's label, else the node's own [MenuTab].
+        var group = parentProp == null ? menu.Tab : MenuOf(parentProp.Property!).Name ?? Words(parentProp.Name);
+        var before = Describe(prop.Name, path, node, group, menu);
         if (before["permission"]?.Value<bool>() == true && !allowPermission)
             return Err("permission_setting", $"{before["label"]} gives bridge clients power, so it can't be changed through MCP tools. Change it in game or in the Hexile control center (it asks you to confirm).");
         if (before["readOnly"]?.Value<bool>() == true)
@@ -265,7 +273,7 @@ public partial class WhatsAnAiBridge
         return new JObject
         {
             ["ok"] = true, ["plugin"] = w.Name, ["previous"] = before["value"],
-            ["setting"] = Describe(prop.Name, path, node, before["group"]?.ToString(), menu),
+            ["setting"] = Describe(prop.Name, path, node, group, menu),
         };
     }
 

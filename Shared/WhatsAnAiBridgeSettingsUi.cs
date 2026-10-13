@@ -27,11 +27,18 @@ public class WhatsAnAiBridgeSettingsUi
     private WhatsAnAiBridgeSettings? _s;
     private WhatsAnAiBridge.BridgeStatus? _status;
     private List<WhatsAnAiBridge.QueryLogEntry>? _queryLog;
+    private string _bridgeDir = "";
 
-    // Saved recordings, listed at most every 2 s (the old panel listed the folder every frame).
-    private (string name, long size, DateTime written)[] _recordings = [];
+    // Saved recordings, listed at most every 2 s (the old panel listed the folder every frame); strings formatted then.
+    private (string name, string size, string written)[] _recordings = [];
     private string? _recordingsNote;
     private DateTime _recordingsAt;
+
+    // Recent-query rows, formatted once per log change (count + newest entry), not per frame.
+    private (string time, string query, bool clipped, string full, string duration, string size, bool ok)[] _queryRows = [];
+    private int _queryRowsCount = -1;
+    private WhatsAnAiBridge.QueryLogEntry? _queryRowsNewest;
+    private float _refColumn = -1f;   // value column of the query reference, from the widest query text (once)
 
     /// <summary>
     /// Opens/closes the in-HUD stats panel through the shared view's mutator (StatsUiState.PanelOpen),
@@ -48,8 +55,10 @@ public class WhatsAnAiBridgeSettingsUi
             .Custom("StatsUi", DrawStatsPanelRow);
     }
 
-    public void Draw(WhatsAnAiBridgeSettings s, WhatsAnAiBridge.BridgeStatus status, List<WhatsAnAiBridge.QueryLogEntry> queryLog)
+    /// <param name="bridgeDir">The bridge folder the recorder writes under (the plugin's resolved _bridgeDir).</param>
+    public void Draw(WhatsAnAiBridgeSettings s, WhatsAnAiBridge.BridgeStatus status, List<WhatsAnAiBridge.QueryLogEntry> queryLog, string bridgeDir)
     {
+        if (!string.Equals(_bridgeDir, bridgeDir, StringComparison.Ordinal)) { _bridgeDir = bridgeDir; _recordingsAt = default; }
         _s = s;
         _status = status;
         _queryLog = queryLog;
@@ -118,23 +127,25 @@ public class WhatsAnAiBridgeSettingsUi
         {
             SettingsMenu.Text(Accent, name);
             ImGui.SameLine(Math.Max(ValueColumn + 60f, ImGui.GetContentRegionAvail().X * 0.55f));
-            ImGui.TextUnformatted(FormatBytes(size));
+            ImGui.TextUnformatted(size);
             ImGui.SameLine();
-            SettingsMenu.Dim(written.ToString("yyyy-MM-dd HH:mm"));
+            SettingsMenu.Dim(written);
         }
         ImGui.Spacing();
     }
 
     private void RefreshRecordings()
     {
-        if (DateTime.UtcNow - _recordingsAt < TimeSpan.FromSeconds(2) || _s == null) return;
+        if (DateTime.UtcNow - _recordingsAt < TimeSpan.FromSeconds(2)) return;
         _recordingsAt = DateTime.UtcNow;
         try
         {
-            var dir = Path.Combine(_s.BridgeDirectory.Value ?? "", "recordings");
-            if (!Directory.Exists(dir)) { _recordings = []; _recordingsNote = "No recordings folder yet."; return; }
+            // The folder the recorder writes (record:start in ProcessRecordingCommand: Path.Combine(_bridgeDir, "recordings")).
+            var dir = Path.Combine(_bridgeDir, "recordings");
+            if (!Directory.Exists(dir)) { _recordings = []; _recordingsNote = $"No recordings folder yet ({Path.GetFullPath(dir)})."; return; }
             _recordings = Directory.GetFiles(dir, "*.jsonl").OrderByDescending(f => f)
-                .Select(f => new FileInfo(f)).Select(fi => (fi.Name, fi.Length, fi.LastWriteTime)).ToArray();
+                .Select(f => new FileInfo(f))
+                .Select(fi => (fi.Name, FormatBytes(fi.Length), fi.LastWriteTime.ToString("yyyy-MM-dd HH:mm"))).ToArray();
             _recordingsNote = _recordings.Length == 0 ? "No recordings yet. Use record:start to begin." : null;
         }
         catch (Exception ex) { _recordings = []; _recordingsNote = $"Can't list the recordings folder: {ex.GetType().Name}: {ex.Message}"; }
@@ -165,19 +176,34 @@ public class WhatsAnAiBridgeSettingsUi
             float c1 = 80f, c2 = w * 0.55f, c3 = w * 0.72f, c4 = w * 0.88f;
             SettingsMenu.Dim("Time"); ImGui.SameLine(c1); SettingsMenu.Dim("Query"); ImGui.SameLine(c2); SettingsMenu.Dim("Duration");
             ImGui.SameLine(c3); SettingsMenu.Dim("Size"); ImGui.SameLine(c4); SettingsMenu.Dim("Status");
-            for (int i = log.Count - 1; i >= 0; i--)
+            var newest = log[^1];
+            if (log.Count != _queryRowsCount || !ReferenceEquals(newest, _queryRowsNewest))
             {
-                var e = log[i];
-                SettingsMenu.Dim(e.Timestamp.ToString("HH:mm:ss"));
+                _queryRowsCount = log.Count;
+                _queryRowsNewest = newest;
+                var rows = new (string, string, bool, string, string, string, bool)[log.Count];
+                for (int i = 0; i < log.Count; i++)
+                {
+                    var e = log[log.Count - 1 - i];   // newest first
+                    bool clipped = e.Query.Length > 30;
+                    rows[i] = (e.Timestamp.ToString("HH:mm:ss"), clipped ? e.Query[..30] + "..." : e.Query, clipped, e.Query,
+                        $"{e.DurationMs:F0} ms", FormatBytes(e.ResponseSize), e.Success);
+                }
+                _queryRows = rows;
+            }
+            var textCol = ImGui.GetStyle().Colors[(int)ImGuiCol.Text];
+            foreach (var (time, query, clipped, full, duration, size, ok) in _queryRows)
+            {
+                SettingsMenu.Dim(time);
                 ImGui.SameLine(c1);
-                SettingsMenu.Text(e.Success ? ImGui.GetStyle().Colors[(int)ImGuiCol.Text] : Red, e.Query.Length > 30 ? e.Query[..30] + "..." : e.Query);
-                if (e.Query.Length > 30 && ImGui.IsItemHovered()) SettingsMenu.Tooltip(e.Query);
+                SettingsMenu.Text(ok ? textCol : Red, query);
+                if (clipped && ImGui.IsItemHovered()) SettingsMenu.Tooltip(full);
                 ImGui.SameLine(c2);
-                SettingsMenu.Text(Accent, $"{e.DurationMs:F0} ms");
+                SettingsMenu.Text(Accent, duration);
                 ImGui.SameLine(c3);
-                ImGui.TextUnformatted(FormatBytes(e.ResponseSize));
+                ImGui.TextUnformatted(size);
                 ImGui.SameLine(c4);
-                SettingsMenu.Text(e.Success ? Green : Red, e.Success ? "ok" : "failed");
+                SettingsMenu.Text(ok ? Green : Red, ok ? "ok" : "failed");
             }
         }
 
@@ -215,10 +241,14 @@ public class WhatsAnAiBridgeSettingsUi
         ImGui.TextUnformatted(value);
     }
 
-    private static void Ref(string query, string desc)
+    private void Ref(string query, string desc)
     {
+        // One value column for the whole reference, measured once from its widest query (the longest is
+        // "recording:load:filename" or "record:start[:interval]"), instead of a CalcTextSize per row per frame; also lines the descriptions up.
+        if (_refColumn < 0f)
+            _refColumn = Math.Max(ValueColumn + 40f, Math.Max(ImGui.CalcTextSize("recording:load:filename").X, ImGui.CalcTextSize("record:start[:interval]").X) + 24f);
         SettingsMenu.Text(Accent, query);
-        ImGui.SameLine(Math.Max(ValueColumn + 40f, ImGui.CalcTextSize(query).X + 24f));
+        ImGui.SameLine(_refColumn);
         SettingsMenu.Dim(desc);
     }
 
