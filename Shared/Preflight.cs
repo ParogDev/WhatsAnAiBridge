@@ -45,6 +45,10 @@ public class ReflectionPreflightDto
     [JsonProperty("recovered", NullValueHandling = NullValueHandling.Ignore)] public List<string>? Recovered { get; set; }
     [JsonProperty("links", NullValueHandling = NullValueHandling.Ignore)] public List<LinkCheckDto>? Links { get; set; }
     [JsonProperty("simulated", NullValueHandling = NullValueHandling.Ignore)] public string? Simulated { get; set; }
+    /// <summary>True when the check itself failed: nothing was checked, so the zero counts mean "unknown", never "0 broken".
+    /// Absent otherwise. <see cref="Error"/> says why.</summary>
+    [JsonProperty("failed", NullValueHandling = NullValueHandling.Ignore)] public bool? Failed { get; set; }
+    [JsonProperty("error", NullValueHandling = NullValueHandling.Ignore)] public string? Error { get; set; }
 }
 
 /// <summary>What the bridge saves between loads to tell a new build from the last one checked.</summary>
@@ -64,17 +68,23 @@ public class PreflightStateDto
 /// </summary>
 public partial class WhatsAnAiBridge
 {
-    private static ReflectionPreflightDto? _preflight;
-    private static PreflightStateDto? _preflightPrev;
-    private static bool _preflightPrevRead;
-    /// <summary>What this load last wrote to <see cref="PreflightFile"/> (stamp + broken ids) and last logged: unchanged = not again.</summary>
-    private static string? _preflightSavedKey, _preflightLoggedLine;
-    private static readonly object PreflightLock = new();
+    // Instance state, never static: all of it belongs to this load of the bridge (a reload is a new instance), so no
+    // cached report, baseline or "already written" mark can leak from one load into the next.
+    private ReflectionPreflightDto? _preflight;
+    private PreflightStateDto? _preflightPrev;
+    private bool _preflightPrevRead;
+    /// <summary>What this load last wrote to <see cref="PreflightFile"/> (stamp + broken ids; null = not written yet this
+    /// load) and last logged: unchanged = not again.</summary>
+    private string? _preflightSavedKey, _preflightLoggedLine;
+    private readonly object PreflightLock = new();
     private const string PreflightFile = "reflection-preflight.json";
 
     private string? ProcessPreflightMethod(string method, JToken? p)
     {
         if (method != "reflection.preflight") return null;
+        // A test of the failed-check shape (failed: true + error): answered, never cached, so hello is untouched.
+        if (p?["simulateFailed"]?.Value<bool>() == true)
+            return Serialize(FailedReport(BuildStamp(), new InvalidOperationException("simulated preflight failure (simulateFailed)")));
         var simulate = p?["simulateBroken"]?.Value<string>();
         if (simulate != null)
         {
@@ -96,7 +106,9 @@ public partial class WhatsAnAiBridge
         return Serialize(report);
     }
 
-    /// <summary>The report of this load (checked on first use if the load-time check hasn't run).</summary>
+    /// <summary>The report of this load (checked on first use if the load-time check hasn't run). A check that failed is
+    /// cached like any other report (<see cref="PreflightAtLoad"/>): hello never re-scans under the lock; only an explicit
+    /// refresh (or the re-check after 0Harmony loads) runs it again.</summary>
     private ReflectionPreflightDto Preflight()
     {
         lock (PreflightLock) return _preflight ?? PreflightAtLoad();
@@ -111,10 +123,12 @@ public partial class WhatsAnAiBridge
             return new ReflectionPreflightDto
             {
                 Stamp = r.Stamp, ChangedFrom = r.ChangedFrom, CheckedAt = r.CheckedAt, Ms = r.Ms, Targets = r.Targets,
-                Ok = r.Ok, Broken = r.Broken, NotNow = r.NotNow, Blocked = r.Blocked, Problems = r.Problems.ToList(), Recovered = r.Recovered?.ToList(),   // copies: hello never shares the cached report's lists
+                Ok = r.Ok, Broken = r.Broken, NotNow = r.NotNow, Blocked = r.Blocked, Problems = r.Problems.ToList(), Recovered = r.Recovered?.ToList(), Failed = r.Failed, Error = r.Error,   // copies: hello never shares the cached report's lists
+                // The rows that aren't ok, typed (status field): readers classify by status, never by parsing problems.
+                Links = r.Links?.Where(l => l.Status != "ok").ToList(),
             };
         }
-        catch (Exception ex) { return new ReflectionPreflightDto { Problems = { $"preflight failed: {ex.GetType().Name}: {ex.Message}" } }; }
+        catch (Exception ex) { return FailedReport(null, ex); }
     }
 
     /// <summary>Check every link now, compare with the stamp saved by the last check, save, and say it loudly when something broke.</summary>
@@ -132,14 +146,29 @@ public partial class WhatsAnAiBridge
                 catch (Exception ex) { LogQuiet($"[Preflight] previous {PreflightFile} unreadable ({ex.Message}): treated as a first check"); }
             }
 
-            var r = RunPreflight(_preflightPrev, null);
+            ReflectionPreflightDto r;
+            try { r = RunPreflight(_preflightPrev, null); }
+            catch (Exception ex)
+            {
+                // The check itself failed: cached as this load's report (hello and reflection.preflight answer it without
+                // re-scanning), re-run only by refresh=true or the re-check after 0Harmony loads. Nothing is saved: the
+                // previous file stays the baseline.
+                string stamp;
+                try { stamp = BuildStamp(); } catch (Exception sx) { stamp = $"? ({sx.GetType().Name})"; }
+                r = FailedReport(stamp, ex);
+                _preflight = r;
+                var failLine = $"[Preflight] check failed: {ex.GetType().Name}: {ex.Message}";
+                if (failLine != _preflightLoggedLine) { _preflightLoggedLine = failLine; LogFault(failLine, "preflight"); }
+                return r;
+            }
             _preflight = r;
             // _preflightPrev stays the previous load's file on purpose (the baseline of every check of this load). The
-            // file is written once per load, and again only if the broken set changes (the re-check after 0Harmony
-            // loads, a refresh); the log line likewise only when what it says changes.
+            // file is written by the first check of every load, whatever it found, so the next load's baseline is this
+            // load (never an older one that last changed something); again within this load only when the broken set
+            // changes (the re-check after 0Harmony loads, a refresh). The log line likewise only when what it says changes.
             var broken = r.Links!.Where(l => l.Status == "broken").Select(l => l.Id).ToList();
             var saveKey = $"{r.Stamp}|{string.Join(",", broken)}";
-            if (path != null && saveKey != _preflightSavedKey)
+            if (path != null && (_preflightSavedKey == null || saveKey != _preflightSavedKey))
             {
                 try
                 {
@@ -162,6 +191,13 @@ public partial class WhatsAnAiBridge
             }
             return r;
         }
+    }
+
+    /// <summary>The report of a check that failed: <c>failed: true</c> and the error, so no reader takes its zero counts for "0 broken".</summary>
+    private static ReflectionPreflightDto FailedReport(string? stamp, Exception ex)
+    {
+        var error = $"{ex.GetType().Name}: {ex.Message}";
+        return new ReflectionPreflightDto { Stamp = stamp ?? "", CheckedAt = DateTime.UtcNow, Failed = true, Error = error, Problems = { $"preflight failed: {error}" } };
     }
 
     private ReflectionPreflightDto RunPreflight(PreflightStateDto? prev, HudLink? simulated)
