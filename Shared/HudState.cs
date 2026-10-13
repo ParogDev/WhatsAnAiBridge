@@ -190,10 +190,17 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 _hsDirtyVer++;
                 ev = new HudPhaseEvent { Phase = phase, Prev = _hs.PrevPhase, Since = now, InGame = _hs.InGame, Area = _hs.Area };
             }
+            // The timer is stopped: nothing retries after this, so a failed final write gets one more try, then is logged.
             HudStateWrite(final: true);
+            if (_hsWriteError != null) { Thread.Sleep(50); HudStateWrite(final: true); }
+            if (_hsWriteError != null) LogFault($"[HudState] close: the final {phase} write failed, hud-state.json keeps the last live phase: {_hsWriteError}");
             HudStatePublish("hud.phase", ev);   // appended to events.jsonl: the next bridge load reads it back
         }
-        catch (Exception ex) { LogFault($"[HudState] close: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Volatile.Write(ref _hsCloseDone, 0);   // the second OnClose (Dispose) tries again
+            LogFault($"[HudState] close: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -215,9 +222,12 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                 if (m == null) continue;
                 var name = m.Name;
                 if (seen.Count < 16) seen.Add($"{m.DeclaringType?.Name}.{name}");
-                if (name == "CloseAllPlugins") { via = $"{m.DeclaringType?.Name}.{name}"; return false; }
-                if (name == "UnloadAssemblyPlugins" || name.Contains("Reload", StringComparison.Ordinal))
-                { via = $"{m.DeclaringType?.Name}.{name}"; return true; }
+                // Only the HUD's PluginManager decides (its compiler-generated lambdas sit in a nested type).
+                var owner = m.DeclaringType?.Name == "PluginManager" ? m.DeclaringType : m.DeclaringType?.DeclaringType;
+                if (owner?.Name != "PluginManager") continue;
+                if (name == "CloseAllPlugins") { via = $"PluginManager.{name}"; return false; }
+                if (name == "UnloadAssemblyPlugins" || name.StartsWith("Reload", StringComparison.Ordinal) || name.StartsWith("<Reload", StringComparison.Ordinal))
+                { via = $"PluginManager.{name}"; return true; }
             }
             via = $"no CloseAllPlugins / Reload frame in {frames.Length}: {string.Join(" < ", seen)}";
             return false;
@@ -350,10 +360,12 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                             _hsAwaitArea = true; _hsAwaitTs = nowTs; _hsAwaitLoadMs = loadMs; _hsAwaitFrom = from;
                             _hs.Area = null;
                         }
-                        else if (prevPhase == "starting")
+                        else if (prevPhase == "starting" && (area == null || from == null || area == from))
                         {
-                            // The HUD (or the bridge) came up in an area it was already in: no arrival, so hud.phase only
-                            // (seen live 2026-10-13: "Ngakanu from Ngakanu" after every restart). The area is adopted quietly.
+                            // The HUD (or the bridge) came up in the area the previous file last saw: no arrival, so
+                            // hud.phase only (seen live 2026-10-13: "Ngakanu from Ngakanu" after every restart). The area is
+                            // adopted quietly. A different area (the player zoned while the HUD or bridge was down) is an
+                            // arrival: area.ready below, loadMs null.
                             _hs.Area = area;
                             _hs.LastArea = area ?? from;
                             _hsAreaHash = hash;
