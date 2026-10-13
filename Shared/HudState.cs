@@ -49,6 +49,11 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
     private bool _hsReload;                        // this load is a bridge reload in the same HUD process
     private bool _hsClosed;                        // OnClose wrote the final phase: a late timer tick writes nothing
     private long? _hsAreaHash;                     // the area hash last seen ready
+    private const double HsAwaitAreaMs = 3000;     // after a load, how long area.ready waits for the area data to move on
+    private bool _hsAwaitArea;                     // a load ended but the area data still shows the area we left
+    private long _hsAwaitTs;
+    private long? _hsAwaitLoadMs;
+    private string? _hsAwaitFrom;
     private string? _hsReadError, _hsWriteError, _hsPublishError;
     private long _hsReadErrors, _hsWrites, _hsTicks;
     private static readonly JsonSerializer HsJson = JsonSerializer.Create(new JsonSerializerSettings { DateTimeZoneHandling = DateTimeZoneHandling.Utc });
@@ -138,8 +143,10 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
         try
         {
             string phase, reason;
-            if (HudStateAgentRestartNow()) { phase = "restarting"; reason = "agent-restart"; }
-            else if (OutageOpenOnBoard(out _, out var outagePhase) && outagePhase is ("down" or "waitingGame")) { phase = "user-restart"; reason = "user-restart"; }
+            // The outage first: its own stop (restart-hud.ps1 -Outage) also writes restart-state.json 'stopping'
+            // (seen live 2026-10-13: a user restart closed as agent-restart).
+            if (OutageOpenOnBoard(out _, out var outagePhase) && outagePhase is ("down" or "waitingGame")) { phase = "user-restart"; reason = "user-restart"; }
+            else if (HudStateAgentRestartNow()) { phase = "restarting"; reason = "agent-restart"; }
             else { phase = "closed"; reason = "unknown"; }
             HudPhaseEvent ev;
             lock (_hsLock)
@@ -279,13 +286,25 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                         }
                         _hsLoadTs = 0;
                         var from = _hs.LastArea;
-                        events.Add(("area.ready", new AreaReadyEvent { Area = area, From = from, LoadMs = loadMs }));
-                        _hs.AreaChangedAt = now;
-                        _hs.Area = area;
-                        _hs.LastArea = area ?? from;
-                        _hsAreaHash = hash;
+                        if (prevPhase == "loading" && hash != null && _hsAreaHash != null && hash == _hsAreaHash)
+                        {
+                            // IsLoading drops before the area data moves on (seen live 2026-10-13: area.ready said
+                            // Kingsmarch -> Kingsmarch, the new area's name came a second later). Hold area.ready
+                            // until the area hash changes, or HsAwaitAreaMs passes (the same area again).
+                            _hsAwaitArea = true; _hsAwaitTs = nowTs; _hsAwaitLoadMs = loadMs; _hsAwaitFrom = from;
+                            _hs.Area = null;
+                        }
+                        else
+                        {
+                            events.Add(("area.ready", new AreaReadyEvent { Area = area, From = from, LoadMs = loadMs }));
+                            _hs.AreaChangedAt = now;
+                            _hs.Area = area;
+                            _hs.LastArea = area ?? from;
+                            _hsAreaHash = hash;
+                        }
                         if (_hs.Startup != null && _hs.Startup.FirstReadyAt == null && !_hsReload) _hs.Startup.FirstReadyAt = now;
                     }
+                    if (phase != "ready") _hsAwaitArea = false;
                     _hs.PrevPhase = prevPhase;
                     _hs.Phase = phase;
                     _hs.Since = now;
@@ -295,7 +314,18 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                     _hsDirty = true;
                     events.Add(("hud.phase", new HudPhaseEvent { Phase = phase, Prev = prevPhase, Since = now, InGame = _hs.InGame, Area = _hs.Area }));
                 }
-                else if (phase == "ready" && err == null && hash != null && _hsAreaHash != null && hash != _hsAreaHash)
+                else if (phase == "ready" && _hsAwaitArea && err == null
+                         && ((hash != null && hash != _hsAreaHash) || Stopwatch.GetElapsedTime(_hsAwaitTs, nowTs).TotalMilliseconds >= HsAwaitAreaMs))
+                {
+                    _hsAwaitArea = false;
+                    events.Add(("area.ready", new AreaReadyEvent { Area = area, From = _hsAwaitFrom, LoadMs = _hsAwaitLoadMs }));
+                    _hs.AreaChangedAt = now;
+                    _hs.Area = area;
+                    _hs.LastArea = area ?? _hsAwaitFrom;
+                    _hsAreaHash = hash;
+                    _hsDirty = true;
+                }
+                else if (phase == "ready" && !_hsAwaitArea && err == null && hash != null && _hsAreaHash != null && hash != _hsAreaHash)
                 {
                     // A new area with no load screen seen (a load shorter than a tick): an arrival all the same.
                     var from = _hs.Area ?? _hs.LastArea;
@@ -306,7 +336,7 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
                     _hsAreaHash = hash;
                     _hsDirty = true;
                 }
-                else if (phase == "ready" && err == null && area != null && _hs.Area == null)
+                else if (phase == "ready" && !_hsAwaitArea && err == null && area != null && _hs.Area == null)
                 {
                     _hs.Area = area; _hs.LastArea = area; _hsAreaHash ??= hash; _hsDirty = true;   // the name arrived after the phase
                 }
