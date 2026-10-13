@@ -275,7 +275,7 @@ public partial class WhatsAnAiBridge
                 ["detail"] = option >= 0 ? null : "Not on screen yet - open the panel it is in",
             }, f.Who);   // the flow runs in the HUD (no session on this call): the card names who started it, and no disconnect clears it
         }
-        catch (Exception ex) { LogError($"[GuideFlow] {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[GuideFlow] {ex.Message}"); }
     }
 
     private void FinishFlow(FlowState f, string status, string detail)

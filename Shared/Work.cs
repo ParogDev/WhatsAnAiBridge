@@ -476,7 +476,7 @@ public partial class WhatsAnAiBridge
         while (_workInbox.TryDequeue(out var e))
         {
             try { WorkApplyEventLocked(e, now); }
-            catch (Exception ex) { LogError($"[Work] event {e["seq"]} ({e["kind"]}) skipped: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { LogFault($"[Work] event {e["seq"]} ({e["kind"]}) skipped: {ex.GetType().Name}: {ex.Message}"); }
         }
     }
 
@@ -864,7 +864,7 @@ public partial class WhatsAnAiBridge
             {
                 if (_workClosed) continue;   // a later bridge load hands out these seqs: drop, never publish from an ended load
                 try { PubPublish("work", o, "bridge"); }
-                catch (Exception ex) { LogError($"[Work] publishing work {o["Key"]}: {ex.Message}"); }
+                catch (Exception ex) { LogFault($"[Work] publishing work {o["Key"]}: {ex.Message}"); }
             }
             Volatile.Write(ref _workOutboxBusy, 0);
             // An enqueue that saw busy = 1 just before it was cleared: take it up here (else the next WorkFlush would).
@@ -1003,11 +1003,11 @@ public partial class WhatsAnAiBridge
                 if (WorkRestoredOk(i) is not { } ok || _work.ContainsKey(ok.Key)) { dropped++; continue; }
                 _work[ok.Key] = ok;
             }
-            if (dropped > 0) LogError($"[Work] {WorkFile}: {dropped} entr{(dropped == 1 ? "y" : "ies")} unreadable or incomplete, skipped (the rest restored)");
+            if (dropped > 0) LogFault($"[Work] {WorkFile}: {dropped} entr{(dropped == 1 ? "y" : "ies")} unreadable or incomplete, skipped (the rest restored)");
             _workRev++;
             _workSavedKey = WorkSaveKeyLocked();
         }
-        catch (Exception ex) { LogError($"[Work] {WorkFile} unreadable, starting empty: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[Work] {WorkFile} unreadable, starting empty: {ex.GetType().Name}: {ex.Message}"); }
     }
 
     /// <summary>One entry of items.json, checked (a hand-edited or half-written file never breaks the HUD), or null to skip it.
@@ -1085,7 +1085,7 @@ public partial class WhatsAnAiBridge
             }
             catch (Exception ex)
             {
-                LogError($"[Work] save failed ({WorkFile}): {ex.Message}");
+                LogFault($"[Work] save failed ({WorkFile}): {ex.Message}");
                 lock (_sessionLock) { if (_workSaveGen == gen) _workSavedKey = null; }   // the next change writes again
             }
         }

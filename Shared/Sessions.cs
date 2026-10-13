@@ -838,7 +838,7 @@ public partial class WhatsAnAiBridge
             catch (Exception ex)
             {
                 var msg = $"[Attention] tick: {ex.GetType().Name}: {ex.Message}";
-                if (msg != _attnTickError) { _attnTickError = msg; LogError(msg + " " + ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim()); }
+                if (msg != _attnTickError) { _attnTickError = msg; LogFault(msg + " " + ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim()); }
             }
             // Work items (Work.cs) after the queue moved (their WaitingOn = Player reads its items) and before the blockers
             // (an agent route leading the player is its owner's Doing). Guarded the same way: a fault never stops the tick.
@@ -846,7 +846,7 @@ public partial class WhatsAnAiBridge
             catch (Exception ex)
             {
                 var msg = $"[Work] tick: {ex.GetType().Name}: {ex.Message}";
-                if (msg != _workTickError) { _workTickError = msg; LogError(msg + " " + ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim()); }
+                if (msg != _workTickError) { _workTickError = msg; LogFault(msg + " " + ex.StackTrace?.Split('\n').FirstOrDefault()?.Trim()); }
             }
             // After the queue moved: the floor holder is one of the asks. The blockers are read once per tick, here on the
             // render thread (they enumerate render-owned state such as the step queue), for the agents view and for the

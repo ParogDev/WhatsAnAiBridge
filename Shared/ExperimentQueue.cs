@@ -92,7 +92,7 @@ public partial class WhatsAnAiBridge
     {
         if (_queue != null) return _queue;
         try { _queue = File.Exists(QueueFile) ? JsonConvert.DeserializeObject<List<QueuedStep>>(File.ReadAllText(QueueFile)) ?? new() : new(); }
-        catch (Exception ex) { LogError($"[Queue] {QueueFile} unreadable, starting empty: {ex.Message}"); _queue = new(); }
+        catch (Exception ex) { LogFault($"[Queue] {QueueFile} unreadable, starting empty: {ex.Message}"); _queue = new(); }
         // A step that was running when the HUD closed can't resume its baseline: put it back in the queue.
         foreach (var s in _queue.Where(s => s.Status == "running")) { s.Status = "queued"; s.StartedAt = null; s.Captures.Clear(); }
         return _queue;
@@ -111,7 +111,7 @@ public partial class WhatsAnAiBridge
             File.WriteAllText(tmp, JsonConvert.SerializeObject(q, Formatting.Indented));
             File.Move(tmp, QueueFile, true);
         }
-        catch (Exception ex) { LogError($"[Queue] save failed: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[Queue] save failed: {ex.Message}"); }
     }
 
     private string? ProcessExperimentMethod(string method, JToken? p) => method switch

@@ -94,8 +94,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         if (Settings.EnableTcp.Value)
             StartTcpServer();
         InstrStartup();   // patches a previous load of the bridge left in this HUD process (Instrumentation.cs)
-        try { PubRegister(); } catch (Exception ex) { LogError($"[PubSub] registering {PublishMethodName} / {SubscribeMethodName} on PluginBridge failed: {ex.Message}"); }
-        try { WorkRegister(); } catch (Exception ex) { LogError($"[Work] registering {WorkListMethodName} / {HighlightForMethodName} on PluginBridge failed: {ex.Message}"); }
+        try { PubRegister(); } catch (Exception ex) { ToastF8RegisterFailed($"[PubSub] registering {PublishMethodName} / {SubscribeMethodName} on PluginBridge failed: {ex.Message}"); }
+        try { WorkRegister(); } catch (Exception ex) { ToastF8RegisterFailed($"[Work] registering {WorkListMethodName} / {HighlightForMethodName} on PluginBridge failed: {ex.Message}"); }
 
         return true;
     }
@@ -106,8 +106,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         {
             _tcpServer?.Dispose();
             _tcpServer = new TcpBridgeServer(
-                msg => LogMessage($"[TCP] {msg}"),
-                msg => LogError($"[TCP] {msg}")
+                msg => LogQuiet($"[TCP] {msg}"),
+                msg => LogFault($"[TCP] {msg}", "tcp")   // stable key: the texts carry client ids and ports
             );
             _tcpServer.ClientClosed += SessionDisconnected;
             _tcpServer.Start(Settings.TcpPort.Value, _bridgeDir);
@@ -115,7 +115,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         }
         catch (Exception ex)
         {
-            LogError($"[TCP] Failed to start server: {ex.Message}");
+            ToastTcpStartFailed($"[TCP] Failed to start server: {ex.Message}");
         }
     }
 
@@ -124,6 +124,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         InstrEndWhere(_ => true, "cut: the HUD is closing");
         InstrStopTimer();
         StopWatchdog();
+        HudLogStop();   // the repeat-count timer (HudLog.cs)
         PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
         WorkClose();  // and AIBridge.WorkList / AIBridge.HighlightFor (Work.cs)
         _tcpServer?.Dispose();
@@ -139,6 +140,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         InstrEndWhere(_ => true, "cut: the bridge is reloading");
         InstrStopTimer();
         StopWatchdog();
+        HudLogStop();   // the repeat-count timer (HudLog.cs)
         PubClose();   // plugins holding AIBridge.Publish get bridge_reloaded and look it up again (PubSub.cs)
         WorkClose();  // and AIBridge.WorkList / AIBridge.HighlightFor (Work.cs)
         _tcpServer?.Dispose();
@@ -168,7 +170,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             };
             File.WriteAllText(InterruptedRecordingFile, JsonConvert.SerializeObject(note));
         }
-        catch (Exception ex) { LogError($"[Recording] writing {InterruptedRecordingFile}: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[Recording] writing {InterruptedRecordingFile}: {ex.Message}"); }
         _isRecording = false;
     }
 
@@ -216,13 +218,13 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             if (!_servingFromWatchdog)
             {
                 _servingFromWatchdog = true;
-                LogMessage("[TCP] HUD not ticking (game window in background?) - serving bridge requests from a worker thread");
+                LogQuiet("[TCP] HUD not ticking (game window in background?) - serving bridge requests from a worker thread");
             }
             DrainRequests(server);
         }
         catch (Exception ex)
         {
-            LogError($"[TCP] Watchdog error: {ex.Message}");
+            LogFault($"[TCP] Watchdog error: {ex.Message}");
         }
         finally
         {
@@ -240,7 +242,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             if (_servingFromWatchdog)
             {
                 _servingFromWatchdog = false;
-                LogMessage("[TCP] HUD ticking again - serving bridge requests on the main thread");
+                LogQuiet("[TCP] HUD ticking again - serving bridge requests on the main thread");
             }
             DrainRequests(server);
         }
@@ -1318,7 +1320,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         }
         catch (Exception ex)
         {
-            LogError($"Recording capture error: {ex.Message}");
+            LogFault($"Recording capture error: {ex.Message}");
         }
     }
 

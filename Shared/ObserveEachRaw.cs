@@ -192,7 +192,7 @@ public partial class WhatsAnAiBridge
                 if (Equals(raw, hud)) continue;
                 c.Plans[i] = null;
                 c.PlanNotes[i] = $"reflection: the raw read ({c.PlanNotes[i]}) gave {Text(raw)} for {Text(key)}, the HUD {Text(hud)}: an offset moved";
-                LogError($"[Observe] layer {l.Spec.Id} {props[i]}: {c.PlanNotes[i]}");
+                LogFault($"[Observe] layer {l.Spec.Id} {props[i]}: {c.PlanNotes[i]}");
                 break;
             }
         }

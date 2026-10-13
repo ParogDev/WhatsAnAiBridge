@@ -67,7 +67,7 @@ public partial class WhatsAnAiBridge
             if (StatsRawMismatch(span, dict) is { } why)
             {
                 _statsRawBroken = $"{why}: vector layout moved, raw check off";
-                LogError($"[StatsRaw] {_statsRawBroken}");
+                LogFault($"[StatsRaw] {_statsRawBroken}");
                 return;
             }
             if (_statsRawPrev.Length < len) _statsRawPrev = new byte[_statsRawBuf.Length];

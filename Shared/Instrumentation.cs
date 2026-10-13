@@ -365,7 +365,7 @@ public partial class WhatsAnAiBridge
                 _instrLastOrphanSweep = DateTime.MinValue;
             }
         }
-        catch (Exception ex) { LogError($"[Instrumentation] startup sweep: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[Instrumentation] startup sweep: {ex.GetType().Name}: {ex.Message}"); }
     }
 
     private void InstrTick()

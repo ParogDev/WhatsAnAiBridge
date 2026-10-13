@@ -194,7 +194,7 @@ public partial class WhatsAnAiBridge
             l.NextAt = now.AddMilliseconds(1000.0 / l.Spec.Hz);
             var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             try { LayerTick(l); }
-            catch (Exception ex) { l.Broken = $"{ex.GetType().Name}: {ex.Message}"; LogError($"[Observe] layer {l.Spec.Id}: {l.Broken}"); }
+            catch (Exception ex) { l.Broken = $"{ex.GetType().Name}: {ex.Message}"; LogFault($"[Observe] layer {l.Spec.Id}: {l.Broken}"); }
             l.CostMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
             l.Ticks++;
         }

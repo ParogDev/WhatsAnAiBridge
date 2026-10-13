@@ -182,7 +182,7 @@ public partial class WhatsAnAiBridge
             }
             if (_verdicts.Count > VerdictsKeep) _verdicts.RemoveRange(0, _verdicts.Count - VerdictsKeep);
         }
-        catch (Exception ex) { LogError($"[GuideHighlight] reading {VerdictsFile}: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[GuideHighlight] reading {VerdictsFile}: {ex.Message}"); }
     }
 
     /// <summary>
@@ -225,7 +225,7 @@ public partial class WhatsAnAiBridge
         System.Threading.ThreadPool.QueueUserWorkItem(_ =>
         {
             try { Directory.CreateDirectory(Path.GetDirectoryName(file)!); File.AppendAllText(file, line + Environment.NewLine); }
-            catch (Exception ex) { LogError($"[GuideHighlight] writing {file}: {ex.Message}"); }
+            catch (Exception ex) { LogFault($"[GuideHighlight] writing {file}: {ex.Message}"); }
         });
         // While observing, the answer is an event on the agent lane (method user.verdict), so observe_wait can wake on it.
         try { if (Obs().Enabled) ObsEmit(new JObject { ["kind"] = "agent", ["method"] = "user.verdict", ["params"] = JObject.FromObject(v) }); } catch { }

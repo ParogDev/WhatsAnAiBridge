@@ -110,7 +110,7 @@ public partial class WhatsAnAiBridge
             if (_rl.LastError != ex.Message)
             {
                 _rl.LastError = ex.Message;
-                LogError($"[RenderLab] {ex}");
+                LogFault($"[RenderLab] {ex}");
             }
         }
     }
