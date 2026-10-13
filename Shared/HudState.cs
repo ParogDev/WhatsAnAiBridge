@@ -166,7 +166,8 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
             // The HUD calls OnClose for a plugin reload too (PluginWrapper.Close: OnPluginDestroyForHotReload, then OnClose).
             // A reload is no HUD close: phase starting with reloading = true, no closeReason; the next load keeps it.
             var reload = HsCloseIsReload(out var via);
-            if (reload) { phase = "starting"; reason = null; LogQuiet($"[HudState] bridge reload ({via}): phase starting (reloading), not a close"); }
+            LogQuiet(reload ? $"[HudState] bridge reload ({via}): phase starting (reloading), not a close" : $"[HudState] HUD close ({via})");
+            if (reload) { phase = "starting"; reason = null; }
             // The outage first: its own stop (restart-hud.ps1 -Outage) also writes restart-state.json 'stopping'
             // (seen live 2026-10-13: a user restart closed as agent-restart).
             else if (OutageOpenOnBoard(out _, out var outagePhase) && outagePhase is ("down" or "waitingGame")) { phase = "user-restart"; reason = "user-restart"; }
@@ -198,24 +199,27 @@ public partial class WhatsAnAiBridge : IBridgeLiveInfo
     /// <summary>
     /// Is this OnClose a plugin reload (the HUD keeps running) rather than the HUD shutting down? Both come through
     /// PluginWrapper.Close; the caller tells them apart: PluginManager.CloseAllPlugins on shutdown, UnloadAssemblyPlugins /
-    /// ReloadSourcePlugin / ReloadChangedDll on a reload. `via` names the frame that decided (or why none did: then a close,
-    /// as before).
+    /// ReloadSourcePlugin / ReloadChangedDll / a ReloadPluginDll lambda on a reload (small ones such as
+    /// UnloadAssemblyPlugins may be inlined out of the stack). `via` names the frame that decided, or the frames seen when
+    /// none did (then a close, as before); HudStateClose logs it either way.
     /// </summary>
     private static bool HsCloseIsReload(out string via)
     {
         try
         {
             var frames = new StackTrace(1, false).GetFrames();
+            var seen = new List<string>();
             foreach (var f in frames)
             {
                 var m = f.GetMethod();
                 if (m == null) continue;
                 var name = m.Name;
+                if (seen.Count < 16) seen.Add($"{m.DeclaringType?.Name}.{name}");
                 if (name == "CloseAllPlugins") { via = $"{m.DeclaringType?.Name}.{name}"; return false; }
-                if (name is "UnloadAssemblyPlugins" or "ReloadSourcePlugin" or "ReloadChangedDll" || name.StartsWith("Reload", StringComparison.Ordinal))
+                if (name == "UnloadAssemblyPlugins" || name.Contains("Reload", StringComparison.Ordinal))
                 { via = $"{m.DeclaringType?.Name}.{name}"; return true; }
             }
-            via = $"no CloseAllPlugins / Reload* frame in {frames.Length} frames";
+            via = $"no CloseAllPlugins / Reload frame in {frames.Length}: {string.Join(" < ", seen)}";
             return false;
         }
         catch (Exception ex) { via = $"StackTrace: {ex.GetType().Name}: {ex.Message}"; return false; }
