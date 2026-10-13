@@ -130,7 +130,7 @@ internal static class MemberIndex
         private Member[]? _readable;
         private PropertyInfo[]? _indexers;
         internal readonly ConcurrentDictionary<(string name, BindingFlags flags, Kinds kinds), Member?> ByName = new();
-        internal readonly ConcurrentDictionary<string, MethodInfo?> Methods = new(StringComparer.Ordinal);
+        internal readonly ConcurrentDictionary<(string name, Type? typeArg, string signature), MethodInfo?> Methods = new();
 
         internal TypeMembers(Type type) => Type = type;
 
@@ -191,7 +191,7 @@ internal static class MemberIndex
         var tm = Of(type);
         var key = (name, flags, kinds);
         if (tm.ByName.TryGetValue(key, out var hit)) return hit;
-        return tm.ByName.GetOrAdd(key, _ => Lookup(type, name, flags, kinds));
+        return tm.ByName.GetOrAdd(key, static (k, t) => Lookup(t, k.name, k.flags, k.kinds), type);   // no closure on the hit path
     }
 
     /// <summary>The non-indexer property called <paramref name="name"/> (most-derived), or null.</summary>
@@ -231,8 +231,10 @@ internal static class MemberIndex
     /// <summary>A public instance method by exact parameter types (cached; most-derived on a tie), or null.</summary>
     internal static MethodInfo? Method(Type type, string name, params Type[] parameterTypes)
     {
-        var key = name + "(" + string.Join(",", parameterTypes.Select(t => t.FullName)) + ")";
-        return Of(type).Methods.GetOrAdd(key, _ => type.GetMethods(PublicInstance)
+        var key = (name, (Type?)null, Signature(parameterTypes));
+        var tm = Of(type);
+        if (tm.Methods.TryGetValue(key, out var hit)) return hit;
+        return tm.Methods.GetOrAdd(key, type.GetMethods(PublicInstance)
             .Where(m => m.Name == name && !m.IsGenericMethodDefinition && SameParameters(m, parameterTypes))
             .OrderByDescending(m => Depth(m.DeclaringType)).FirstOrDefault());
     }
@@ -240,11 +242,13 @@ internal static class MemberIndex
     /// <summary>
     /// A public instance generic method definition with one type parameter and the given parameters, closed over
     /// <paramref name="typeArg"/> (cached), e.g. GenericMethod(entityType, "GetComponent", lifeType). Null when there
-    /// is none; throws ArgumentException when <paramref name="typeArg"/> breaks the method's constraints.
+    /// is none; throws ArgumentException when <paramref name="typeArg"/> breaks the method's constraints. The cached
+    /// closed method keeps <paramref name="typeArg"/> alive as long as <paramref name="type"/>: pass HUD types, not a
+    /// plugin's (collectible) types.
     /// </summary>
     internal static MethodInfo? GenericMethod(Type type, string name, Type typeArg, params Type[] parameterTypes)
     {
-        var key = name + "<" + typeArg.AssemblyQualifiedName + ">(" + string.Join(",", parameterTypes.Select(t => t.FullName)) + ")";
+        var key = (name, (Type?)typeArg, Signature(parameterTypes));
         var tm = Of(type);
         if (tm.Methods.TryGetValue(key, out var hit)) return hit;
         var def = type.GetMethods(PublicInstance)
@@ -253,6 +257,13 @@ internal static class MemberIndex
         var closed = def?.MakeGenericMethod(typeArg);   // throws on a constraint violation: not cached
         return tm.Methods.GetOrAdd(key, closed);
     }
+
+    private static string Signature(Type[] types) => types.Length switch
+    {
+        0 => "",
+        1 => types[0].AssemblyQualifiedName ?? types[0].Name,
+        _ => string.Join(",", types.Select(t => t.AssemblyQualifiedName ?? t.Name)),
+    };
 
     private static bool SameParameters(MethodInfo m, Type[] types)
     {
