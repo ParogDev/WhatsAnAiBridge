@@ -16,8 +16,9 @@ namespace WhatsAnAiBridge;
 /// fingerprint (mapped HUD property + title text, never the index or address); each option carries a ready-to-use
 /// highlight target. Read-only, never input. Persisted to &lt;BridgeDirectory&gt;\observe\ui-catalogue.json.
 ///   observe.ui_catalogue {query?, key?, options?: bool}
-/// Cost: a capture walks at most UcMaxVisit visible elements (~13 us and ~5 KB each, measured live); it runs only on an
-/// opening and after clicks, never per frame. The last and worst capture cost are in the reply.
+/// Cost: a capture walks at most UcMaxVisit visible elements (~13 us and ~5 KB each, measured live), sliced to UcSliceUs
+/// per frame, one capture at a time; it runs only on an opening and after clicks. The reply's cost has the last and worst
+/// capture (total us / bytes, frames it spread over) and the worst single frame.
 /// </summary>
 public partial class WhatsAnAiBridge
 {
@@ -61,7 +62,8 @@ public partial class WhatsAnAiBridge
         /// <summary>Child indexes from the panel (top-level IngameUi child) to the element.</summary>
         [JsonProperty("child")] public int[] Child = [];
         [JsonProperty("rect")] public float[]? Rect;
-        /// <summary>The element or one of its two parents reacts to hover (ElementFlags.DetectsHover): likely clickable.</summary>
+        /// <summary>A hint: the element or its parent reacts to hover (ElementFlags.DetectsHover; the panel root never counts).
+        /// False does not mean unclickable (dialogue buttons often lack the flag).</summary>
         [JsonProperty("clickable")] public bool Clickable;
         /// <summary>Its text appears once in the view it was seen in, so a text target hits only it.</summary>
         [JsonProperty("unique")] public bool Unique;
@@ -88,15 +90,19 @@ public partial class WhatsAnAiBridge
         public DateTime? DueAt;
         public int Captures;
         public int LastHash;
+        public UcWalk? Walk;   // the capture in progress (sliced over frames)
+        public RectangleF? Rect;   // panel rect at the last capture start (click hit-test)
     }
 
     private const int UcMaxVisit = 600, UcMaxDepth = 14, UcMaxTexts = 80, UcMaxEntries = 400, UcMaxOptions = 120, UcMaxCaptures = 40;
+    /// <summary>Walk budget per frame, us: ~13 us per element, so ~40 elements a frame.</summary>
+    private const double UcSliceUs = 500;
     private readonly Dictionary<long, UcOpen> _ucOpen = new();
     private UiCatalogueFile? _uc;
     private bool _ucDirty, _ucMouseWasDown;
-    private double _ucLastUs, _ucMaxUs;
+    private double _ucLastUs, _ucMaxUs, _ucMaxFrameUs;
     private long _ucLastBytes, _ucMaxBytes;
-    private int _ucLastVisited, _ucCaptures;
+    private int _ucLastVisited, _ucLastFrames, _ucCaptures;
     private string? _ucLastError;
 
     private string UcPath => Path.Combine(ObsDir, "ui-catalogue.json");
@@ -124,61 +130,103 @@ public partial class WhatsAnAiBridge
         try { down = Input.IsKeyDown(0x01); } catch { }   // VK_LBUTTON: reading key state, never sending
         var released = _ucMouseWasDown && !down;
         _ucMouseWasDown = down;
-        foreach (var (addr, o) in _ucOpen.ToList())
+        var mouse = released ? ImGuiNET.ImGui.GetIO().MousePos : default;
+        // One walk at a time, sliced: at most UcSliceUs of it per frame (a big panel spreads over a few frames), so a
+        // capture never makes a frame spike.
+        long addr = 0, dueAddr = 0;
+        UcOpen? o = null, due = null;
+        foreach (var (a, x) in _ucOpen)
         {
-            if (released && o.Captures < UcMaxCaptures) o.DueAt ??= now.AddMilliseconds(350);
-            if (o.DueAt is not { } due || now < due) continue;
+            // A click inside the panel (its options may live a little outside its rect: 40 px slack) may move it to its
+            // next page; clicks elsewhere (combat) never trigger a walk.
+            if (released && x.Captures < UcMaxCaptures && x.Walk == null && x.Rect is { } r
+                && mouse.X >= r.X - 40 && mouse.X <= r.Right + 40 && mouse.Y >= r.Y - 40 && mouse.Y <= r.Bottom + 40)
+                x.DueAt ??= now.AddMilliseconds(350);
+            if (x.Walk != null) (addr, o) = (a, x);
+            else if (due == null && x.DueAt is { } d && now >= d) (dueAddr, due) = (a, x);
+        }
+        if (o == null && due != null)
+        {
+            (addr, o) = (dueAddr, due);
             o.DueAt = o.Captures == 0 ? now.AddMilliseconds(1200) : null;   // a second look once it has settled
             o.Captures++;
-            try { UcCapture(addr, o); }
-            catch (Exception ex) { _ucLastError = $"capture of panel 0x{addr:X} ({o.Mapped ?? "unmapped"}) failed: {ex.Message}"; }
+            if (!o.E.IsVisibleLocal) { _ucOpen.Remove(addr); return; }
+            try { o.Rect = o.E.GetClientRect(); } catch { }
+            o.Walk = new UcWalk();
+            o.Walk.Queue.Enqueue((o.E, [], false));
+        }
+        if (o?.Walk is not { } w) return;
+        var sw = Stopwatch.StartNew();
+        var a0 = GC.GetAllocatedBytesForCurrentThread();
+        var done = false;
+        try { done = UcStep(o, sw); if (done) UcFinish(o); }
+        catch (Exception ex)
+        {
+            o.Walk = null;
+            _ucLastError = $"capture of panel 0x{addr:X} ({o.Mapped ?? "unmapped"}) failed: {ex.Message}";
+        }
+        var us = sw.Elapsed.TotalMilliseconds * 1000;
+        var bytes = GC.GetAllocatedBytesForCurrentThread() - a0;
+        _ucMaxFrameUs = Math.Max(_ucMaxFrameUs, us);
+        w.Us += us; w.Bytes += bytes; w.Frames++;
+        if (done)
+        {
+            (_ucLastUs, _ucLastBytes, _ucLastVisited, _ucLastFrames) = (w.Us, w.Bytes, w.Visited, w.Frames);
+            _ucMaxUs = Math.Max(_ucMaxUs, w.Us);
+            _ucMaxBytes = Math.Max(_ucMaxBytes, w.Bytes);
+            _ucCaptures++;
         }
     }
 
-    private void UcCapture(long addr, UcOpen o)
+    private sealed class UcWalk
     {
-        var sw = Stopwatch.StartNew();
-        var a0 = GC.GetAllocatedBytesForCurrentThread();
-        var root = o.E;
-        if (!root.IsVisibleLocal) { _ucOpen.Remove(addr); return; }
-        // Breadth-first over visible children, as guide.highlight's text search walks them, so a recipe finds the same element.
-        var found = new List<(string text, int[] path, UiElement e, bool hover)>();
-        var queue = new Queue<(UiElement e, int[] path, int hoverUp)>();
-        queue.Enqueue((root, [], 99));
-        var visited = 0;
-        while (queue.Count > 0 && visited < UcMaxVisit && found.Count < UcMaxTexts)
+        public readonly Queue<(UiElement e, int[] path, bool parentHovers)> Queue = new();
+        public readonly List<(string text, int[] path, float[]? rect, bool hover)> Found = [];
+        public int Visited, Frames;
+        public double Us;
+        public long Bytes;
+    }
+
+    /// <summary>Walks until the slice budget is spent; true when the walk is complete. Breadth-first over visible
+    /// children, as guide.highlight's text search walks them, so a recipe finds the same element.</summary>
+    private bool UcStep(UcOpen o, Stopwatch sw)
+    {
+        var w = o.Walk!;
+        while (w.Queue.Count > 0 && w.Visited < UcMaxVisit && w.Found.Count < UcMaxTexts)
         {
-            var (e, path, hoverUp) = queue.Dequeue();
-            visited++;
-            var hovers = UiDetectsHover(e);
-            var hoverDist = hovers ? 0 : hoverUp + 1;   // distance to the nearest hover-detecting ancestor
+            if (sw.Elapsed.TotalMilliseconds * 1000 > UcSliceUs) return false;
+            var (e, path, parentHovers) = w.Queue.Dequeue();
+            w.Visited++;
+            // The panel root and big containers detect hover too: only the element itself or its direct parent count.
+            var hovers = path.Length > 0 && UiDetectsHover(e);
             string? t = null;
             try { t = e.Text; } catch { }
             t = t?.Trim();
-            if (!string.IsNullOrEmpty(t) && t.Length <= 120) found.Add((t, path, e, hoverDist <= 2));
+            if (!string.IsNullOrEmpty(t) && t.Length <= 120) { float[]? r = null; try { var cr = e.GetClientRect(); r = [cr.X, cr.Y, cr.Width, cr.Height]; } catch { } w.Found.Add((t, path, r, hovers || parentHovers)); }
             if (path.Length >= UcMaxDepth) continue;
             IList<UiElement>? cs = null;
             try { cs = e.Children; } catch { }
             if (cs == null) continue;
             for (var i = 0; i < cs.Count; i++)
-                if (cs[i] is { Address: not 0 } c && c.IsVisibleLocal) queue.Enqueue((c, [.. path, i], hoverDist));
+                if (cs[i] is { Address: not 0 } c && c.IsVisibleLocal) w.Queue.Enqueue((c, [.. path, i], hovers));
         }
-        var hash = 17;
-        foreach (var f in found) hash = unchecked(hash * 31 + f.text.GetHashCode());
-        _ucLastVisited = visited;
-        if (found.Count > 0 && hash != o.LastHash)
-        {
-            o.LastHash = hash;
-            lock (_obsLock) UcMerge(root, o, found);
-        }
-        _ucLastUs = sw.Elapsed.TotalMilliseconds * 1000;
-        _ucLastBytes = GC.GetAllocatedBytesForCurrentThread() - a0;
-        _ucMaxUs = Math.Max(_ucMaxUs, _ucLastUs);
-        _ucMaxBytes = Math.Max(_ucMaxBytes, _ucLastBytes);
-        _ucCaptures++;
+        return true;
     }
 
-    private void UcMerge(UiElement root, UcOpen o, List<(string text, int[] path, UiElement e, bool hover)> found)
+    private void UcFinish(UcOpen o)
+    {
+        var w = o.Walk!;
+        o.Walk = null;
+        var hash = 17;
+        foreach (var f in w.Found) hash = unchecked(hash * 31 + f.text.GetHashCode());
+        if (w.Found.Count > 0 && hash != o.LastHash && o.E.IsVisibleLocal)
+        {
+            o.LastHash = hash;
+            lock (_obsLock) UcMerge(o.E, o, w.Found);
+        }
+    }
+
+    private void UcMerge(UiElement root, UcOpen o, List<(string text, int[] path, float[]? rect, bool hover)> found)
     {
         // The title is the first text guide.highlight's panel lookup sees (PanelTexts, the same walk), so panel:title finds it.
         var first = PanelTexts(root, 6, 12);
@@ -209,7 +257,7 @@ public partial class WhatsAnAiBridge
         // Mapped panels: within by walker path (exact); unmapped: within by the title text.
         var within = o.Mapped != null ? $"GameController.IngameState.IngameUi.{o.Mapped}" : title;
         var counts = found.GroupBy(f => f.text, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
-        foreach (var (text, path, e, hover) in found)
+        foreach (var (text, path, rect, hover) in found)
         {
             var unique = counts[text] == 1;
             var opt = entry.Options.FirstOrDefault(x => x.Text == text && (unique || x.Child.SequenceEqual(path)));
@@ -224,7 +272,7 @@ public partial class WhatsAnAiBridge
             opt.Unique = unique;
             opt.LastSeen = now;
             opt.Seen++;
-            try { var r = e.GetClientRect(); opt.Rect = [r.X, r.Y, r.Width, r.Height]; } catch { }
+            opt.Rect = rect;
             opt.Highlight = unique
                 ? new UiHighlightRecipe { Text = text, Within = within }
                 : new UiHighlightRecipe { Panel = title, Child = path };
@@ -278,6 +326,7 @@ public partial class WhatsAnAiBridge
             {
                 ["captures"] = _ucCaptures, ["lastUs"] = Math.Round(_ucLastUs), ["maxUs"] = Math.Round(_ucMaxUs),
                 ["lastBytes"] = _ucLastBytes, ["maxBytes"] = _ucMaxBytes, ["lastVisited"] = _ucLastVisited,
+                ["lastFrames"] = _ucLastFrames, ["maxFrameUs"] = Math.Round(_ucMaxFrameUs), ["sliceUs"] = UcSliceUs,
             },
             ["openNow"] = _ucOpen.Count,
         };
