@@ -62,7 +62,7 @@ public partial class WhatsAnAiBridge
         /// <summary>Child indexes from the panel (top-level IngameUi child) to the element.</summary>
         [JsonProperty("child")] public int[] Child = [];
         [JsonProperty("rect")] public float[]? Rect;
-        /// <summary>A hint: the element or its parent reacts to hover (ElementFlags.DetectsHover; the panel root never counts).
+        /// <summary>A hint, PoE2 only (always false on PoE1): the element or its direct parent reacts to hover (ElementFlags.DetectsHover; the panel root never counts).
         /// False does not mean unclickable (dialogue buttons often lack the flag).</summary>
         [JsonProperty("clickable")] public bool Clickable;
         /// <summary>Its text appears once in the view it was seen in, so a text target hits only it.</summary>
@@ -119,21 +119,28 @@ public partial class WhatsAnAiBridge
 
     private System.Threading.Tasks.Task? _ucLoading;
 
-    /// <summary>Runs the capture path once off the frame (pool thread), so its JIT compiling (the callees and generic
-    /// instantiations too, ~6 ms measured live) never lands in a frame: a short walk of IngameUi merged into a scratch
-    /// catalogue. Read-only memory reads; anything failing just leaves the JIT to the first real capture.</summary>
+    /// <summary>JIT-compiles the capture path off the frame (pool thread): its first run in a frame cost 6-8 ms of
+    /// compiling, measured live. No game UI is touched here (the HUD's element caches belong to the render thread):
+    /// UcStep / UcFinish are prepared, and UcMerge runs once on synthetic texts into a scratch catalogue, which also
+    /// instantiates its LINQ and tuple generics.</summary>
     private void UcPrepare()
     {
         try
         {
-            if (GameController?.IngameState?.IngameUi is not UiElement root) return;
-            var o = new UcOpen { E = root, OpenedAt = DateTime.UtcNow, Walk = new UcWalk() };
-            o.Walk.Queue.Enqueue((root, [], false));
-            UcStep(o, Stopwatch.StartNew(), 3000);
-            if (o.Walk.Found.Count > 0) UcMerge(new UiCatalogueFile(), root, o, o.Walk.Found);
+            foreach (var name in new[] { nameof(UcStep), nameof(UcFinish), nameof(UiDetectsHover) })
+                if (typeof(WhatsAnAiBridge).GetMethod(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static
+                        | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public) is { } m)
+                    System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(m.MethodHandle);
+            var o = new UcOpen { E = null!, OpenedAt = DateTime.UtcNow };
+            UcMerge(new UiCatalogueFile(), null, o, [("warm", [0], [0f, 0f, 1f, 1f], false), ("up", [1], null, true), ("up", [2], null, false)]);
         }
         catch { }
     }
+    private bool UcGameInFront()
+    {
+        try { return GameController.Window.IsForeground(); } catch { return false; }
+    }
+
     private readonly object _ucLock = new();   // the catalogue: merges (main thread), the writer and queries
 
     /// <summary>From ObservePanels: a top-level panel became visible / hidden.</summary>
@@ -152,7 +159,8 @@ public partial class WhatsAnAiBridge
         if (_uc == null) { _ucLoading ??= System.Threading.Tasks.Task.Run(() => { UcPrepare(); Uc(); }); return; }
         bool down = false;
         try { down = Input.IsKeyDown(0x01); } catch { }   // VK_LBUTTON: reading key state, never sending
-        var released = _ucMouseWasDown && !down;
+        // Only clicks in the game count (a click in another window over the game is not the user using this panel).
+        var released = _ucMouseWasDown && !down && UcGameInFront();
         _ucMouseWasDown = down;
         var mouse = released ? ImGuiNET.ImGui.GetIO().MousePos : default;
         // One walk at a time, sliced: at most UcSliceUs of it per frame (a big panel spreads over a few frames), so a
@@ -241,21 +249,28 @@ public partial class WhatsAnAiBridge
     private bool UcFinish(UcOpen o)
     {
         var w = o.Walk!;
-        var hash = 17;
-        foreach (var f in w.Found) hash = unchecked(hash * 31 + f.text.GetHashCode());
+        // FNV-1a over the texts: stable across processes (string.GetHashCode is randomized per run), since view hashes persist.
+        var hash = unchecked((int)2166136261);
+        foreach (var f in w.Found)
+        {
+            foreach (var ch in f.text) hash = unchecked((hash ^ ch) * 16777619);
+            hash = unchecked((hash ^ '\n') * 16777619);
+        }
         if (w.Found.Count > 0 && hash != o.LastHash && o.E.IsVisibleLocal)
         {
             // The writer may hold the lock while it serializes: never wait in a frame, merge on a later one.
             if (!System.Threading.Monitor.TryEnter(_ucLock)) return false;
+            var previous = o.LastHash;
+            o.LastHash = hash;   // UcMerge records it as this view
             try { UcMerge(Uc(), o.E, o, w.Found); }
+            catch { o.LastHash = previous; throw; }
             finally { System.Threading.Monitor.Exit(_ucLock); }
-            o.LastHash = hash;
         }
         o.Walk = null;
         return true;
     }
 
-    private void UcMerge(UiCatalogueFile cat, UiElement root, UcOpen o, List<(string text, int[] path, float[]? rect, bool hover)> found)
+    private void UcMerge(UiCatalogueFile cat, UiElement? root, UcOpen o, List<(string text, int[] path, float[]? rect, bool hover)> found)
     {
         // The title is the first visible text breadth-first: among the first texts guide.highlight's panel lookup reads
         // (PanelTexts, breadth-first too), so panel:title finds it. Not PanelTexts itself: it walks hidden children as well
@@ -283,7 +298,7 @@ public partial class WhatsAnAiBridge
         entry.LastSeen = now;
         if (_obsArea != null && !entry.Areas.Contains(_obsArea)) { entry.Areas.Add(_obsArea); if (entry.Areas.Count > 12) entry.Areas.RemoveAt(0); }
         if (!entry.ViewHashes.Contains(o.LastHash)) { entry.ViewHashes.Add(o.LastHash); entry.Views++; if (entry.ViewHashes.Count > 50) entry.ViewHashes.RemoveAt(0); }
-        try { var r = root.GetClientRect(); entry.Rect = [r.X, r.Y, r.Width, r.Height]; } catch { }
+        if (root != null) try { var r = root.GetClientRect(); entry.Rect = [r.X, r.Y, r.Width, r.Height]; } catch { }
         // Mapped panels: within by walker path (exact); unmapped: within by the title text.
         var within = o.Mapped != null ? $"GameController.IngameState.IngameUi.{o.Mapped}" : title;
         var counts = found.GroupBy(f => f.text, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
@@ -299,11 +314,11 @@ public partial class WhatsAnAiBridge
             }
             opt.Child = path;
             opt.Clickable = hover;
-            opt.Unique = unique;
+            opt.Unique = unique && (opt.Seen == 0 || opt.Unique);   // repeated in any view it was seen in: panel+child from then on
             opt.LastSeen = now;
             opt.Seen++;
             opt.Rect = rect;
-            opt.Highlight = unique
+            opt.Highlight = opt.Unique
                 ? new UiHighlightRecipe { Text = text, Within = within }
                 : new UiHighlightRecipe { Panel = title, Child = path };
         }
@@ -328,7 +343,7 @@ public partial class WhatsAnAiBridge
                 File.WriteAllText(tmp, json);
                 File.Move(tmp, UcPath, overwrite: true);
             }
-            catch (Exception ex) { _ucLastError = $"catalogue write failed ({UcPath}): {ex.Message}"; }
+            catch (Exception ex) { _ucDirty = true; _ucLastError = $"catalogue write failed ({UcPath}): {ex.Message}"; }
             finally { _ucWriting = false; }
         });
     }
@@ -344,9 +359,11 @@ public partial class WhatsAnAiBridge
         var withOptions = p?["options"]?.Value<bool>() ?? true;
         List<UiCatalogueEntry> list;
         JArray entries;
+        int total;
         lock (_ucLock)
         {
             var all = Uc().Entries;
+            total = all.Count;
             list = all.Where(x => (key == null || string.Equals(x.Key, key, StringComparison.OrdinalIgnoreCase))
                 && (string.IsNullOrEmpty(query) || Has(x.Key) || Has(x.Title) || Has(x.Npc) || x.Areas.Any(Has) || x.Options.Any(o => Has(o.Text))))
                 .OrderByDescending(x => x.LastSeen).ToList();
@@ -360,7 +377,7 @@ public partial class WhatsAnAiBridge
         }
         var r = new JObject
         {
-            ["ok"] = true, ["observing"] = Obs().Enabled, ["file"] = UcPath, ["total"] = Uc().Entries.Count, ["entries"] = entries,
+            ["ok"] = true, ["observing"] = Obs().Enabled, ["file"] = UcPath, ["total"] = total, ["entries"] = entries,
             ["cost"] = new JObject
             {
                 ["captures"] = _ucCaptures, ["lastUs"] = Math.Round(_ucLastUs), ["maxUs"] = Math.Round(_ucMaxUs),
@@ -372,8 +389,8 @@ public partial class WhatsAnAiBridge
         if (_ucLastError != null) r["lastError"] = _ucLastError;
         if (list.Count == 0)
             r["why"] = !Obs().Enabled ? "observe is off: nothing is catalogued until observe.start"
-                : key != null ? $"no catalogued interface with key '{key}' ({Uc().Entries.Count} catalogued)"
-                : !string.IsNullOrEmpty(query) ? $"no catalogued interface matches '{query}' ({Uc().Entries.Count} catalogued)"
+                : key != null ? $"no catalogued interface with key '{key}' ({total} catalogued)"
+                : !string.IsNullOrEmpty(query) ? $"no catalogued interface matches '{query}' ({total} catalogued)"
                 : "nothing catalogued yet: interfaces are added when a panel opens while observing";
         return r;
 
