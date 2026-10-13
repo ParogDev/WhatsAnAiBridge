@@ -110,10 +110,15 @@ public partial class WhatsAnAiBridge
     private UiCatalogueFile Uc()
     {
         if (_uc != null) return _uc;
-        try { _uc = File.Exists(UcPath) ? JsonConvert.DeserializeObject<UiCatalogueFile>(File.ReadAllText(UcPath)) ?? new() : new(); }
-        catch (Exception ex) { _ucLastError = $"catalogue load failed ({UcPath}): {ex.Message}"; _uc = new(); }
+        UiCatalogueFile loaded;
+        try { loaded = File.Exists(UcPath) ? JsonConvert.DeserializeObject<UiCatalogueFile>(File.ReadAllText(UcPath)) ?? new() : new(); }
+        catch (Exception ex) { _ucLastError = $"catalogue load failed ({UcPath}): {ex.Message}"; loaded = new(); }
+        lock (_ucLock) _uc ??= loaded;
         return _uc;
     }
+
+    private System.Threading.Tasks.Task? _ucLoading;
+    private readonly object _ucLock = new();   // the catalogue: merges (main thread), the writer and queries
 
     /// <summary>From ObservePanels: a top-level panel became visible / hidden.</summary>
     private void UcPanelChanged(long addr, UiElement e, bool visible, string? mapped)
@@ -126,6 +131,8 @@ public partial class WhatsAnAiBridge
     private void UcTick(DateTime now)
     {
         if (_ucOpen.Count == 0) { _ucMouseWasDown = false; return; }
+        // The catalogue file is read (and Newtonsoft warmed up) on a pool thread, never in a frame.
+        if (_uc == null) { _ucLoading ??= System.Threading.Tasks.Task.Run(Uc); return; }
         bool down = false;
         try { down = Input.IsKeyDown(0x01); } catch { }   // VK_LBUTTON: reading key state, never sending
         var released = _ucMouseWasDown && !down;
@@ -159,7 +166,7 @@ public partial class WhatsAnAiBridge
         var sw = Stopwatch.StartNew();
         var a0 = GC.GetAllocatedBytesForCurrentThread();
         var done = false;
-        try { done = UcStep(o, sw); if (done) UcFinish(o); }
+        try { done = UcStep(o, sw) && UcFinish(o); }
         catch (Exception ex)
         {
             o.Walk = null;
@@ -213,24 +220,30 @@ public partial class WhatsAnAiBridge
         return true;
     }
 
-    private void UcFinish(UcOpen o)
+    private bool UcFinish(UcOpen o)
     {
         var w = o.Walk!;
-        o.Walk = null;
         var hash = 17;
         foreach (var f in w.Found) hash = unchecked(hash * 31 + f.text.GetHashCode());
         if (w.Found.Count > 0 && hash != o.LastHash && o.E.IsVisibleLocal)
         {
+            // The writer may hold the lock while it serializes: never wait in a frame, merge on a later one.
+            if (!System.Threading.Monitor.TryEnter(_ucLock)) return false;
+            try { UcMerge(o.E, o, w.Found); }
+            finally { System.Threading.Monitor.Exit(_ucLock); }
             o.LastHash = hash;
-            lock (_obsLock) UcMerge(o.E, o, w.Found);
         }
+        o.Walk = null;
+        return true;
     }
 
     private void UcMerge(UiElement root, UcOpen o, List<(string text, int[] path, float[]? rect, bool hover)> found)
     {
-        // The title is the first text guide.highlight's panel lookup sees (PanelTexts, the same walk), so panel:title finds it.
-        var first = PanelTexts(root, 6, 12);
-        var title = first.Count > 0 ? first[0].Trim() : null;
+        // The title is the first visible text breadth-first: among the first texts guide.highlight's panel lookup reads
+        // (PanelTexts, breadth-first too), so panel:title finds it. Not PanelTexts itself: it walks hidden children as well
+        // (up to ~360 elements, milliseconds on big panels) in one frame.
+        var first = found.Select(f => f.text).Distinct().Take(6).ToList();
+        var title = first.Count > 0 ? first[0] : null;
         if (title == null) return;   // no text: nothing to recognise it by or point at
         string? npc = null;
         if (o.Mapped == "NpcDialog") try { npc = GameController.IngameState.IngameUi.NpcDialog?.NpcName?.Trim(); } catch { }
@@ -249,7 +262,7 @@ public partial class WhatsAnAiBridge
         entry.Mapped = o.Mapped;
         entry.Title = title;
         entry.Npc = npc ?? entry.Npc;
-        entry.Recognise = first.Take(6).ToList();
+        entry.Recognise = first;
         entry.LastSeen = now;
         if (_obsArea != null && !entry.Areas.Contains(_obsArea)) { entry.Areas.Add(_obsArea); if (entry.Areas.Count > 12) entry.Areas.RemoveAt(0); }
         if (!entry.ViewHashes.Contains(o.LastHash)) { entry.ViewHashes.Add(o.LastHash); entry.Views++; if (entry.ViewHashes.Count > 50) entry.ViewHashes.RemoveAt(0); }
@@ -283,19 +296,27 @@ public partial class WhatsAnAiBridge
     /// <summary>From ObsFlush: writes the catalogue when it changed (at most every 500 ms).</summary>
     private void UcFlush()
     {
-        if (!_ucDirty || _uc == null) return;
+        if (!_ucDirty || _uc == null || _ucWriting) return;
         _ucDirty = false;
-        try
+        _ucWriting = true;
+        // Serialized and written on a pool thread (400 entries are a few hundred KB of JSON: not in a frame).
+        System.Threading.Tasks.Task.Run(() =>
         {
-            Directory.CreateDirectory(ObsDir);
-            var tmp = UcPath + ".tmp";
-            string json;
-            lock (_obsLock) json = JsonConvert.SerializeObject(_uc, Formatting.Indented);
-            File.WriteAllText(tmp, json);
-            File.Move(tmp, UcPath, overwrite: true);
-        }
-        catch (Exception ex) { _ucLastError = $"catalogue write failed ({UcPath}): {ex.Message}"; }
+            try
+            {
+                Directory.CreateDirectory(ObsDir);
+                var tmp = UcPath + ".tmp";
+                string json;
+                lock (_ucLock) json = JsonConvert.SerializeObject(_uc, Formatting.Indented);
+                File.WriteAllText(tmp, json);
+                File.Move(tmp, UcPath, overwrite: true);
+            }
+            catch (Exception ex) { _ucLastError = $"catalogue write failed ({UcPath}): {ex.Message}"; }
+            finally { _ucWriting = false; }
+        });
     }
+
+    private volatile bool _ucWriting;
 
     /// <summary>observe.ui_catalogue {query?, key?, options?}: the catalogued interfaces; query matches key, title, NPC,
     /// area or an option's text; options=false leaves the option lists out.</summary>
@@ -305,20 +326,21 @@ public partial class WhatsAnAiBridge
         var key = p?["key"]?.ToString();
         var withOptions = p?["options"]?.Value<bool>() ?? true;
         List<UiCatalogueEntry> list;
-        lock (_obsLock)
+        JArray entries;
+        lock (_ucLock)
         {
             var all = Uc().Entries;
             list = all.Where(x => (key == null || string.Equals(x.Key, key, StringComparison.OrdinalIgnoreCase))
                 && (string.IsNullOrEmpty(query) || Has(x.Key) || Has(x.Title) || Has(x.Npc) || x.Areas.Any(Has) || x.Options.Any(o => Has(o.Text))))
                 .OrderByDescending(x => x.LastSeen).ToList();
+            entries = new JArray(list.Select(x =>
+            {
+                var j = JObject.FromObject(x);
+                j.Remove("viewHashes");
+                if (!withOptions) { j.Remove("options"); j["optionCount"] = x.Options.Count; }
+                return j;
+            }));
         }
-        var entries = new JArray(list.Select(x =>
-        {
-            var j = JObject.FromObject(x);
-            j.Remove("viewHashes");
-            if (!withOptions) { j.Remove("options"); j["optionCount"] = x.Options.Count; }
-            return j;
-        }));
         var r = new JObject
         {
             ["ok"] = true, ["observing"] = Obs().Enabled, ["file"] = UcPath, ["total"] = Uc().Entries.Count, ["entries"] = entries,
