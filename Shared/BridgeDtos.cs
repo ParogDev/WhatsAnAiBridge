@@ -982,3 +982,193 @@ public class HelloDto
     [JsonProperty("reflection", NullValueHandling = NullValueHandling.Ignore)]
     public ReflectionPreflightDto? Reflection { get; set; }
 }
+
+// ── object.find / object.snapshot (Shared/ObjectSearch.cs) ───────────────
+
+/// <summary>object.find / object.snapshot refused: the root path broke (the walker's message names the segment) or a bad parameter.</summary>
+public class ObjectPathErrorDto
+{
+    /// <summary>resolve_failed (a segment broke) | bad_request (parameters).</summary>
+    [JsonProperty("error")]
+    public string Error { get; set; } = "";
+
+    [JsonProperty("message")]
+    public string Message { get; set; } = "";
+
+    [JsonProperty("path")]
+    public string Path { get; set; } = "";
+}
+
+/// <summary>What a graph walk spent and what it left out. Shared by object.find and object.snapshot.</summary>
+public class ObjectWalkBudgetDto
+{
+    /// <summary>Objects, structs, collections and components whose members or items were read.</summary>
+    [JsonProperty("nodesOpened")]
+    public int NodesOpened { get; set; }
+
+    /// <summary>Members, items and components read.</summary>
+    [JsonProperty("membersRead")]
+    public int MembersRead { get; set; }
+
+    [JsonProperty("maxNodes")]
+    public int MaxNodes { get; set; }
+
+    /// <summary>The time budget, ms.</summary>
+    [JsonProperty("timeMs")]
+    public int TimeMs { get; set; }
+
+    [JsonProperty("elapsedMs")]
+    public double ElapsedMs { get; set; }
+
+    /// <summary>Deepest level opened (root = 0).</summary>
+    [JsonProperty("deepestLevel")]
+    public int DeepestLevel { get; set; }
+
+    /// <summary>Not expanded again: already visited (same reference, or same type at the same Address). The cycle guard.</summary>
+    [JsonProperty("cycles")]
+    public int Cycles { get; set; }
+
+    /// <summary>Not expanded: memory plumbing (Memory, GameController, TheGame) and Owner back-references.</summary>
+    [JsonProperty("plumbing")]
+    public int Plumbing { get; set; }
+
+    /// <summary>Not read: the member's type is outside the walker's allowed namespaces.</summary>
+    [JsonProperty("blocked")]
+    public int Blocked { get; set; }
+
+    /// <summary>Expandable values not opened because they sit at the depth limit.</summary>
+    [JsonProperty("atDepthLimit")]
+    public int AtDepthLimit { get; set; }
+
+    /// <summary>Collection items past listLimit, not read.</summary>
+    [JsonProperty("itemsSkipped")]
+    public int ItemsSkipped { get; set; }
+
+    /// <summary>Getters that threw (the first few are in errors).</summary>
+    [JsonProperty("getterErrors")]
+    public int GetterErrors { get; set; }
+}
+
+/// <summary>Set when a walk stopped before its queue was empty.</summary>
+public class ObjectWalkTruncationDto
+{
+    /// <summary>nodes (maxNodes) | time (timeMs) | matches (maxMatches) | leaves (maxLeaves).</summary>
+    [JsonProperty("reason")]
+    public string Reason { get; set; } = "";
+
+    /// <summary>The first node not opened: its walker path, else its C#.</summary>
+    [JsonProperty("at")]
+    public string At { get; set; } = "";
+
+    /// <summary>Nodes still queued when it stopped.</summary>
+    [JsonProperty("pending")]
+    public int Pending { get; set; }
+
+    [JsonProperty("hint")]
+    public string Hint { get; set; } = "";
+}
+
+/// <summary>A getter that threw during a walk: where and the message.</summary>
+public class ObjectWalkErrorDto
+{
+    /// <summary>The member's walker path, else its C#.</summary>
+    [JsonProperty("at")]
+    public string At { get; set; } = "";
+
+    [JsonProperty("message")]
+    public string Message { get; set; } = "";
+}
+
+public class ObjectFindMatchDto
+{
+    /// <summary>Walker path; null where the walker cannot address it (items of an indexed path, sequences).</summary>
+    [JsonProperty("path", NullValueHandling = NullValueHandling.Include)]
+    public string? Path { get; set; }
+
+    /// <summary>Null-safe C# for a plugin.</summary>
+    [JsonProperty("csharp")]
+    public string Csharp { get; set; } = "";
+
+    /// <summary>The member's type, or "component".</summary>
+    [JsonProperty("type")]
+    public string Type { get; set; } = "";
+
+    [JsonProperty("kind")]
+    public string Kind { get; set; } = "";
+
+    /// <summary>One-line preview; null for components.</summary>
+    [JsonProperty("value", NullValueHandling = NullValueHandling.Include)]
+    public string? Value { get; set; }
+
+    /// <summary>Levels below the root (a member of the root = 1).</summary>
+    [JsonProperty("level")]
+    public int Level { get; set; }
+
+    /// <summary>name | value | name+value.</summary>
+    [JsonProperty("by")]
+    public string By { get; set; } = "";
+}
+
+/// <summary>object.find {path, name?, value?, depth, maxNodes, timeMs, maxMatches, listLimit}: one breadth-first search in one request.</summary>
+public class ObjectFindResponse
+{
+    [JsonProperty("root")]
+    public string Root { get; set; } = "";
+
+    [JsonProperty("name", NullValueHandling = NullValueHandling.Include)]
+    public string? Name { get; set; }
+
+    [JsonProperty("value", NullValueHandling = NullValueHandling.Include)]
+    public string? Value { get; set; }
+
+    [JsonProperty("depth")]
+    public int Depth { get; set; }
+
+    [JsonProperty("matches")]
+    public List<ObjectFindMatchDto> Matches { get; set; } = new();
+
+    [JsonProperty("budget")]
+    public ObjectWalkBudgetDto Budget { get; set; } = new();
+
+    [JsonProperty("truncated", NullValueHandling = NullValueHandling.Ignore)]
+    public ObjectWalkTruncationDto? Truncated { get; set; }
+
+    [JsonProperty("errors", NullValueHandling = NullValueHandling.Ignore)]
+    public List<ObjectWalkErrorDto>? Errors { get; set; }
+
+    [JsonProperty("game")]
+    public string Game { get; set; } = "";
+}
+
+/// <summary>
+/// object.snapshot {path, depth, maxNodes, maxLeaves, timeMs, listLimit, components}: every leaf under a path down to a depth,
+/// keyed by walker sub-path ("CurHP", "Health.Current", "Buffs[0].Name", "Buffs.Count", "Stats[\"MaximumLife\"]") with a one-line
+/// value. watch_object diffs consecutive snapshots.
+/// </summary>
+public class ObjectSnapshotResponse
+{
+    [JsonProperty("path")]
+    public string Path { get; set; } = "";
+
+    /// <summary>Runtime type of the root ("null" when it is null).</summary>
+    [JsonProperty("type")]
+    public string Type { get; set; } = "";
+
+    [JsonProperty("depth")]
+    public int Depth { get; set; }
+
+    [JsonProperty("leaves")]
+    public Dictionary<string, string> Leaves { get; set; } = new();
+
+    [JsonProperty("budget")]
+    public ObjectWalkBudgetDto Budget { get; set; } = new();
+
+    [JsonProperty("truncated", NullValueHandling = NullValueHandling.Ignore)]
+    public ObjectWalkTruncationDto? Truncated { get; set; }
+
+    [JsonProperty("errors", NullValueHandling = NullValueHandling.Ignore)]
+    public List<ObjectWalkErrorDto>? Errors { get; set; }
+
+    [JsonProperty("game")]
+    public string Game { get; set; } = "";
+}

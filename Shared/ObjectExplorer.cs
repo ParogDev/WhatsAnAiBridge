@@ -26,7 +26,7 @@ public partial class WhatsAnAiBridge
 
     private string? ProcessExploreMethod(string method, JToken? p)
     {
-        if (method != "object.explore") return null;
+        if (method != "object.explore") return ProcessObjectSearchMethod(method, p);   // object.find / object.snapshot (ObjectSearch.cs)
         var path = (p?["path"]?.Value<string>() ?? "GameController").Trim();
         return Explore(path, p?["csharp"]?.Value<string>(),
                 Math.Max(0, p?["offset"]?.Value<int>() ?? 0), Math.Clamp(p?["limit"]?.Value<int>() ?? 50, 1, 200))
