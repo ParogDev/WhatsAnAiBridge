@@ -27,7 +27,7 @@ public partial class WhatsAnAiBridge
 
     private string? ProcessMemoryMethod(string method, JToken? p) => method switch
     {
-        "memory.read" => SafeMemory(() => MemoryRead(p)),
+        "memory.read" => SafeMemoryText(() => MemoryRead(p, out var json) is { } o ? o.ToString(Newtonsoft.Json.Formatting.None) : json!),
         "memory.layout" => SafeMemory(() => MemoryLayout(p)),
         "memory.collect" => SafeMemory(() => MemoryCollect(p)),
         "memory.where" => SafeMemory(() =>
@@ -44,12 +44,25 @@ public partial class WhatsAnAiBridge
         catch (Exception ex) { return Err("memory_failed", (ex as TargetInvocationException)?.InnerException?.Message ?? ex.Message).ToString(Newtonsoft.Json.Formatting.None); }
     }
 
+    private static string SafeMemoryText(Func<string> f)
+    {
+        try { return f(); }
+        catch (Exception ex) { return Err("memory_failed", (ex as TargetInvocationException)?.InnerException?.Message ?? ex.Message).ToString(Newtonsoft.Json.Formatting.None); }
+    }
+
     private static JObject Err(string code, string message) => new() { ["error"] = code, ["message"] = message };
 
     // ── memory.read ──────────────────────────────────────────────────
 
-    private JObject MemoryRead(JToken? p)
+    private JObject MemoryRead(JToken? p) => MemoryRead(p, out var json) ?? JObject.Parse(json!);
+
+    /// <summary>
+    /// An error or a classify=false read comes back as a JObject; a classified read is written straight to JSON (json,
+    /// null returned): the same text a JObject of it would serialize to, without building ~1.5 KB of JObject per slot.
+    /// </summary>
+    private JObject? MemoryRead(JToken? p, out string? json)
     {
+        json = null;
         var ctx = new MemoryContext(this);
         var (start, origin, err) = ResolveBase(p);
         if (err != null) return err;
@@ -63,23 +76,28 @@ public partial class WhatsAnAiBridge
         if (p?["classify"]?.Value<bool>() == false)
             return new JObject { ["address"] = Hex(address), ["size"] = bytes.Length, ["data"] = Convert.ToBase64String(bytes) };
 
-        var slots = new JArray();
-        for (int off = 0; off + 8 <= bytes.Length; off += 8)
+        // Property order as the JObject this used to build: address, size, origin, region, module, slots, hex, base.
+        var sw = new System.IO.StringWriter(new StringBuilder(4096 + bytes.Length * 16), CultureInfo.InvariantCulture);
+        using (var w = new Newtonsoft.Json.JsonTextWriter(sw) { Formatting = Newtonsoft.Json.Formatting.None })
         {
-            var slot = Classify(BitConverter.ToInt64(bytes, off), bytes, off, ctx, deep: true);
-            slot.AddFirst(new JProperty("off", off));
-            slots.Add(slot);
+            w.WriteStartObject();
+            w.WritePropertyName("address"); w.WriteValue(Hex(address));
+            w.WritePropertyName("size"); w.WriteValue(bytes.Length);
+            w.WritePropertyName("origin"); w.WriteValue(origin);
+            w.WritePropertyName("region"); w.WriteValue(ctx.RegionText(address));
+            w.WritePropertyName("module"); ctx.ModuleInfo().WriteTo(w);
+            w.WritePropertyName("slots");
+            w.WriteStartArray();
+            for (int off = 0; off + 8 <= bytes.Length; off += 8)
+                ClassifySlot(BitConverter.ToInt64(bytes, off), bytes, off, ctx, deep: true).Write(w, off);
+            w.WriteEndArray();
+            w.WritePropertyName("hex");
+            WriteHexDump(w, bytes);
+            if (offset != 0) { w.WritePropertyName("base"); w.WriteValue(Hex(start)); }
+            w.WriteEndObject();
         }
-        var o = new JObject
-        {
-            ["address"] = Hex(address), ["size"] = bytes.Length, ["origin"] = origin,
-            ["region"] = ctx.RegionText(address),
-            ["module"] = ctx.ModuleInfo(),
-            ["slots"] = slots,
-            ["hex"] = HexDump(bytes),
-        };
-        if (offset != 0) o["base"] = Hex(start);
-        return o;
+        json = sw.ToString();
+        return null;
     }
 
     // ── memory.collect ───────────────────────────────────────────────
@@ -318,12 +336,19 @@ public partial class WhatsAnAiBridge
     /// Set bit indices for values that look like flags (2-12 bits set, not a small count) - e.g. stash tab
     /// affinities are a bit mask. Null for plain numbers.
     /// </summary>
-    private static JArray? Bits(long v, int width)
+    /// <summary>Whether Bits(v, width) lists anything (a flag-like value: 1-12 bits set).</summary>
+    private static bool BitsWorth(long v, int width)
     {
         if (width < 64) v &= (1L << width) - 1;
-        if (v <= 0) return null;
+        if (v <= 0) return false;
         int pop = System.Numerics.BitOperations.PopCount((ulong)v);
-        if (pop < 1 || pop > 12 || v < 8 && pop < 2) return null;
+        return !(pop < 1 || pop > 12 || v < 8 && pop < 2);
+    }
+
+    private static JArray? Bits(long v, int width)
+    {
+        if (!BitsWorth(v, width)) return null;
+        if (width < 64) v &= (1L << width) - 1;
         var a = new JArray();
         for (int i = 0; i < width; i++) if ((v & (1L << i)) != 0) a.Add(i);
         return a;
@@ -378,38 +403,105 @@ public partial class WhatsAnAiBridge
 
     // ── Slot classification ──────────────────────────────────────────
 
-    /// <summary>What an 8-byte value probably is. deep: follow heap pointers one level (vtable/RTTI, text).</summary>
-    private static JObject Classify(long v, byte[] b, int off, MemoryContext ctx, bool deep)
+    /// <summary>
+    /// One classified 8-byte slot, as plain fields: memory.read streams thousands of these straight to JSON (a JObject per
+    /// slot cost ~1.5 KB, most of a 4 KB read's 1.1 MB), memory.layout / memory.where still get a JObject (ToJObject).
+    /// The properties come out in the order Classify always produced: hex, kind, module, section, rva, ghidra, rtti,
+    /// firstMethod, points, text, value, bits.
+    /// </summary>
+    private struct SlotInfo
     {
-        var o = new JObject { ["hex"] = Hex(v) };
-        if (v == 0) { o["kind"] = "zero"; return o; }
+        public long V;
+        public string Kind;
+        public string? Module, Section, Rtti, Points, Text, Value;
+        public long Rva, Ghidra, FirstMethod;
+        public bool InModule, HasFirstMethod;
+        public int BitsOf; // > 0: the set bits of this int32 go in "bits"
+
+        public readonly JObject ToJObject()
+        {
+            var o = new JObject { ["hex"] = Hex(V), ["kind"] = Kind };
+            if (InModule)
+            {
+                o["module"] = Module;
+                if (Section != null) o["section"] = Section;
+                o["rva"] = Hex(Rva);
+                o["ghidra"] = Hex(Ghidra);
+            }
+            if (Rtti != null) o["rtti"] = Rtti;
+            if (HasFirstMethod) o["firstMethod"] = Hex(FirstMethod);
+            if (Points != null) o["points"] = Points;
+            if (Text != null) o["text"] = Text;
+            if (Value != null) o["value"] = Value;
+            if (BitsOf > 0 && Bits(BitsOf, 32) is { } bits) o["bits"] = bits;
+            return o;
+        }
+
+        /// <summary>The same object as ToJObject() (with "off" first), written straight to a JSON writer.</summary>
+        public readonly void Write(Newtonsoft.Json.JsonWriter w, int off)
+        {
+            w.WriteStartObject();
+            w.WritePropertyName("off"); w.WriteValue(off);
+            w.WritePropertyName("hex"); w.WriteValue(Hex(V));
+            w.WritePropertyName("kind"); w.WriteValue(Kind);
+            if (InModule)
+            {
+                w.WritePropertyName("module"); w.WriteValue(Module);
+                if (Section != null) { w.WritePropertyName("section"); w.WriteValue(Section); }
+                w.WritePropertyName("rva"); w.WriteValue(Hex(Rva));
+                w.WritePropertyName("ghidra"); w.WriteValue(Hex(Ghidra));
+            }
+            if (Rtti != null) { w.WritePropertyName("rtti"); w.WriteValue(Rtti); }
+            if (HasFirstMethod) { w.WritePropertyName("firstMethod"); w.WriteValue(Hex(FirstMethod)); }
+            if (Points != null) { w.WritePropertyName("points"); w.WriteValue(Points); }
+            if (Text != null) { w.WritePropertyName("text"); w.WriteValue(Text); }
+            if (Value != null) { w.WritePropertyName("value"); w.WriteValue(Value); }
+            if (BitsOf > 0 && BitsWorth(BitsOf, 32))
+            {
+                w.WritePropertyName("bits");
+                w.WriteStartArray();
+                for (int i = 0; i < 32; i++) if ((BitsOf & (1L << i)) != 0) w.WriteValue(i);
+                w.WriteEndArray();
+            }
+            w.WriteEndObject();
+        }
+    }
+
+    /// <summary>What an 8-byte value probably is. deep: follow heap pointers one level (vtable/RTTI, text).</summary>
+    private static JObject Classify(long v, byte[] b, int off, MemoryContext ctx, bool deep) => ClassifySlot(v, b, off, ctx, deep).ToJObject();
+
+    private static SlotInfo ClassifySlot(long v, byte[] b, int off, MemoryContext ctx, bool deep)
+    {
+        var o = new SlotInfo { V = v };
+        if (v == 0) { o.Kind = "zero"; return o; }
         if (ctx.InModule(v, out var section, out var rva))
         {
-            o["kind"] = "module";
-            o["module"] = ctx.ModuleName;
-            if (section != null) o["section"] = section;
-            o["rva"] = Hex(rva);
-            o["ghidra"] = Hex(ctx.ImageBase + rva);
+            o.Kind = "module";
+            o.InModule = true;
+            o.Module = ctx.ModuleName;
+            o.Section = section;
+            o.Rva = rva;
+            o.Ghidra = ctx.ImageBase + rva;
             if (section is ".rdata" or ".data")
             {
-                if (ctx.RttiName(v) is { } rtti) { o["kind"] = "vtable"; o["rtti"] = rtti; }
+                if (ctx.RttiName(v) is { } rtti) { o.Kind = "vtable"; o.Rtti = rtti; }
                 // No RTTI (the game strips it): a .rdata slot whose first entry points into code is still a vtable.
-                else if (ctx.Read(v, 8) is { } e && ctx.InModule(BitConverter.ToInt64(e, 0), out var es, out var erva) && es == ".text")
-                { o["kind"] = "vtable"; o["firstMethod"] = Hex(ctx.ImageBase + erva); }
+                else if (ctx.Qword(v, section) is { } e && ctx.InModule(e, out var es, out var erva) && es == ".text")
+                { o.Kind = "vtable"; o.HasFirstMethod = true; o.FirstMethod = ctx.ImageBase + erva; }
             }
             return o;
         }
         if (v > 0x10000 && v < 0x7FFF_FFFF_FFFF && ctx.Readable(v))
         {
-            o["kind"] = "heap";
+            o.Kind = "heap";
             // A pointer at a row of a loaded game data table: name it (StashType.dat[5] "MapStash").
-            if (deep && ctx.DataRow(v) is { } row) { o["kind"] = "data-row"; o["points"] = row; return o; }
+            if (deep && ctx.DataRow(v) is { } row) { o.Kind = "data-row"; o.Points = row; return o; }
             if (deep && ctx.Read(v, 16) is { } peek)
             {
                 var first = BitConverter.ToInt64(peek, 0);
                 if (ctx.InModule(first, out var s2, out var r2) && s2 is ".rdata")
-                    o["points"] = ctx.RttiName(first) is { } cls ? $"object {cls}" : $"object (vtable {Hex(ctx.ImageBase + r2)})";
-                else if (Text(peek) is { } text) { o["points"] = "text"; o["text"] = text; }
+                    o.Points = ctx.RttiName(first) is { } cls ? $"object {cls}" : $"object (vtable {Hex(ctx.ImageBase + r2)})";
+                else if (BytesText(peek) is { } text) { o.Points = "text"; o.Text = text; }
             }
             return o;
         }
@@ -417,13 +509,13 @@ public partial class WhatsAnAiBridge
         int lo = BitConverter.ToInt32(b, off), hi = BitConverter.ToInt32(b, off + 4);
         float flo = BitConverter.ToSingle(b, off), fhi = BitConverter.ToSingle(b, off + 4);
         if (Plausible(flo) && Plausible(fhi) && (Math.Abs((long)lo) > 100_000 || Math.Abs((long)hi) > 100_000)) // long: Math.Abs(int.MinValue) throws
-        { o["kind"] = "float"; o["value"] = $"{Num(flo)}, {Num(fhi)}"; }
-        else if (Text(b.AsSpan(off, 8).ToArray()) is { } t8) { o["kind"] = "text"; o["text"] = t8; }
+        { o.Kind = "float"; o.Value = $"{Num(flo)}, {Num(fhi)}"; }
+        else if (BytesText(b.AsSpan(off, 8)) is { } t8) { o.Kind = "text"; o.Text = t8; }
         else
         {
-            o["kind"] = (v >> 47) != 0 && (v >> 47) != -1 ? "bad-pointer" : "int";
-            o["value"] = hi == 0 || hi == -1 ? lo.ToString(CultureInfo.InvariantCulture) : $"{lo}, {hi}";
-            if (hi == 0 && lo >= 16 && System.Numerics.BitOperations.PopCount((uint)lo) is >= 1 and <= 3 && Bits(lo, 32) is { } bits) o["bits"] = bits;
+            o.Kind = (v >> 47) != 0 && (v >> 47) != -1 ? "bad-pointer" : "int";
+            o.Value = hi == 0 || hi == -1 ? lo.ToString(CultureInfo.InvariantCulture) : $"{lo}, {hi}";
+            if (hi == 0 && lo >= 16 && System.Numerics.BitOperations.PopCount((uint)lo) is >= 1 and <= 3) o.BitsOf = lo;
         }
         return o;
     }
@@ -431,12 +523,12 @@ public partial class WhatsAnAiBridge
     private static bool Plausible(float f) => float.IsFinite(f) && (f == 0 || Math.Abs(f) > 1e-4 && Math.Abs(f) < 1e7);
 
     /// <summary>ASCII or UTF-16 text at the start of a buffer (at least 4 printable characters).</summary>
-    private static string? Text(byte[] b)
+    private static string? BytesText(ReadOnlySpan<byte> b)
     {
         int ascii = 0; while (ascii < b.Length && b[ascii] >= 0x20 && b[ascii] < 0x7F) ascii++;
-        if (ascii >= 4) return Encoding.ASCII.GetString(b, 0, ascii);
+        if (ascii >= 4) return Encoding.ASCII.GetString(b[..ascii]);
         int u = 0; while (u + 1 < b.Length && b[u] >= 0x20 && b[u] < 0x7F && b[u + 1] == 0) u += 2;
-        return u >= 8 ? Encoding.Unicode.GetString(b, 0, u) : null;
+        return u >= 8 ? Encoding.Unicode.GetString(b[..u]) : null;
     }
 
     private static JObject Where(long a, MemoryContext ctx)
@@ -482,12 +574,44 @@ public partial class WhatsAnAiBridge
         for (int i = 0; i < b.Length; i += 16)
         {
             int n = Math.Min(16, b.Length - i);
-            var ascii = new StringBuilder(n);
-            for (int j = 0; j < n; j++) ascii.Append(b[i + j] is >= 0x20 and < 0x7F ? (char)b[i + j] : '.');
-            rows.Add(new JObject { ["off"] = i, ["bytes"] = BitConverter.ToString(b, i, n).Replace("-", " "), ["ascii"] = ascii.ToString() });
+            rows.Add(new JObject { ["off"] = i, ["bytes"] = HexBytes(b, i, n), ["ascii"] = AsciiBytes(b, i, n) });
         }
         return rows;
     }
+
+    /// <summary>HexDump(b), written straight to a JSON writer.</summary>
+    private static void WriteHexDump(Newtonsoft.Json.JsonWriter w, byte[] b)
+    {
+        w.WriteStartArray();
+        for (int i = 0; i < b.Length; i += 16)
+        {
+            int n = Math.Min(16, b.Length - i);
+            w.WriteStartObject();
+            w.WritePropertyName("off"); w.WriteValue(i);
+            w.WritePropertyName("bytes"); w.WriteValue(HexBytes(b, i, n));
+            w.WritePropertyName("ascii"); w.WriteValue(AsciiBytes(b, i, n));
+            w.WriteEndObject();
+        }
+        w.WriteEndArray();
+    }
+
+    /// <summary>"4D 5A 90" (uppercase, space-separated): what BitConverter.ToString(...).Replace("-", " ") gave, in one string.</summary>
+    private static string HexBytes(byte[] b, int start, int n) => n <= 0 ? "" : string.Create(n * 3 - 1, (b, start), static (span, s) =>
+    {
+        const string digits = "0123456789ABCDEF";
+        for (int j = 0, k = 0; k < span.Length; j++, k += 3)
+        {
+            var x = s.b[s.start + j];
+            span[k] = digits[x >> 4];
+            span[k + 1] = digits[x & 0xF];
+            if (k + 2 < span.Length) span[k + 2] = ' ';
+        }
+    });
+
+    private static string AsciiBytes(byte[] b, int start, int n) => string.Create(n, (b, start), static (span, s) =>
+    {
+        for (int j = 0; j < span.Length; j++) { var x = s.b[s.start + j]; span[j] = x is >= 0x20 and < 0x7F ? (char)x : '.'; }
+    });
 
     /// <summary>
     /// What a MemoryContext needs to know about the game process that doesn't change while it runs: the handle, the main
@@ -497,7 +621,13 @@ public partial class WhatsAnAiBridge
     /// memory.read / memory.collect - an experiment watch polls those at ~8 Hz - pay both.
     /// </summary>
     private sealed record ProcessFacts(object Memory, IntPtr Handle, long ModuleBase, long ModuleSize, string ModuleName, long ImageBase,
-        (string name, long rva, long size)[] Sections);
+        (string name, long rva, long size)[] Sections)
+    {
+        // What a read-only .rdata address resolves to never changes while the process lives (vtables, RTTI): kept here so
+        // repeated memory.read calls over the same objects skip the reads per vtable.
+        public readonly System.Collections.Concurrent.ConcurrentDictionary<long, string?> Rtti = new();
+        public readonly System.Collections.Concurrent.ConcurrentDictionary<long, long> RdataQwords = new();
+    }
 
     private ProcessFacts? _processFacts;
 
@@ -548,11 +678,12 @@ public partial class WhatsAnAiBridge
     private sealed class MemoryContext
     {
         private readonly IntPtr _handle;
-        private readonly Dictionary<long, (long start, long end, bool readable, string text)> _regions = new();
+        private readonly Dictionary<long, (long start, long end, bool readable, string? text, MEMORY_BASIC_INFORMATION64 mbi)> _regions = new();
         private readonly (string name, long rva, long size)[] _sections;
         public readonly long ModuleBase, ModuleSize, ImageBase;
         public readonly string ModuleName;
         private readonly Dictionary<long, string?> _rtti = new();
+        private readonly ProcessFacts _facts;
         private readonly WhatsAnAiBridge _plugin;
 
         /// <summary>"StashType.dat[5] \"MapStash\"" when the address is a row of a loaded game data table.</summary>
@@ -564,7 +695,7 @@ public partial class WhatsAnAiBridge
         public MemoryContext(WhatsAnAiBridge plugin)
         {
             _plugin = plugin;
-            var f = plugin.Facts();
+            var f = _facts = plugin.Facts();
             (_handle, ModuleBase, ModuleSize, ModuleName, ImageBase, _sections) = (f.Handle, f.ModuleBase, f.ModuleSize, f.ModuleName, f.ImageBase, f.Sections);
         }
 
@@ -611,12 +742,24 @@ public partial class WhatsAnAiBridge
         }
 
         public bool Readable(long a) => Region(a).readable;
-        public string RegionText(long a) => Region(a).text;
 
-        private (long start, long end, bool readable, string text) Region(long a)
+        // The text is built only when asked for (once per read, for the start address): a classify pass queries the region
+        // of every heap pointer and used to format a string for each.
+        public string RegionText(long a)
+        {
+            var r = Region(a);
+            if (r.text != null) return r.text;
+            var m = r.mbi;
+            const uint MEM_COMMIT = 0x1000;
+            var text = $"{(m.State == MEM_COMMIT ? "committed" : m.State == 0x2000 ? "reserved" : "free")} {Protect(m.Protect)} {(m.Type == 0x1000000 ? "image" : m.Type == 0x40000 ? "mapped" : "private")} {Hex(r.start)}+{Hex(r.end - r.start)}";
+            _regions[r.start] = (r.start, r.end, r.readable, text, m);
+            return text;
+        }
+
+        private (long start, long end, bool readable, string? text, MEMORY_BASIC_INFORMATION64 mbi) Region(long a)
         {
             foreach (var known in _regions.Values) if (a >= known.start && a < known.end) return known;
-            if (_handle == IntPtr.Zero) return (a, a + 1, true, "region unknown");
+            if (_handle == IntPtr.Zero) return (a, a + 1, true, "region unknown", default);
             if (VirtualQueryEx(_handle, (IntPtr)a, out var mbi, (IntPtr)Marshal.SizeOf<MEMORY_BASIC_INFORMATION64>()) == IntPtr.Zero)
             {
                 // The HUD's handle may lack PROCESS_QUERY_INFORMATION: probe one byte with ReadProcessMemory (VM_READ only).
@@ -624,15 +767,14 @@ public partial class WhatsAnAiBridge
                 var ok = ReadProcessMemory(_handle, (IntPtr)a, probe, (IntPtr)1, out _);
                 // Cache per 4 KB page so a region read doesn't probe every slot.
                 long page = a & ~0xFFFL;
-                var r0 = (page, page + 0x1000, ok, ok ? "readable (region details unavailable)" : "not readable");
+                (long, long, bool, string?, MEMORY_BASIC_INFORMATION64) r0 = (page, page + 0x1000, ok, ok ? "readable (region details unavailable)" : "not readable", default);
                 _regions[page] = r0;
                 return r0;
             }
             long start = (long)mbi.BaseAddress, end = start + (long)mbi.RegionSize;
             const uint MEM_COMMIT = 0x1000, PAGE_NOACCESS = 0x01, PAGE_GUARD = 0x100;
             bool readable = mbi.State == MEM_COMMIT && (mbi.Protect & PAGE_NOACCESS) == 0 && (mbi.Protect & PAGE_GUARD) == 0 && mbi.Protect != 0;
-            var text = $"{(mbi.State == MEM_COMMIT ? "committed" : mbi.State == 0x2000 ? "reserved" : "free")} {Protect(mbi.Protect)} {(mbi.Type == 0x1000000 ? "image" : mbi.Type == 0x40000 ? "mapped" : "private")} {Hex(start)}+{Hex(end - start)}";
-            var r = (start, end, readable, text);
+            (long, long, bool, string?, MEMORY_BASIC_INFORMATION64) r = (start, end, readable, null, mbi);
             _regions[start] = r;
             return r;
         }
@@ -644,6 +786,27 @@ public partial class WhatsAnAiBridge
 
         /// <summary>MSVC x64 RTTI: vtable[-1] = CompleteObjectLocator; COL+12 = TypeDescriptor RVA; name at TD+16 (".?AVName@ns@@").</summary>
         public string? RttiName(long vtable)
+        {
+            if (_rtti.TryGetValue(vtable, out var cached)) return cached;
+            // A vtable in .rdata (read-only image data): its answer holds for the process, so it is shared across calls.
+            if (InModule(vtable, out var section, out _) && section == ".rdata")
+            {
+                return _facts.Rtti.TryGetValue(vtable, out cached) ? cached : _facts.Rtti[vtable] = ReadRtti(vtable);
+            }
+            return ReadRtti(vtable);
+        }
+
+        /// <summary>The 8 bytes at an address, through the process-wide cache when it is in .rdata (never changes there).</summary>
+        public long? Qword(long a, string? section)
+        {
+            if (section == ".rdata" && _facts.RdataQwords.TryGetValue(a, out var q)) return q;
+            if (Read(a, 8) is not { } e) return null;
+            q = BitConverter.ToInt64(e, 0);
+            if (section == ".rdata") _facts.RdataQwords[a] = q;
+            return q;
+        }
+
+        private string? ReadRtti(long vtable)
         {
             if (_rtti.TryGetValue(vtable, out var cached)) return cached;
             string? result = null;
