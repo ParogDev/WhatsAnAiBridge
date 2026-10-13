@@ -139,7 +139,8 @@ public class ExpressionWalker
         public string? MethodArg { get; set; }
         public bool HasIndexer { get; set; }
         public string? IndexerValue { get; set; }
-        /// <summary>GetComponent/HasComponent: the resolved component type, once found (a miss is looked up again next time).</summary>
+        /// <summary>GetComponent/HasComponent: the resolved component type, once found (a miss is looked up again next time).
+        /// Resolve caches only ever hold types of non-collectible assemblies (the HUD's own), and ClearCaches drops them on unload.</summary>
         public volatile Type? ComponentType;
         /// <summary>GetComponent/HasComponent: the last target type and its closed method (one entry: a path's targets rarely vary).</summary>
         public volatile Tuple<Type, MethodInfo>? LastMethod;
@@ -157,6 +158,23 @@ public class ExpressionWalker
         if (_parsed.Count >= MaxParsedPaths) _parsed.Clear();   // one-off paths from agents must not grow it forever
         return _parsed.GetOrAdd(expr, segs);
     }
+
+    /// <summary>Paths parsed and cached right now (bridge.self_perf / checks).</summary>
+    internal static int ParsedCount => _parsed.Count;
+
+    /// <summary>
+    /// Drops every parsed path and its resolve caches. Called when the bridge unloads (hot reload or HUD close), so
+    /// nothing resolved under one load is handed to the next. The resolve caches never hold a type of a collectible
+    /// (hot-reloadable plugin) assembly in the first place.
+    /// </summary>
+    internal static void ClearCaches() => _parsed.Clear();
+
+    /// <summary>
+    /// The walker segment for a dictionary key: <c>["key"]</c> with <c>\"</c> and <c>\\</c> escaped, so a key holding
+    /// dots, brackets or quotes reads back as the same key (ParseExpression undoes it).
+    /// </summary>
+    internal static string KeySegment(string key)
+        => "[\"" + (key.IndexOfAny(['"', '\\']) < 0 ? key : key.Replace("\\", "\\\\").Replace("\"", "\\\"")) + "\"]";
 
     private static List<PathSegment> ParseExpression(string expr)
     {
@@ -221,9 +239,26 @@ public class ExpressionWalker
             if (pos < expr.Length && expr[pos] == '[')
             {
                 pos++; // skip [
-                var idxStart = pos;
-                while (pos < expr.Length && expr[pos] != ']') pos++;
-                seg.IndexerValue = expr[idxStart..pos].Trim('"', '\'');
+                if (pos < expr.Length && expr[pos] == '"')
+                {
+                    // Quoted key (KeySegment writes these): \" and \\ are escapes, so keys holding ] . or quotes round-trip.
+                    // Any other backslash stays literal (older paths with a backslash in a key read as before).
+                    var key = new StringBuilder();
+                    pos++; // skip "
+                    while (pos < expr.Length && expr[pos] != '"')
+                    {
+                        if (expr[pos] == '\\' && pos + 1 < expr.Length && expr[pos + 1] is '"' or '\\') pos++;
+                        key.Append(expr[pos++]);
+                    }
+                    while (pos < expr.Length && expr[pos] != ']') pos++;   // past the closing quote
+                    seg.IndexerValue = key.ToString();
+                }
+                else
+                {
+                    var idxStart = pos;
+                    while (pos < expr.Length && expr[pos] != ']') pos++;
+                    seg.IndexerValue = expr[idxStart..pos].Trim('"', '\'');
+                }
                 seg.HasIndexer = true;
                 pos++; // skip ]
             }
@@ -270,7 +305,8 @@ public class ExpressionWalker
                 return null;
             }
 
-            seg.LastMethod = Tuple.Create(targetType, generic);
+            // The parse cache is shared and outlives calls: never pin a type of a collectible (hot-reloadable) assembly in it.
+            if (!targetType.Assembly.IsCollectible && !compType.Assembly.IsCollectible) seg.LastMethod = Tuple.Create(targetType, generic);
             return MemberIndex.Call(generic, target);
         }
 

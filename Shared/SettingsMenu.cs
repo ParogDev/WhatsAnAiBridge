@@ -43,7 +43,8 @@ internal sealed class MenuTabAttribute : Attribute
 /// Settings panel drawn from the plugin's [Menu] attributes and node types, so a plugin keeps labels, tooltips and
 /// grouping in its settings class and gets a polished panel for free. Copied per plugin like HudLog.cs (never a
 /// reference: plugins don't compile-link each other); the template lives in the scaffolding's new-plugin skill.
-/// <para>Use: a field <c>private readonly SettingsMenu _menu = new();</c> and
+/// <para>Use: a field <c>private readonly SettingsMenu _menu = new(m => HudLog.Fault(m));</c> (the bridge passes
+/// LogFault; without a sink this copy drops faults) and
 /// <c>public override void DrawSettings() => _menu.Draw(Settings);</c>. Options, all set once (constructor or
 /// Initialise): <see cref="Accent"/> (the plugin's colour), <see cref="RootTabName"/>, <see cref="Tab"/> (a custom tab,
 /// or extra content on a generated one), <see cref="Custom"/> (replace one property's row with your own drawing, also
@@ -79,18 +80,27 @@ internal sealed class SettingsMenu
     /// <summary>Hint in the filter box.</summary>
     public string FilterHint { get; set; } = "Filter settings...";
 
-    // Bridge copy: the template's DebugWindow.LogError calls go to the sink this menu was built with instead (the
-    // bridge never writes the HUD's top-left lines, see Shared\HudLog.cs; the plugin passes LogFault). Owned by the
-    // instance, so it lives and dies with the plugin load that built the menu. Shared files also take the HUD
-    // namespaces from the per-game GlobalUsings, so the template's `using <HUD>...` lines are dropped.
+    // Where the menu's own faults go (a reset that threw, a ColorNode the change check can't read). Owned by the
+    // instance, so it lives and dies with the plugin load that built the menu (a static sink would keep a reloaded
+    // plugin's old HudLog alive).
+    // Bridge copy of the template (ExileApiScaffolding#291): the same fault sink ctor arg, but null drops faults instead
+    // of writing DebugWindow.LogError (the bridge never writes the HUD's top-left lines, see Shared\HudLog.cs; the
+    // plugin passes LogFault). Shared files also take the HUD namespaces from the per-game GlobalUsings, so the
+    // template's `using <HUD>...` lines are dropped.
     private readonly Action<string>? _fault;
-    private void Fault(string message) => _fault?.Invoke(message);
 
-    /// <param name="fault">Where faults go (the template writes DebugWindow.LogError); null drops them.</param>
+    /// <param name="fault">Where faults go: the bridge passes LogFault. Null (the default) drops them (the template's
+    /// default, DebugWindow.LogError, is not used in the bridge).</param>
     public SettingsMenu(Action<string>? fault = null)
     {
         _fault = fault;
         if (PackColorError != null) Fault(PackColorError);   // the static build ran before any menu (and sink) existed
+    }
+
+    private void Fault(string message)
+    {
+        try { _fault?.Invoke(message); }
+        catch { /* a broken sink must not take the settings panel down; nowhere left to report it */ }
     }
 
     private readonly List<(string name, Action body, bool first)> _customTabs = new();
@@ -1524,7 +1534,7 @@ internal sealed class SettingsMenu
     /// different Color in the other, so R/G/B/A are read as property or field by name. Null when the type has no
     /// such members (then colours never show "changed").</summary>
     private static readonly Func<object, uint>? PackColor = BuildPackColor();
-    private static string? PackColorError;   // no initializer: BuildPackColor (PackColor's initializer) sets it
+    private static string? PackColorError;   // no initializer: BuildPackColor (PackColor's initializer) sets it; each menu reports it once
 
     private static Func<object, uint>? BuildPackColor()
     {

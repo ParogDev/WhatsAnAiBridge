@@ -12,15 +12,17 @@ namespace WhatsAnAiBridge;
 
 /// <summary>
 /// Marks a setting that gives bridge clients power (C# scripts, HUD instrumentation, plugin reload): settings.set
-/// refuses to change it without allowPermission. Matched by type name, so another plugin can declare its own copy.
+/// refuses to change it without allowPermission. Matched by type name (a copy in the plugin's own assembly), so another
+/// plugin can declare its own copy.
 /// </summary>
 [AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
 internal sealed class SettingPermissionAttribute : Attribute { }
 
 /// <summary>
 /// Marks a settings property settings.describe leaves out (panel-own state or a legacy key kept for old saves, which the
-/// control center and hud_settings should not offer as a setting); settings.set still reaches it by path. Matched by type
-/// name like [SettingPermission]. The HUD's [IgnoreMenu] alone does not hide a node from describe.
+/// control center and hud_settings should not offer as a setting); settings.set refuses it (hidden_setting) unless the
+/// caller passes allowHidden. Matched by type name like [SettingPermission]. The HUD's [IgnoreMenu] alone does not hide
+/// a node from describe.
 /// </summary>
 [AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = false)]
 internal sealed class HiddenFromDescribeAttribute : Attribute { }
@@ -30,11 +32,13 @@ internal sealed class HiddenFromDescribeAttribute : Attribute { }
 /// shape (ToggleNode, RangeNode&lt;T&gt;, TextNode, ListNode, ColorNode, HotkeyNode*, ButtonNode); labels and tooltips
 /// come from the HUD's own [Menu] attribute, the group from a nested settings object's label, else from the property's
 /// [MenuTab] (the SettingsMenu renderer's tab), [SettingPermission] marks a permission setting and [MenuReadOnly] a
-/// read-only one, and [HiddenFromDescribe] leaves a property out of describe (settings.set still reaches it by path); the bridge's own settings use the same attributes
+/// read-only one, and [HiddenFromDescribe] leaves a property out of describe (settings.set refuses it with hidden_setting
+/// unless the caller passes allowHidden); the bridge's own settings use the same attributes
 /// (Shared\WhatsAnAiBridgeSettings.cs). The
-/// renderer's attributes are copied per plugin, so they are matched by type name, never by type.
+/// renderer's attributes are copied per plugin, so they are matched by type name (only the settings class's own
+/// assembly's copy or the bridge's), never by type; the HUD's [Menu] by type.
 ///   settings.describe {plugin?}                        -> {game, plugins: [{plugin, enabled, settings: [node]}]}
-///   settings.set {plugin, path, value, allowPermission?} -> {plugin, setting, previous}
+///   settings.set {plugin, path, value, allowPermission?, allowHidden?} -> {plugin, setting, previous}
 /// Changes run on the main thread (start of Render), like the menu would make them. Permission settings (the switches
 /// that give bridge clients power: C# scripts, HUD instrumentation, plugin reload) refuse to change unless the caller
 /// passes allowPermission: the MCP server never does from a tool, only from the control center's own route after the
@@ -130,22 +134,33 @@ public partial class WhatsAnAiBridge
     private readonly record struct MenuInfo(string? Name, string? Tooltip, string? Tab, bool Permission, bool ReadOnly, string? ReadOnlyNote, bool Hidden);
 
     /// <summary>
-    /// The attributes on a settings property, by type name: the HUD's [Menu(name, tooltip)] (MenuName / Tooltip on both
-    /// HUDs), and SettingsMenu's [MenuTab(tab)] and [MenuReadOnly(note)] plus the bridge's [SettingPermission], which
-    /// each plugin declares in its own namespace (copied, never referenced).
+    /// The attributes on a settings property: the HUD's [Menu(name, tooltip)] by type (MenuName / Tooltip on both HUDs),
+    /// and SettingsMenu's [MenuTab(tab)] and [MenuReadOnly(note)] plus the bridge's [SettingPermission] /
+    /// [HiddenFromDescribe] by simple name, which each plugin declares in its own namespace (copied, never referenced):
+    /// only a copy from the settings class's own assembly or the bridge's counts.
     /// </summary>
     private static MenuInfo MenuOf(PropertyInfo p)
     {
         string? name = null, tooltip = null, tab = null, roNote = null;
         bool permission = false, readOnly = false, hidden = false;
+        var own = p.DeclaringType?.Assembly;
         foreach (var a in p.GetCustomAttributes(true))
         {
-            switch (a.GetType().Name)
+            var at = a.GetType();
+            // The HUD's [Menu] is one type for every plugin: matched by type, so a plugin class that merely shares its name
+            // can't pose as it.
+            if (a is MenuAttribute)
             {
-                case "MenuAttribute":
-                    name = MemberIndex.TryGet(a, "MenuName") as string;
-                    tooltip = MemberIndex.TryGet(a, "Tooltip") as string;
-                    break;
+                name = MemberIndex.TryGet(a, "MenuName") as string;
+                tooltip = MemberIndex.TryGet(a, "Tooltip") as string;
+                continue;
+            }
+            // The renderer's and the bridge's attributes are copied into each plugin (never referenced), so their full
+            // names differ per plugin: matched by simple name, but only the copy in the settings class's own assembly (or
+            // the bridge's), never a same-named attribute from some other assembly.
+            if (at.Assembly != own && at.Assembly != typeof(WhatsAnAiBridge).Assembly) continue;
+            switch (at.Name)
+            {
                 case "MenuTabAttribute": tab = MemberIndex.TryGet(a, "Tab") as string; break;
                 case "MenuReadOnlyAttribute": readOnly = true; roNote = MemberIndex.TryGet(a, "Note") as string; break;
                 case "SettingPermissionAttribute": permission = true; break;
@@ -219,22 +234,23 @@ public partial class WhatsAnAiBridge
         if (string.IsNullOrWhiteSpace(plugin) || string.IsNullOrWhiteSpace(path) || value == null)
             return Err("bad_request", "Pass plugin, path and value (settings.describe lists them).");
         var allowPermission = p?["allowPermission"]?.Value<bool>() == true;
+        var allowHidden = p?["allowHidden"]?.Value<bool>() == true;
 
         // Prefer the main thread (the next Render), as the menu would. While the game isn't the foreground window the HUD
         // hides its overlay and calls no plugin Render, and that's exactly when the control center is used: then set it
         // here. A node's Value setter is a plain assignment (plus the plugin's change handler, if any). Claimed once.
         var claimed = 0;
         var done = new TaskCompletionSource<JObject>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _mainActions.Enqueue(() => { if (System.Threading.Interlocked.Exchange(ref claimed, 1) == 0) done.TrySetResult(ApplySetting(plugin, path, value, allowPermission)); });
+        _mainActions.Enqueue(() => { if (System.Threading.Interlocked.Exchange(ref claimed, 1) == 0) done.TrySetResult(ApplySetting(plugin, path, value, allowPermission, allowHidden)); });
         if (done.Task.Wait(TimeSpan.FromMilliseconds(300))) return done.Task.Result;
         if (System.Threading.Interlocked.Exchange(ref claimed, 1) != 0) return done.Task.Wait(TimeSpan.FromSeconds(2)) ? done.Task.Result : Err("not_applied", "The change is still running on the HUD's main thread.");
-        var r = ApplySetting(plugin, path, value, allowPermission);
+        var r = ApplySetting(plugin, path, value, allowPermission, allowHidden);
         if (r["ok"] != null) r["appliedOn"] = "bridge thread (the HUD wasn't rendering: overlay hidden or paused)";
         return r;
     }
 
     /// <summary>Main thread. Resolves path on the plugin's settings, checks kind and permission, sets the node's Value.</summary>
-    private JObject ApplySetting(string plugin, string path, JToken value, bool allowPermission)
+    private JObject ApplySetting(string plugin, string path, JToken value, bool allowPermission, bool allowHidden)
     {
         var pm = Core.Current?.pluginManager;
         var w = pm?.Plugins.FirstOrDefault(x => SamePlugin(x.Name, plugin));
@@ -242,6 +258,7 @@ public partial class WhatsAnAiBridge
         object? owner = Prop(Prop(w, "Plugin"), "_Settings");
         MemberIndex.Member? prop = null;
         MemberIndex.Member? parentProp = null;   // the nested settings object holding the node (its label is the group)
+        string? hiddenAt = null;                 // the first segment carrying [HiddenFromDescribe], if any
         var parts = path.Split('.');
         if (owner == null) return Err("unknown_setting", $"{w.Name} has no settings object (_Settings is null).");
         for (var i = 0; i < parts.Length; i++)
@@ -249,6 +266,7 @@ public partial class WhatsAnAiBridge
             prop = MemberIndex.Find(owner.GetType(), parts[i], kinds: MemberIndex.Kinds.Property);
             if (prop is not { CanRead: true })
                 return Err("unknown_setting", $"'{parts[i]}' is not a setting of {w.Name} ({(i == 0 ? "at the settings root" : $"under {string.Join('.', parts.Take(i))}")}, type {owner.GetType().Name}).");
+            if (hiddenAt == null && prop.Property is { } pi && MenuOf(pi).Hidden) hiddenAt = string.Join('.', parts.Take(i + 1));
             if (i == parts.Length - 1) break;
             parentProp = prop;
             try { owner = prop.Get(owner); }
@@ -263,6 +281,11 @@ public partial class WhatsAnAiBridge
         if (node == null) return Err("unknown_setting", $"{path} of {w.Name} is null.");
         if (!IsNode(node.GetType())) return Err("unknown_setting", $"{path} of {w.Name} is a {node.GetType().Name}, not a settings node.");
         var menu = MenuOf(prop!.Property!);
+        // [HiddenFromDescribe] (here or on a nested settings object above it): describe never offers it, so set doesn't
+        // either unless the caller says it means that node (allowHidden).
+        if (hiddenAt != null && !allowHidden)
+            return Err("hidden_setting", $"{path} of {w.Name} is hidden from describe ([HiddenFromDescribe] on {hiddenAt}): panel-own state or a legacy key, "
+                + "not a setting to change from outside. Pass allowHidden: true if you really mean that node.");
         // The group Walk gives it: the innermost nested object's label, else the node's own [MenuTab].
         var group = parentProp == null ? menu.Tab : MenuOf(parentProp.Property!).Name ?? Words(parentProp.Name);
         var before = Describe(prop.Name, path, node, group, menu);

@@ -54,18 +54,17 @@ internal sealed class HudLink
     internal string SimulatedName => Member + "_simulatedRename";
 
     /// <summary>The owner type the preflight checks (call sites may pass the runtime type instead).</summary>
-    public Type? DeclaredType
-    {
-        get
-        {
-            try { var t = _typeOf(); _typeError = null; return t; }
-            // Kept for Broken(null): a resolver that threw is said with its exception, never as a bare "type not found".
-            catch (Exception ex) { _typeError = $"{ex.GetType().Name}: {ex.Message}"; return null; }
-        }
-    }
+    public Type? DeclaredType => ResolveDeclaredType().Type;
 
-    /// <summary>The exception of the last <see cref="DeclaredType"/> that threw, or null (the last one resolved or gave null).</summary>
-    private volatile string? _typeError;
+    /// <summary>
+    /// One resolve of the owner type, with its own outcome: the type, or null and (when the resolver threw) why. Nothing
+    /// is kept on the link between resolves, so a diagnosis never reads another thread's (or an older) resolve.
+    /// </summary>
+    private (Type? Type, string? Error) ResolveDeclaredType()
+    {
+        try { return (_typeOf(), null); }
+        catch (Exception ex) { return (null, $"{ex.GetType().Name}: {ex.Message}"); }
+    }
 
     public string Expected => Kind switch
     {
@@ -107,9 +106,14 @@ internal sealed class HudLink
     public string Broken(Type? t)
     {
         if (t == null)
-            return _typeError is { } threw
-                ? $"{TypeLabel}: finding the type threw {threw} (expected it to declare {Expected})"
+        {
+            // The caller's resolve gave null: resolve again here for the reason (a resolver that threw is said with its
+            // exception, never as a bare "type not found").
+            var (now, threw) = ResolveDeclaredType();
+            return threw != null ? $"{TypeLabel}: finding the type threw {threw} (expected it to declare {Expected})"
+                : now != null ? $"{TypeLabel}: type not found at the caller's resolve, found now as {Name(now)} (expected it to declare {Expected}; retry)"
                 : $"{TypeLabel}: type not found (expected it to declare {Expected})";
+        }
         var hit = Lookup(t, Member, out var why);
         return hit == null
             ? $"{Name(t)}.{Member}: expected {Expected}; {why}"

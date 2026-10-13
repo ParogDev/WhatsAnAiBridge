@@ -77,9 +77,16 @@ public class ContractSummaryDto
 public static class ContractSchema
 {
     public const int SchemaVersion = 1;
-    private static readonly Lazy<ContractSchemaDto> Built = new(Build);
+    // Built on first use and kept only when the build returned: a build that threw is not cached (a Lazy would rethrow
+    // the same exception for the rest of the load), so the next call tries again.
+    private static ContractSchemaDto? _built;
+    private static readonly object BuildLock = new();
 
-    public static ContractSchemaDto Get() => Built.Value;
+    public static ContractSchemaDto Get()
+    {
+        if (System.Threading.Volatile.Read(ref _built) is { } b) return b;
+        lock (BuildLock) return _built ??= Build();
+    }
 
     public static ContractSummaryDto Summary()
     {
@@ -92,7 +99,26 @@ public static class ContractSchema
         catch (Exception ex) { return new ContractSummaryDto { Version = SchemaVersion, Error = $"{ex.GetType().Name}: {ex.Message}" }; }
     }
 
+    /// <summary>
+    /// Two DTO types the walk reaches may share a simple name (two nested "Row" classes, one name in two namespaces):
+    /// then both are named qualified (namespace + outer types), never thrown on or merged. Only a clash among the
+    /// reached types qualifies anything, so a contract without one hashes exactly as before.
+    /// </summary>
     private static ContractSchemaDto Build()
+    {
+        var sw = Stopwatch.StartNew();
+        var first = Build(Empty, out var clashes);
+        if (clashes.Count == 0) return first;
+        var r = Build(clashes, out _);
+        r.Ms = Math.Round(sw.Elapsed.TotalMilliseconds, 2);
+        return r;
+    }
+
+    private static readonly HashSet<string> Empty = new(StringComparer.Ordinal);
+
+    /// <param name="qualify">Simple names to write qualified (they clash).</param>
+    /// <param name="clashes">Simple names two or more reached types share.</param>
+    private static ContractSchemaDto Build(HashSet<string> qualify, out HashSet<string> clashes)
     {
         var sw = Stopwatch.StartNew();
         var asm = typeof(ContractSchema).Assembly;
@@ -117,18 +143,18 @@ public static class ContractSchema
             {
                 if (t.IsEnum)
                 {
-                    types.Add(new ContractTypeDto { Name = NameOf(t), Kind = "enum", Values = Enum.GetNames(t).ToList() });
+                    types.Add(new ContractTypeDto { Name = NameOf(t, qualify), Kind = "enum", Values = Enum.GetNames(t).ToList() });
                     continue;
                 }
                 if (resolver.ResolveContract(t) is not JsonObjectContract oc) continue;
-                var dto = new ContractTypeDto { Name = NameOf(t), Fields = new() };
+                var dto = new ContractTypeDto { Name = NameOf(t, qualify), Fields = new() };
                 if (oc.ExtensionDataSetter != null || oc.ExtensionDataGetter != null) dto.Open = true;
                 foreach (var p in oc.Properties)
                 {
                     if (p.Ignored || !p.Readable || p.PropertyType == null) continue;
                     var member = t.GetMember(p.UnderlyingName ?? "", MemberTypes.Property | MemberTypes.Field,
                         BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance).FirstOrDefault();
-                    var shape = Shape(p.PropertyType, queue, asm);
+                    var shape = Shape(p.PropertyType, queue, asm, qualify);
                     dto.Fields.Add(new ContractFieldDto
                     {
                         Json = p.PropertyName ?? p.UnderlyingName ?? "",
@@ -142,9 +168,10 @@ public static class ContractSchema
                 dto.Fields = dto.Fields.OrderBy(f => f.Json, StringComparer.Ordinal).ToList();
                 types.Add(dto);
             }
-            catch (Exception ex) { errors.Add($"{NameOf(t)}: {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { errors.Add($"{NameOf(t, qualify)}: {ex.GetType().Name}: {ex.Message}"); }
         }
 
+        clashes = new HashSet<string>(seen.GroupBy(t => SimpleName(t)).Where(g => g.Count() > 1).Select(g => g.Key), StringComparer.Ordinal);
         types = types.OrderBy(x => x.Name, StringComparer.Ordinal).ToList();
         // Only what reaches the wire is hashed: renaming a C# member behind the same JSON name changes nothing for a reader.
         var canonical = JsonConvert.SerializeObject(types.Select(x => new object?[]
@@ -163,7 +190,7 @@ public static class ContractSchema
     }
 
     /// <summary>The wire shape of a CLR type; bridge classes and enums it reaches are queued for their own entry.</summary>
-    private static string Shape(Type t, Queue<Type> queue, Assembly asm)
+    private static string Shape(Type t, Queue<Type> queue, Assembly asm, HashSet<string> qualify)
     {
         t = System.Nullable.GetUnderlyingType(t) ?? t;
         if (t == typeof(string) || t == typeof(char) || t == typeof(Guid) || t == typeof(TimeSpan)) return "string";
@@ -172,24 +199,24 @@ public static class ContractSchema
         if (t.IsEnum)
         {
             if (t.Assembly == asm) queue.Enqueue(t);
-            return $"enum:{NameOf(t)}";
+            return $"enum:{NameOf(t, qualify)}";
         }
         if (t == typeof(int) || t == typeof(long) || t == typeof(short) || t == typeof(byte) || t == typeof(sbyte)
             || t == typeof(uint) || t == typeof(ulong) || t == typeof(ushort)) return "integer";
         if (t == typeof(float) || t == typeof(double) || t == typeof(decimal)) return "number";
         if (t == typeof(object) || typeof(JToken).IsAssignableFrom(t)) return "any";
-        if (t.IsArray) return $"list<{Shape(t.GetElementType()!, queue, asm)}>";
-        if (DictionaryValue(t) is { } dv) return $"map<{Shape(dv, queue, asm)}>";
+        if (t.IsArray) return $"list<{Shape(t.GetElementType()!, queue, asm, qualify)}>";
+        if (DictionaryValue(t) is { } dv) return $"map<{Shape(dv, queue, asm, qualify)}>";
         if (t != typeof(string) && typeof(IEnumerable).IsAssignableFrom(t))
         {
             var el = t.GetInterfaces().Concat(new[] { t })
                 .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>))?.GetGenericArguments()[0];
-            return $"list<{(el == null ? "any" : Shape(el, queue, asm))}>";
+            return $"list<{(el == null ? "any" : Shape(el, queue, asm, qualify))}>";
         }
         if (t.Assembly == asm && (t.IsClass || t.IsValueType) && !t.IsPrimitive)
         {
             queue.Enqueue(t);
-            return $"object:{NameOf(t)}";
+            return $"object:{NameOf(t, qualify)}";
         }
         // A HUD / BCL type serialized by Newtonsoft's defaults (Vector2, a record from the HUD...): no contract of ours.
         return $"external:{ClrName(t)}";
@@ -220,7 +247,15 @@ public static class ContractSchema
 
     private static bool IsCompilerGenerated(Type t) => t.Name.Contains('<') || t.IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false);
 
-    private static string NameOf(Type t) => t.DeclaringType is { } outer ? $"{NameOf(outer)}.{t.Name}" : t.Name;
+    /// <summary>Type name without namespace (nested types as Outer.Inner).</summary>
+    private static string SimpleName(Type t) => t.DeclaringType is { } outer ? $"{SimpleName(outer)}.{t.Name}" : t.Name;
+
+    /// <summary>The contract name: the simple name, or namespace-qualified when that simple name clashes.</summary>
+    private static string NameOf(Type t, HashSet<string> qualify)
+    {
+        var simple = SimpleName(t);
+        return qualify.Count > 0 && qualify.Contains(simple) && !string.IsNullOrEmpty(t.Namespace) ? $"{t.Namespace}.{simple}" : simple;
+    }
 
     private static string ClrName(Type t)
     {
@@ -240,7 +275,9 @@ public partial class WhatsAnAiBridge
         var s = ContractSchema.Get();
         var only = p?["type"]?.Value<string>();
         if (string.IsNullOrEmpty(only)) return Serialize(s);
-        var byName = s.Types!.ToDictionary(t => t.Name, StringComparer.Ordinal);
+        // Names are unique (clashes are qualified at build); first wins anyway, so a lookup can never throw on a duplicate.
+        var byName = new Dictionary<string, ContractTypeDto>(StringComparer.Ordinal);
+        foreach (var t in s.Types!) byName.TryAdd(t.Name, t);
         if (!byName.ContainsKey(only!))
         {
             var near = s.Types!.Where(t => t.Name.IndexOf(only!, StringComparison.OrdinalIgnoreCase) >= 0).Select(t => t.Name).Take(10).ToList();
