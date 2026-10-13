@@ -169,7 +169,7 @@ internal sealed class HudLink
         if (t == null) { row.Status = "broken"; row.Found = $"type {TypeLabel} not found"; return row; }
         row.Type = t.FullName ?? t.Name;
         var m = On(t);
-        if (m == null) { row.Status = "broken"; row.Found = Broken(t); return row; }
+        if (m == null) { row.Status = "broken"; Lookup(t, out var why); row.Found = why; return row; }
         row.Status = "ok";
         if (m.Name != Member) row.Found = Describe(m);
         try { if (_notNow?.Invoke() is { } note) { row.Status = "not_now"; row.Note = note; } }

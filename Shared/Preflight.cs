@@ -166,7 +166,7 @@ public partial class WhatsAnAiBridge
         foreach (var x in rows.Where(x => x.Status != "ok").OrderBy(x => Order(x.Status)))
             r.Problems.Add(x.Status switch
             {
-                "broken" => $"{x.Id} BROKEN: {x.Found} (breaks {x.Feature})",
+                "broken" => $"{x.Id} BROKEN: {x.Type}: expected {x.Expected}; {x.Found} (breaks {x.Feature})",
                 "blocked" => $"{x.Id} blocked: {x.Found}",
                 _ => $"{x.Id} not now: {x.Note}",
             });
