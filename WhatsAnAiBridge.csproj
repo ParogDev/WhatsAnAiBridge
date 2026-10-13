@@ -71,6 +71,16 @@
     <None Include="$(PkgLib_Harmony)\lib\$(TargetFramework.Replace('-windows', ''))\0Harmony.dll" Link="0Harmony.dll"
           CopyToOutputDirectory="PreserveNewest" Visible="false" />
   </ItemGroup>
+  <!-- Hexile.BridgeExports source generator: [BridgeExport] -> BridgeExports.Register / BridgeExports.Names at compile time
+       (PubSub.cs, Work.cs). Vendored (built from the scaffolding repo's tools/generators) so this repo builds on its own.
+       HXB007 (name not prefixed by the plugin class) is off: the AIBridge.* names predate the convention and other
+       plugins look them up by those strings. -->
+  <PropertyGroup>
+    <NoWarn>$(NoWarn);HXB007</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Analyzer Include="Analyzers\Hexile.BridgeExports.Generator.dll" />
+  </ItemGroup>
   <!-- Roslyn scripting for script.run (Shared\ScriptRunner.cs): both HUDs ship these DLLs. -->
   <ItemGroup>
     <Reference Include="Microsoft.CodeAnalysis">

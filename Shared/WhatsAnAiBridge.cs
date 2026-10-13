@@ -97,8 +97,15 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         if (Settings.EnableTcp.Value)
             StartTcpServer();
         InstrStartup();   // patches a previous load of the bridge left in this HUD process (Instrumentation.cs)
-        try { PubRegister(); } catch (Exception ex) { ToastF8RegisterFailed($"[PubSub] registering {PublishMethodName} / {SubscribeMethodName} on PluginBridge failed: {ex.Message}"); }
-        try { WorkRegister(); } catch (Exception ex) { ToastF8RegisterFailed($"[Work] registering {WorkListMethodName} / {HighlightForMethodName} on PluginBridge failed: {ex.Message}"); }
+        try { PubRegister(); } catch (Exception ex) { ToastF8RegisterFailed($"[PubSub] queueing the pub/sub log read failed: {ex.Message}"); }
+        WorkRegister();
+        // The PluginBridge methods other plugins call ([BridgeExport] in PubSub.cs, Work.cs; generated at compile time).
+        try
+        {
+            if (GameController.PluginBridge == null) ToastF8RegisterFailed($"[PluginBridge] GameController.PluginBridge is null: {string.Join(", ", BridgeExports.All)} not registered");
+            else BridgeExports.Register(this, GameController.PluginBridge);
+        }
+        catch (Exception ex) { ToastF8RegisterFailed($"[PluginBridge] registering {string.Join(", ", BridgeExports.All)} failed: {ex.Message}"); }
 
         HudStateAfterInit();   // listener-side hud.state, the 4 Hz phase tracker, a user restart adopted from the board (HudState.cs, Outage.cs)
         // Build the type-by-name index off the main thread now, so the first GetComponent<T> / explore doesn't pay for it.
@@ -474,7 +481,11 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
 
     public override void DrawSettings()
     {
-        _settingsUi ??= new WhatsAnAiBridgeSettingsUi { SetStatsPanelOpen = open => SetStatsView(null, null, open) };
+        if (_settingsUi == null)
+        {
+            SettingsMenu.FaultSink = msg => LogFault(msg, "settings-menu");   // never the HUD's top-left lines
+            _settingsUi = new WhatsAnAiBridgeSettingsUi { SetStatsPanelOpen = open => SetStatsView(null, null, open) };
+        }
         _settingsUi.Draw(Settings, _status, _queryLog);
     }
 
