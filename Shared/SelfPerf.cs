@@ -57,6 +57,16 @@ public partial class WhatsAnAiBridge
         _selfBytes[step] += GC.GetAllocatedBytesForCurrentThread() - s.a;
     }
 
+    // The observer step split into its parts (self_perf "observerParts"), plus each layer's cost ("layers").
+    private static readonly string[] ObsParts = ["hudFrame", "layers", "uiCatalogue", "area", "panels", "entities", "flush"];
+    private readonly long[] _obsPartTicks = new long[ObsParts.Length], _obsPartBytes = new long[ObsParts.Length];
+
+    private void ObsPartEnd(int part, (long t, long a) s)
+    {
+        _obsPartTicks[part] += Stopwatch.GetTimestamp() - s.t;
+        _obsPartBytes[part] += GC.GetAllocatedBytesForCurrentThread() - s.a;
+    }
+
     private string? ProcessSelfPerfMethod(string method, JToken? p)
     {
         if (method != "bridge.self_perf") return null;
@@ -75,6 +85,12 @@ public partial class WhatsAnAiBridge
             ["totalUsPerFrame"] = Math.Round(_selfTicks.Sum() * 1e6 / Stopwatch.Frequency / frames, 1),
             ["totalBytesPerFrame"] = _selfBytes.Sum() / frames,
             ["steps"] = steps,
+            ["observerParts"] = new JObject(Enumerable.Range(0, ObsParts.Length).Select(i => new JProperty(ObsParts[i], new JObject
+            {
+                ["usPerFrame"] = Math.Round(_obsPartTicks[i] * 1e6 / Stopwatch.Frequency / frames, 2),
+                ["bytesPerFrame"] = _obsPartBytes[i] / frames,
+            }))),
+            ["layers"] = LayersSelfPerf(),
             ["statsRawCheck"] = JObject.FromObject(StatsRawStatus()),
             ["hudState"] = HudStateSelfPerf(),   // the phase tracker (HudState.cs): reads, writes, the broken link
         };
@@ -97,7 +113,7 @@ public partial class WhatsAnAiBridge
         }
         if (_selfRequestsBroken != null) o["requestsBroken"] = _selfRequestsBroken;
         o["memberIndex"] = MemberIndex.Status();   // the reflection core (MemberIndex.cs): compiled getters, failures, type index
-        Array.Clear(_selfTicks); Array.Clear(_selfBytes); _selfFrames = 0; _selfSince = Stopwatch.GetTimestamp();
+        Array.Clear(_selfTicks); Array.Clear(_selfBytes); Array.Clear(_obsPartTicks); Array.Clear(_obsPartBytes); _selfFrames = 0; _selfSince = Stopwatch.GetTimestamp();
         return o.ToString(Newtonsoft.Json.Formatting.None);
     }
 }

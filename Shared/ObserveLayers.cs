@@ -65,6 +65,8 @@ public partial class WhatsAnAiBridge
         public string? NotNow;            // resolved to null right now (loading, no player)
         public long Events, Ticks;
         public double CostMs;             // last tick
+        // Since the last bridge.self_perf (reset there): time and bytes of every tick, the path resolve's share, the worst tick.
+        public long SumTicks, SumBytes, ResolveTicks, PerfTicks; public double MaxMs;
         public Type? CheckedType;         // the resolved type ModeMismatch last passed
         public EachCache? Each;           // each: items listed every 5 s and the raw read plans
         // struct
@@ -105,6 +107,30 @@ public partial class WhatsAnAiBridge
         SaveObs();
     }
 
+    /// <summary>Per tick since the last bridge.self_perf: average and worst time, the path resolve's share, bytes allocated.</summary>
+    private static JObject? LayerPerf(LayerRun l)
+    {
+        if (l.PerfTicks == 0) return null;
+        var f = System.Diagnostics.Stopwatch.Frequency;
+        return new JObject
+        {
+            ["ticks"] = l.PerfTicks, ["avgUs"] = Math.Round(l.SumTicks * 1e6 / f / l.PerfTicks, 1), ["maxMs"] = Math.Round(l.MaxMs, 3),
+            ["resolveUs"] = Math.Round(l.ResolveTicks * 1e6 / f / l.PerfTicks, 1), ["bytesPerTick"] = l.SumBytes / l.PerfTicks,
+        };
+    }
+
+    /// <summary>For bridge.self_perf: every layer's cost since the previous call, then reset (main-thread counters, read racily).</summary>
+    private JObject LayersSelfPerf()
+    {
+        var o = new JObject();
+        foreach (var l in _layers.ToArray())
+        {
+            if (LayerPerf(l) is { } p) o[l.Spec.Id] = p;
+            l.SumTicks = l.SumBytes = l.ResolveTicks = l.PerfTicks = 0; l.MaxMs = 0;
+        }
+        return o;
+    }
+
     private JObject LayersList()
     {
         LayersLoad();
@@ -114,7 +140,7 @@ public partial class WhatsAnAiBridge
     private JObject LayerStatus(LayerRun l) => new()
     {
         ["spec"] = JObject.FromObject(l.Spec),
-        ["events"] = l.Events, ["ticks"] = l.Ticks, ["costMs"] = Math.Round(l.CostMs, 3),
+        ["events"] = l.Events, ["ticks"] = l.Ticks, ["costMs"] = Math.Round(l.CostMs, 3), ["perf"] = LayerPerf(l),
         ["unitsChanged"] = l.Map.Count, ["noisyUnits"] = l.Noisy.Count,
         ["bytes"] = l.Spec.Mode == "struct" ? l.Size : null, ["namedRanges"] = l.Spec.Mode == "struct" ? l.Names.Count : null,
         ["slowProps"] = l.SlowProps.Count > 0 ? new JArray(l.SlowProps) : null,
@@ -192,9 +218,13 @@ public partial class WhatsAnAiBridge
             if (System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds > LayerTickBudgetMs) break;   // the rest next frame
             l.NextAt = now.AddMilliseconds(1000.0 / l.Spec.Hz);
             var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            var a0 = GC.GetAllocatedBytesForCurrentThread();
             try { LayerTick(l); }
             catch (Exception ex) { l.Broken = $"{ex.GetType().Name}: {ex.Message}"; LogFault($"[Observe] layer {l.Spec.Id}: {l.Broken}"); }
-            l.CostMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+            var dt = System.Diagnostics.Stopwatch.GetTimestamp() - t0;
+            l.CostMs = dt * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            l.SumTicks += dt; l.SumBytes += GC.GetAllocatedBytesForCurrentThread() - a0; l.PerfTicks++;
+            if (l.CostMs > l.MaxMs) l.MaxMs = l.CostMs;
             l.Ticks++;
         }
     }
@@ -207,7 +237,9 @@ public partial class WhatsAnAiBridge
             ValuesTick(l, null!, ObsClock.Elapsed.TotalMilliseconds);
             return;
         }
-        var obj =new ExpressionWalker(GameController).Resolve(l.Spec.Path, out var error);
+        var r0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var obj = new ExpressionWalker(GameController).Resolve(l.Spec.Path, out var error);
+        l.ResolveTicks += System.Diagnostics.Stopwatch.GetTimestamp() - r0;
         if (error != null) { l.Broken = $"path: {error}"; return; }   // the link no longer exists: say so once
         if (obj == null) { l.NotNow = "resolves to null right now"; return; }
         l.NotNow = null;
