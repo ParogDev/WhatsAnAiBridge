@@ -92,35 +92,45 @@ public partial class WhatsAnAiBridge
         if (w == null) return new JObject { ["error"] = "unknown_plugin", ["message"] = $"No loaded plugin '{name}'." };
         var settings = Prop(Prop(w, "Plugin"), "_Settings");
         if (settings == null) return new JObject { ["error"] = "no_settings", ["plugin"] = w.Name };
-        return new JObject
+        var truncated = new List<string>();
+        var result = new JObject
         {
             ["plugin"] = w.Name,
             ["type"] = settings.GetType().FullName,
-            ["settings"] = SettingsNode(settings, 0, new HashSet<object>(ReferenceEqualityComparer.Instance)),
+            ["settings"] = SettingsNode(settings, 0, new HashSet<object>(ReferenceEqualityComparer.Instance), "", truncated),
         };
+        // Said, not silent, and never inside "settings" (where it would read as one more setting).
+        if (truncated.Count > 0)
+            result["truncated"] = new JArray(truncated.Select(g => $"{(g.Length == 0 ? "the settings root" : g)}: more than {MaxSettingsPerGroup} settings, the rest are not listed"));
+        return result;
     }
 
-    private static JToken SettingsNode(object obj, int depth, HashSet<object> seen)
+    private const int MaxSettingsPerGroup = 150;
+
+    /// <param name="path">Dotted path of this group from the settings root ("" at the root), for <paramref name="truncated"/>.</param>
+    /// <param name="truncated">Groups cut at <see cref="MaxSettingsPerGroup"/> (only when at least one more member exists).</param>
+    private static JToken SettingsNode(object obj, int depth, HashSet<object> seen, string path, List<string> truncated)
     {
         if (depth > 4 || !seen.Add(obj)) return "[...]";
         var o = new JObject();
-        foreach (var (prop, v) in SettingsMembers(obj))
+        using var members = SettingsMembers(obj).GetEnumerator();
+        while (members.MoveNext())
         {
-            // SettingValue redacts string values under secret-looking names (bools, numbers, enums stay).
-            o[prop.Name] = v == null ? JValue.CreateNull() : SettingValue(prop.Name, v, depth, seen);
-            // Stop here, not at the top: the iterator reads the next member's getter before the loop body runs.
-            if (o.Count >= 150)
+            if (o.Count >= MaxSettingsPerGroup)
             {
-                // Said, not silent: the rest of this object's settings are not listed.
-                o["(truncated)"] = "stopped at 150 settings: any more in this group are not listed";
+                // A 151st member exists (peeked: one extra getter read): this group is cut, said in the result's "truncated".
+                truncated.Add(path);
                 break;
             }
+            var (prop, v) = members.Current;
+            // SettingValue redacts string values under secret-looking names (bools, numbers, enums stay).
+            o[prop.Name] = v == null ? JValue.CreateNull() : SettingValue(prop.Name, v, depth, seen, path.Length == 0 ? prop.Name : $"{path}.{prop.Name}", truncated);
         }
         return o;
     }
 
     /// <summary>Settings nodes (ToggleNode, RangeNode&lt;T&gt;, TextNode, ListNode, ColorNode, HotkeyNode...) by shape, not by type.</summary>
-    private static JToken SettingValue(string name, object v, int depth, HashSet<object> seen)
+    private static JToken SettingValue(string name, object v, int depth, HashSet<object> seen, string path, List<string> truncated)
     {
         var t = v.GetType();
         if (t.IsPrimitive || v is string || v is decimal || t.IsEnum)
@@ -155,9 +165,9 @@ public partial class WhatsAnAiBridge
         if (t.IsValueType || (t.Namespace ?? "").StartsWith("System", StringComparison.Ordinal) && v is not IEnumerable)
             return v.ToString() ?? "";
         if (v is IEnumerable list && v is not string)
-            return new JArray(list.Cast<object?>().Take(20).Select(x => x == null ? JValue.CreateNull() : (JToken)SettingValue(name, x, depth + 1, seen)));
+            return new JArray(list.Cast<object?>().Take(20).Select(x => x == null ? JValue.CreateNull() : (JToken)SettingValue(name, x, depth + 1, seen, path, truncated)));
         // Nested settings groups (submenus are plain objects of nodes).
-        return SettingsNode(v, depth + 1, seen);
+        return SettingsNode(v, depth + 1, seen, path, truncated);
     }
 
     // ── PluginBridge registry ────────────────────────────────────────

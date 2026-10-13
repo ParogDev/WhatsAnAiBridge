@@ -67,6 +67,8 @@ public partial class WhatsAnAiBridge
     private static ReflectionPreflightDto? _preflight;
     private static PreflightStateDto? _preflightPrev;
     private static bool _preflightPrevRead;
+    /// <summary>What this load last wrote to <see cref="PreflightFile"/> (stamp + broken ids) and last logged: unchanged = not again.</summary>
+    private static string? _preflightSavedKey, _preflightLoggedLine;
     private static readonly object PreflightLock = new();
     private const string PreflightFile = "reflection-preflight.json";
 
@@ -82,6 +84,10 @@ public partial class WhatsAnAiBridge
             if (link == null) return Serialize(Err("bad_request", $"No link '{simulate}'. Links: {string.Join(", ", HudLinks.All.Select(l => l.Id))}"));
             if (link.Kind == LinkKind.FieldOfType)
                 return Serialize(Err("bad_request", $"{simulate} is found by its field type, not by name: a rename can't be simulated. Pick a link found by name."));
+            // Its type can't be looked at yet (Check would answer not_now before resolving anything): a simulation would
+            // silently test nothing.
+            if (link.NotYet is { } notYet)
+                return Serialize(Err("bad_request", $"{simulate} can't be simulated now: {notYet}. Run a pipeline_trace first, or pick a link that isn't Harmony / MonoMod."));
             var r = RunPreflight(null, link);
             r.Simulated = $"{simulate} resolved as {link.SimulatedName}";
             return Serialize(r);
@@ -128,22 +134,32 @@ public partial class WhatsAnAiBridge
 
             var r = RunPreflight(_preflightPrev, null);
             _preflight = r;
-            try
+            // _preflightPrev stays the previous load's file on purpose (the baseline of every check of this load). The
+            // file is written once per load, and again only if the broken set changes (the re-check after 0Harmony
+            // loads, a refresh); the log line likewise only when what it says changes.
+            var broken = r.Links!.Where(l => l.Status == "broken").Select(l => l.Id).ToList();
+            var saveKey = $"{r.Stamp}|{string.Join(",", broken)}";
+            if (path != null && saveKey != _preflightSavedKey)
             {
-                if (path != null)
-                    File.WriteAllText(path, JsonConvert.SerializeObject(new PreflightStateDto
-                    {
-                        Stamp = r.Stamp, CheckedAt = r.CheckedAt,
-                        Broken = r.Links!.Where(l => l.Status == "broken").Select(l => l.Id).ToList(),
-                    }, Formatting.Indented));
+                try
+                {
+                    File.WriteAllText(path, JsonConvert.SerializeObject(new PreflightStateDto { Stamp = r.Stamp, CheckedAt = r.CheckedAt, Broken = broken }, Formatting.Indented));
+                    _preflightSavedKey = saveKey;
+                }
+                catch (Exception ex) { LogQuiet($"[Preflight] saving {PreflightFile} failed: {ex.Message}"); }
             }
-            catch (Exception ex) { LogQuiet($"[Preflight] saving {PreflightFile} failed: {ex.Message}"); }
 
             var change = r.ChangedFrom != null ? $"HUD build changed ({r.ChangedFrom} -> {r.Stamp}): " : "";
-            if (r.Broken + r.Blocked > 0)
-                LogFault($"[Preflight] {change}{r.Broken} reflection link(s) broken, {r.Blocked} blocked: {string.Join("; ", r.Problems.Take(r.Broken + r.Blocked))}. Details: MCP bridge_status (hello.reflection) or reflection.preflight.", "preflight");
-            else
-                LogQuiet($"[Preflight] {change}{r.Targets} reflection links ok ({r.NotNow} not set yet) in {r.Ms:F1} ms");
+            var bad = r.Broken + r.Blocked > 0;
+            var line = bad
+                ? $"[Preflight] {change}{r.Broken} reflection link(s) broken, {r.Blocked} blocked: {string.Join("; ", r.Problems.Take(r.Broken + r.Blocked))}. Details: MCP bridge_status (hello.reflection) or reflection.preflight."
+                : $"[Preflight] {change}{r.Targets} reflection links ok ({r.NotNow} not set yet)";
+            if (line != _preflightLoggedLine)
+            {
+                _preflightLoggedLine = line;
+                if (bad) LogFault(line, "preflight");
+                else LogQuiet($"{line} in {r.Ms:F1} ms");
+            }
             return r;
         }
     }

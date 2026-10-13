@@ -143,7 +143,7 @@ internal static class MemberIndex
         public FieldInfo[] AllFields => _allFields ??= Type.GetFields(PublicInstance);
 
         /// <summary>
-        /// Public instance properties with a getter (no indexers) and public instance fields, one per name (the
+        /// Public instance properties with a public getter (no indexers) and public instance fields, one per name (the
         /// most-derived declaration), sorted by name (ordinal).
         /// </summary>
         public Member[] Readable => _readable ??= BuildReadable();
@@ -165,11 +165,12 @@ internal static class MemberIndex
 
         private Member[] BuildReadable()
         {
-            var names = AllProperties.Where(p => p.GetIndexParameters().Length == 0 && p.GetMethod != null).Select(p => p.Name)
+            // The same getter rule as ReadableProperties: a public getter (`{ private get; set; }` is not readable here).
+            var names = AllProperties.Where(p => p.GetIndexParameters().Length == 0 && p.GetGetMethod() != null).Select(p => p.Name)
                 .Concat(AllFields.Select(f => f.Name)).Distinct(StringComparer.Ordinal);
             var list = new List<Member>();
             foreach (var name in names)
-                if (Find(Type, name) is { CanRead: true } m) list.Add(m);
+                if (Find(Type, name) is { CanRead: true } m && (m.Property == null || m.Property.GetGetMethod() != null)) list.Add(m);
             list.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
             return list.ToArray();
         }

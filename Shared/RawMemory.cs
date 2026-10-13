@@ -32,8 +32,17 @@ public partial class WhatsAnAiBridge
                 return null;
             }
             var paged = backendField.GetValue(mem);
-            // No inner backend (not the paged one, e.g. caching disabled): read from the backend itself.
-            var leaf = paged == null ? null : HudLinks.PagedInner.FieldOn(paged.GetType())?.GetValue(paged) ?? paged;
+            object? leaf = paged;
+            if (paged != null)
+            {
+                if (HudLinks.PagedInner.FieldOn(paged.GetType()) is { } innerField) leaf = innerField.GetValue(paged) ?? paged;
+                // No inner backend: read from the backend itself. Fine when it is the leaf (caching disabled); when it is the
+                // paged one the link broke, and the reads go through its page cache (allocating pages): said, never silent.
+                else if (paged.GetType().Name.Contains("Paged", StringComparison.Ordinal))
+                    LogFault($"[RawMemory] {HudLinks.PagedInner.Broken(paged.GetType())}: reading through {paged.GetType().Name} itself, i.e. its page cache (RawRead allocates pages again)");
+                else
+                    LogQuiet($"[RawMemory] Memory._backend is {paged.GetType().Name}, no wrapped backend: reading from it directly");
+            }
             var m = leaf == null ? null : HudLinks.BackendRead.MethodOn(leaf.GetType());
             if (leaf != null && m != null) _rawRead = (RawReadFn)Delegate.CreateDelegate(typeof(RawReadFn), leaf, m);
             else LogFault($"[RawMemory] {(leaf == null ? "Memory._backend is null" : HudLinks.BackendRead.Broken(leaf.GetType()))}: using Memory.Read");

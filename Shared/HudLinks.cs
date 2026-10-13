@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace WhatsAnAiBridge;
 
@@ -36,7 +37,10 @@ internal sealed class HudLink
     private readonly Func<string?>? _notNow;
     /// <summary>Non-null while the owner type can't be looked at yet (its assembly isn't loaded): not_now, not broken.</summary>
     private readonly Func<string?>? _notYet;
-    private readonly ConcurrentDictionary<Type, MemberInfo?> _cache = new();
+    /// <summary>Hits only, keyed weakly: a collectible type (a plugin's, a reloaded load context's) is never kept alive by
+    /// the cache. Only a member that passed the shape check (kind, scope, parameters, ValueType) is stored, so a hit
+    /// needs no re-check: the link's expected shape never changes.</summary>
+    private readonly ConditionalWeakTable<Type, MemberInfo> _cache = new();
 
     public HudLink(string id, string feature, string typeLabel, string member, LinkKind kind, BindingFlags flags, Func<Type?> typeOf,
         Type? valueType = null, Type[]? parameters = null, HudLink? dependsOn = null, Func<string?>? notNow = null, Func<string?>? notYet = null)
@@ -70,11 +74,14 @@ internal sealed class HudLink
     public MemberInfo? On(Type? t)
     {
         if (t == null) return null;
-        if (_cache.TryGetValue(t, out var hit)) return hit;
-        hit = Lookup(t, Member, out _);
-        if (hit != null) _cache[t] = hit;
+        if (_cache.TryGetValue(t, out var cached)) return cached;
+        var hit = Lookup(t, Member, out _);
+        if (hit != null) _cache.AddOrUpdate(t, hit);
         return hit;
     }
+
+    /// <summary>Non-null (why) while this link's owner type can't be looked at yet (Harmony / MonoMod before 0Harmony loads).</summary>
+    public string? NotYet => _notYet?.Invoke();
 
     /// <summary><see cref="On"/>, or the simulated rename when this is the link being simulated.</summary>
     private MemberInfo? Resolve(Type? t, HudLink? simulated) =>
@@ -291,17 +298,20 @@ internal static class HudLinks
 
     private const BindingFlags AllDeclared = Inst | BindingFlags.Static;
 
+    // Parameter lists pinned (both HUDs' ClickableTransparentOverlay, 2026-10-13: Update(float, Action), Render(),
+    // ReplaceFontIfRequired()): a by-name link refuses a name with overloads, so a new overload must not turn a
+    // working trace hook into "ambiguous"; a changed signature is reported as broken, naming what is there instead.
     internal static readonly HudLink RendererUpdate = new("overlay.imgui_update", "pipeline_trace / hud_health_report frame timing",
         "ClickableTransparentOverlay.ImGuiRenderer", "Update", LinkKind.Method, AllDeclared,
-        () => Loaded("ClickableTransparentOverlay", "ClickableTransparentOverlay.ImGuiRenderer"));
+        () => Loaded("ClickableTransparentOverlay", "ClickableTransparentOverlay.ImGuiRenderer"), parameters: [typeof(float), typeof(Action)]);
 
     internal static readonly HudLink RendererRender = new("overlay.imgui_render", "pipeline_trace draw-data timing",
         "ClickableTransparentOverlay.ImGuiRenderer", "Render", LinkKind.Method, AllDeclared,
-        () => Loaded("ClickableTransparentOverlay", "ClickableTransparentOverlay.ImGuiRenderer"));
+        () => Loaded("ClickableTransparentOverlay", "ClickableTransparentOverlay.ImGuiRenderer"), parameters: Type.EmptyTypes);
 
     internal static readonly HudLink OverlayReplaceFont = new("overlay.replace_font", "pipeline_trace Present timing",
         "ClickableTransparentOverlay.Overlay", "ReplaceFontIfRequired", LinkKind.Method, AllDeclared,
-        () => Loaded("ClickableTransparentOverlay", "ClickableTransparentOverlay.Overlay"));
+        () => Loaded("ClickableTransparentOverlay", "ClickableTransparentOverlay.Overlay"), parameters: Type.EmptyTypes);
 
     // ── Harmony / MonoMod (Instrumentation.cs) ──
 
