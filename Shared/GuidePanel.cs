@@ -477,7 +477,7 @@ public partial class WhatsAnAiBridge
     {
         if (_guideUi.LastError == ex.Message) return;
         _guideUi.LastError = ex.Message;
-        LogError($"[GuidePanel] {ex}");
+        LogFault($"[GuidePanel] {ex}");
     }
 
     /// <summary>Notice what changed since last frame, so arrivals can flash.</summary>
@@ -1841,7 +1841,7 @@ public partial class WhatsAnAiBridge
         if (startClick)
         {
             var r = QueueStart(next.Id, "hud");
-            if (r["error"] != null) LogError($"[GuidePanel] start refused: {r["error"]} {r["message"]}");
+            if (r["error"] != null) LogFault($"[GuidePanel] start refused: {r["error"]} {r["message"]}");
         }
         var skipW = ImGui.CalcTextSize("Skip").X + 24;
         QueuePillButton(dl, "##queue_skip", new Vector2(max.X - pad - skipW, y), btnH, "Skip", false, th, out var skipClick,

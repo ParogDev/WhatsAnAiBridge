@@ -58,6 +58,14 @@ Offsets move and HUD APIs change with patches. Code that looks things up must sa
   - A null right now (a panel closed) is normal.
 - Diagnostics are part of the result. `guide.flow_state` returns `diagnostics` (why the current step isn't done, why each option isn't available) and `preflight` (paths that no longer resolve).
 
+## Logging: never the HUD's top-left text (`Shared\HudLog.cs`)
+
+The HUD's DebugWindow lines (`LogMessage` / `LogError`) are drawn at the player's top left; the user found them far too busy while playing. **The bridge never calls `LogMessage` / `LogError` / `DebugWindow.*` directly:**
+- `LogQuiet(msg)`: routine diagnostics (connections, thread hand-overs, reloads that worked). HUD log file only, at Information.
+- `LogFault(msg, key?)`: something broke. HUD log file at Error, full text (stacks too); a repeat of the same key within 60 s is counted and reported with the next one written. Agents find it with MCP `hud_log level=error` (and `hud_plugins` error counts).
+- `ToastFault(key, title, toast, msg, holdSec?)`: a fault the player must act on (the TCP server didn't start, F8's PluginBridge hooks failed): `LogFault` plus one `error` toast per load and key, in the player's words.
+Both write through the HUD's own Serilog logger (`Core.Logger`, found by reflection: the CI reference set has no Serilog.dll); if that link breaks, messages fall back to the old on-screen lines and the break is named once.
+
 ## Bridge protocol (v2)
 
 - Newline-delimited JSON-RPC 2.0 on `127.0.0.1:<port>`. The port and a per-launch random token are written to `<HUD>\<BridgeDirectory>\bridge-port.txt` / `bridge-token.txt` (default `claude-bridge`).

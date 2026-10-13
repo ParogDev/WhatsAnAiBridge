@@ -103,7 +103,7 @@ public partial class WhatsAnAiBridge
             Directory.CreateDirectory(ObsDir);
             File.WriteAllText(Path.Combine(ObsDir, "state.json"), JsonConvert.SerializeObject(Obs()));
         }
-        catch (Exception ex) { LogError($"[Observe] state save failed: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[Observe] state save failed: {ex.Message}"); }
     }
 
     private string? ProcessObserveMethod(string method, JToken? p) => method switch
@@ -213,7 +213,7 @@ public partial class WhatsAnAiBridge
         if (!Obs().Enabled || !GameController.InGame) { _obsFrameAt = 0; return; }
         var now = DateTime.UtcNow;
         ObserveHudFrame();
-        try { ObserveLayers(now); } catch (Exception ex) { LogError($"[Observe] layers: {ex.Message}"); }
+        try { ObserveLayers(now); } catch (Exception ex) { LogFault($"[Observe] layers: {ex.Message}"); }
         // Panels at 10 Hz once the visibility bit is calibrated (8 bytes per panel), so a panel lines up with 10 Hz
         // server changes; 2 Hz while it falls back to IsVisibleLocal (~3.6 KB allocated per panel).
         var panelsDue = (now - _obsLastPanels).TotalMilliseconds >= (_obsFlagOff >= 0 ? 100 : 500);
@@ -226,7 +226,7 @@ public partial class WhatsAnAiBridge
             ObservePanels();
             if ((now - _obsLastEntities).TotalSeconds >= 2) { _obsLastEntities = now; ObserveEntities(); }
         }
-        catch (Exception ex) { LogError($"[Observe] {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[Observe] {ex.Message}"); }
         if (slowDue) ObsFlush();
     }
 
@@ -277,7 +277,7 @@ public partial class WhatsAnAiBridge
             }
         if (found.Count == 1) (_obsFlagOff, _obsFlagBit) = found[0];
         else _obsFlagOff = -2;   // none or ambiguous: keep the HUD property (correct, just allocating)
-        LogMessage(found.Count == 1 ? $"[Observe] visibility flag at +0x{_obsFlagOff:X} bit {_obsFlagBit}" : $"[Observe] visibility flag: {found.Count} candidates, using IsVisibleLocal");
+        LogQuiet(found.Count == 1 ? $"[Observe] visibility flag at +0x{_obsFlagOff:X} bit {_obsFlagBit}" : $"[Observe] visibility flag: {found.Count} candidates, using IsVisibleLocal");
     }
 
     private void ObservePanels()

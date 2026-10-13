@@ -579,13 +579,13 @@ public partial class WhatsAnAiBridge
             };
             if (r["error"] != null)
             {
-                LogError($"[Attention] {who}'s queued {method} failed when its turn came: {r["error"]} {r["message"]}");
+                LogFault($"[Attention] {who}'s queued {method} failed when its turn came: {r["error"]} {r["message"]}");
                 AttnEndById(itemId, "cancelled", "replay_failed", $"{method} failed when its turn came: {r["error"]}: {r["message"]}");
             }
         }
         catch (Exception ex)
         {
-            LogError($"[Attention] replay of {who}'s {method}: {ex.Message}");
+            LogFault($"[Attention] replay of {who}'s {method}: {ex.Message}");
             AttnEndById(itemId, "cancelled", "replay_failed", $"{method} threw {ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -608,7 +608,7 @@ public partial class WhatsAnAiBridge
     {
         foreach (var e in effects)
             try { e(); }
-            catch (Exception ex) { LogError($"[Attention] {ex.GetType().Name}: {ex.Message}"); }
+            catch (Exception ex) { LogFault($"[Attention] {ex.GetType().Name}: {ex.Message}"); }
         AttnSaveIfChanged();
     }
 
@@ -1021,11 +1021,11 @@ public partial class WhatsAnAiBridge
                 _attn.Add(i);
                 if (int.TryParse(i.Id.TrimStart('A'), out var n) && n > _attnIds) _attnIds = n;
             }
-            if (dropped > 0) LogError($"[Attention] {AttnFile}: {dropped} entr{(dropped == 1 ? "y" : "ies")} unreadable or incomplete, skipped (the rest restored)");
+            if (dropped > 0) LogFault($"[Attention] {AttnFile}: {dropped} entr{(dropped == 1 ? "y" : "ies")} unreadable or incomplete, skipped (the rest restored)");
             _attnSavedKey = AttnSaveKeyLocked();
             if (_attn.Count > 0) _attnSeq++;
         }
-        catch (Exception ex) { LogError($"[Attention] {AttnFile} unreadable, starting empty: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[Attention] {AttnFile} unreadable, starting empty: {ex.GetType().Name}: {ex.Message}"); }
     }
 
     /// <summary>
@@ -1077,7 +1077,7 @@ public partial class WhatsAnAiBridge
             File.WriteAllText(tmp, json);
             File.Move(tmp, AttnFile, true);
         }
-        catch (Exception ex) { LogError($"[Attention] save failed ({AttnFile}): {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[Attention] save failed ({AttnFile}): {ex.Message}"); }
     }
 
     // ── JSON ─────────────────────────────────────────────────────────

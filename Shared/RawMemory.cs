@@ -31,7 +31,7 @@ public partial class WhatsAnAiBridge
             var m = leaf?.GetType().GetMethod("TryReadMemory", [typeof(IntPtr), typeof(Span<byte>)]);
             if (leaf != null && m != null) _rawRead = (RawReadFn)Delegate.CreateDelegate(typeof(RawReadFn), leaf, m);
         }
-        catch (Exception ex) { LogError($"[RawMemory] leaf backend not reachable, using Memory.Read: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[RawMemory] leaf backend not reachable, using Memory.Read: {ex.Message}"); }
         return _rawRead;
     }
 

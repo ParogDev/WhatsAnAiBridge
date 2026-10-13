@@ -107,7 +107,7 @@ public partial class WhatsAnAiBridge
             }
             PubTrimLocked();
         }
-        catch (Exception ex) { _pubWhy = $"reading {PubFile}: {ex.Message}"; LogError($"[PubSub] {_pubWhy}"); }
+        catch (Exception ex) { _pubWhy = $"reading {PubFile}: {ex.Message}"; LogFault($"[PubSub] {_pubWhy}"); }
     }
 
     /// <summary>The ring keeps the newest events; claims of events that left it go with them.</summary>
@@ -207,7 +207,7 @@ public partial class WhatsAnAiBridge
             catch (Exception ex)
             {
                 lock (_pubLock) { if (_pubLocal.TryGetValue(name, out var cur) && cur.handler == handler) _pubLocal.Remove(name); }
-                LogError($"[PubSub] subscriber {name} threw on {kind} and was dropped (it subscribes again when it loads): {ex.Message}");
+                LogFault($"[PubSub] subscriber {name} threw on {kind} and was dropped (it subscribes again when it loads): {ex.Message}");
             }
         }
         return new JObject { ["ok"] = true, ["seq"] = e["seq"], ["kind"] = kind, ["subscribers"] = listeners, ["plugins"] = plugins, ["fileError"] = _pubWhy };

@@ -94,8 +94,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         if (Settings.EnableTcp.Value)
             StartTcpServer();
         InstrStartup();   // patches a previous load of the bridge left in this HUD process (Instrumentation.cs)
-        try { PubRegister(); } catch (Exception ex) { LogError($"[PubSub] registering {PublishMethodName} / {SubscribeMethodName} on PluginBridge failed: {ex.Message}"); }
-        try { WorkRegister(); } catch (Exception ex) { LogError($"[Work] registering {WorkListMethodName} / {HighlightForMethodName} on PluginBridge failed: {ex.Message}"); }
+        try { PubRegister(); } catch (Exception ex) { ToastFault("f8-register", "F8 feedback is off", "Couldn't connect F8 to the agents. Restart the HUD to bring it back.", $"[PubSub] registering {PublishMethodName} / {SubscribeMethodName} on PluginBridge failed: {ex.Message}"); }
+        try { WorkRegister(); } catch (Exception ex) { ToastFault("f8-register", "F8 feedback is off", "Couldn't connect F8 to the agents. Restart the HUD to bring it back.", $"[Work] registering {WorkListMethodName} / {HighlightForMethodName} on PluginBridge failed: {ex.Message}"); }
 
         return true;
     }
@@ -106,8 +106,8 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         {
             _tcpServer?.Dispose();
             _tcpServer = new TcpBridgeServer(
-                msg => LogMessage($"[TCP] {msg}"),
-                msg => LogError($"[TCP] {msg}")
+                msg => LogQuiet($"[TCP] {msg}"),
+                msg => LogFault($"[TCP] {msg}")
             );
             _tcpServer.ClientClosed += SessionDisconnected;
             _tcpServer.Start(Settings.TcpPort.Value, _bridgeDir);
@@ -115,7 +115,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         }
         catch (Exception ex)
         {
-            LogError($"[TCP] Failed to start server: {ex.Message}");
+            ToastFault("tcp-start", "Agents can't connect", "The AI bridge couldn't start. Restart the HUD to fix it.", $"[TCP] Failed to start server: {ex.Message}");
         }
     }
 
@@ -168,7 +168,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             };
             File.WriteAllText(InterruptedRecordingFile, JsonConvert.SerializeObject(note));
         }
-        catch (Exception ex) { LogError($"[Recording] writing {InterruptedRecordingFile}: {ex.Message}"); }
+        catch (Exception ex) { LogFault($"[Recording] writing {InterruptedRecordingFile}: {ex.Message}"); }
         _isRecording = false;
     }
 
@@ -216,13 +216,13 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             if (!_servingFromWatchdog)
             {
                 _servingFromWatchdog = true;
-                LogMessage("[TCP] HUD not ticking (game window in background?) - serving bridge requests from a worker thread");
+                LogQuiet("[TCP] HUD not ticking (game window in background?) - serving bridge requests from a worker thread");
             }
             DrainRequests(server);
         }
         catch (Exception ex)
         {
-            LogError($"[TCP] Watchdog error: {ex.Message}");
+            LogFault($"[TCP] Watchdog error: {ex.Message}");
         }
         finally
         {
@@ -240,7 +240,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
             if (_servingFromWatchdog)
             {
                 _servingFromWatchdog = false;
-                LogMessage("[TCP] HUD ticking again - serving bridge requests on the main thread");
+                LogQuiet("[TCP] HUD ticking again - serving bridge requests on the main thread");
             }
             DrainRequests(server);
         }
@@ -1318,7 +1318,7 @@ public partial class WhatsAnAiBridge : BaseSettingsPlugin<WhatsAnAiBridgeSetting
         }
         catch (Exception ex)
         {
-            LogError($"Recording capture error: {ex.Message}");
+            LogFault($"Recording capture error: {ex.Message}");
         }
     }
 

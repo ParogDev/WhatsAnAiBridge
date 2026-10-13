@@ -108,7 +108,7 @@ public partial class WhatsAnAiBridge
         }
         catch (Exception ex)
         {
-            if (_lab.LastError != ex.Message) { _lab.LastError = ex.Message; LogError($"[RenderLab] {ex}"); }
+            if (_lab.LastError != ex.Message) { _lab.LastError = ex.Message; LogFault($"[RenderLab] {ex}"); }
         }
     }
 

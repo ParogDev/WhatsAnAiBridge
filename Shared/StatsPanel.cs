@@ -144,7 +144,7 @@ public partial class WhatsAnAiBridge
             if (_panel.LastError != ex.Message)
             {
                 _panel.LastError = ex.Message;
-                LogError($"[StatsPanel] {ex}");
+                LogFault($"[StatsPanel] {ex}");
             }
         }
         finally

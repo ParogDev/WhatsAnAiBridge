@@ -89,7 +89,7 @@ public partial class WhatsAnAiBridge
             if (_hlLastError != ex.Message)
             {
                 _hlLastError = ex.Message;
-                LogError($"[GuideHighlight] {ex}");
+                LogFault($"[GuideHighlight] {ex}");
             }
         }
     }

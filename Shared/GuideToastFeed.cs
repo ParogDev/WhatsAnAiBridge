@@ -78,7 +78,7 @@ public partial class WhatsAnAiBridge
             catch (Exception ex)
             {
                 _combatBroken = $"combat sense: {ex.GetType().Name}: {ex.Message}";
-                LogError($"[GuidePanel] {_combatBroken} (combat muting is off until the plugin reloads)");
+                LogFault($"[GuidePanel] {_combatBroken} (combat muting is off until the plugin reloads)");
                 _combatSeenAt = -1e9;
             }
         }

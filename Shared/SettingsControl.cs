@@ -73,7 +73,7 @@ public partial class WhatsAnAiBridge
     /// <summary>Runs queued actions on the main thread (called at the start of Render).</summary>
     private void RunMainActions()
     {
-        while (_mainActions.TryDequeue(out var a)) { try { a(); } catch (Exception ex) { LogError($"[Settings] {ex.Message}"); } }
+        while (_mainActions.TryDequeue(out var a)) { try { a(); } catch (Exception ex) { LogFault($"[Settings] {ex.Message}"); } }
     }
 
     private JObject SettingsDescribe(string? only)
