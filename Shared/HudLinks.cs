@@ -4,7 +4,6 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using HarmonyLib;
 
 namespace WhatsAnAiBridge;
 
@@ -35,13 +34,15 @@ internal sealed class HudLink
 
     private readonly Func<Type?> _typeOf;
     private readonly Func<string?>? _notNow;
+    /// <summary>Non-null while the owner type can't be looked at yet (its assembly isn't loaded): not_now, not broken.</summary>
+    private readonly Func<string?>? _notYet;
     private readonly ConcurrentDictionary<Type, MemberInfo?> _cache = new();
 
     public HudLink(string id, string feature, string typeLabel, string member, LinkKind kind, BindingFlags flags, Func<Type?> typeOf,
-        Type? valueType = null, Type[]? parameters = null, HudLink? dependsOn = null, Func<string?>? notNow = null)
+        Type? valueType = null, Type[]? parameters = null, HudLink? dependsOn = null, Func<string?>? notNow = null, Func<string?>? notYet = null)
     {
         Id = id; Feature = feature; TypeLabel = typeLabel; Member = member; Kind = kind; Flags = flags;
-        _typeOf = typeOf; ValueType = valueType; Parameters = parameters; DependsOn = dependsOn; _notNow = notNow;
+        _typeOf = typeOf; ValueType = valueType; Parameters = parameters; DependsOn = dependsOn; _notNow = notNow; _notYet = notYet;
         HudLinks.All.Add(this);
     }
 
@@ -157,6 +158,7 @@ internal sealed class HudLink
     public LinkCheckDto Check()
     {
         var row = new LinkCheckDto { Id = Id, Feature = Feature, Type = TypeLabel, Member = Member, Expected = Expected };
+        if (_notYet?.Invoke() is { } notYet) { row.Status = "not_now"; row.Note = notYet; return row; }
         if (DependsOn != null && DependsOn.On(DependsOn.DeclaredType) == null)
         {
             row.Status = "blocked";
@@ -266,25 +268,34 @@ internal static class HudLinks
 
     // ── Harmony / MonoMod (Instrumentation.cs) ──
 
-    private static Type? Harmony(string type) => typeof(Harmony).Assembly.GetType(type);
+    // Never typeof(Harmony) here: touching a Harmony type before HarmonyLoadError (PipelineTrace.cs) put 0Harmony into the
+    // default load context loads it into the collectible plugin context, and every patch then fails (live, 2026-10-13:
+    // "CecilILGenerator ... violates the constraint of type TTarget"). Only the copy already in the default context is read.
+    private static System.Reflection.Assembly? HarmonyAssembly() =>
+        System.Runtime.Loader.AssemblyLoadContext.Default.Assemblies.FirstOrDefault(a => a.GetName().Name == "0Harmony");
+
+    private static Type? Harmony(string type) => HarmonyAssembly()?.GetType(type);
+
+    private static string? HarmonyNotLoaded() => HarmonyAssembly() == null
+        ? "0Harmony isn't loaded yet (it loads on the first pipeline_trace / profile_plugin; checked again then)" : null;
 
     internal static readonly HudLink MonoModAssemblyCache = new("monomod.assembly_cache", "patching a reloaded plugin binds to its own load (profile_plugin, pipeline_trace)",
-        "MonoMod.Utils.ReflectionHelper", "AssemblyCache", LinkKind.Field, Stat, () => Harmony("MonoMod.Utils.ReflectionHelper"), valueType: typeof(IDictionary));
+        "MonoMod.Utils.ReflectionHelper", "AssemblyCache", LinkKind.Field, Stat, () => Harmony("MonoMod.Utils.ReflectionHelper"), valueType: typeof(IDictionary), notYet: HarmonyNotLoaded);
     internal static readonly HudLink MonoModAssembliesCache = new("monomod.assemblies_cache", "patching a reloaded plugin binds to its own load (profile_plugin, pipeline_trace)",
-        "MonoMod.Utils.ReflectionHelper", "AssembliesCache", LinkKind.Field, Stat, () => Harmony("MonoMod.Utils.ReflectionHelper"), valueType: typeof(IDictionary));
+        "MonoMod.Utils.ReflectionHelper", "AssembliesCache", LinkKind.Field, Stat, () => Harmony("MonoMod.Utils.ReflectionHelper"), valueType: typeof(IDictionary), notYet: HarmonyNotLoaded);
     internal static readonly HudLink MonoModResolveCache = new("monomod.resolve_reflection_cache", "patching a reloaded plugin binds to its own load (profile_plugin, pipeline_trace)",
-        "MonoMod.Utils.ReflectionHelper", "ResolveReflectionCache", LinkKind.Field, Stat, () => Harmony("MonoMod.Utils.ReflectionHelper"), valueType: typeof(IDictionary));
+        "MonoMod.Utils.ReflectionHelper", "ResolveReflectionCache", LinkKind.Field, Stat, () => Harmony("MonoMod.Utils.ReflectionHelper"), valueType: typeof(IDictionary), notYet: HarmonyNotLoaded);
 
     internal static readonly HudLink[] MonoModCaches = [MonoModAssemblyCache, MonoModAssembliesCache, MonoModResolveCache];
 
     internal static readonly HudLink HarmonyDetours = new("harmony.detours", "restoring a patched method's original code when instrumentation ends",
-        "HarmonyLib.PatchTools", "detours", LinkKind.Field, Stat, () => Harmony("HarmonyLib.PatchTools"), valueType: typeof(IDictionary));
+        "HarmonyLib.PatchTools", "detours", LinkKind.Field, Stat, () => Harmony("HarmonyLib.PatchTools"), valueType: typeof(IDictionary), notYet: HarmonyNotLoaded);
     internal static readonly HudLink HarmonyState = new("harmony.state", "restoring a patched method's original code when instrumentation ends",
-        "HarmonyLib.HarmonySharedState", "state", LinkKind.Field, Stat, () => Harmony("HarmonyLib.HarmonySharedState"), valueType: typeof(IDictionary));
+        "HarmonyLib.HarmonySharedState", "state", LinkKind.Field, Stat, () => Harmony("HarmonyLib.HarmonySharedState"), valueType: typeof(IDictionary), notYet: HarmonyNotLoaded);
     internal static readonly HudLink HarmonyOriginals = new("harmony.originals", "restoring a patched method's original code when instrumentation ends",
-        "HarmonyLib.HarmonySharedState", "originals", LinkKind.Field, Stat, () => Harmony("HarmonyLib.HarmonySharedState"), valueType: typeof(IDictionary));
+        "HarmonyLib.HarmonySharedState", "originals", LinkKind.Field, Stat, () => Harmony("HarmonyLib.HarmonySharedState"), valueType: typeof(IDictionary), notYet: HarmonyNotLoaded);
     internal static readonly HudLink HarmonyLocker = new("harmony.locker", "restoring a patched method's original code when instrumentation ends",
-        "HarmonyLib.PatchProcessor", "locker", LinkKind.Field, Stat, () => Harmony("HarmonyLib.PatchProcessor"));
+        "HarmonyLib.PatchProcessor", "locker", LinkKind.Field, Stat, () => Harmony("HarmonyLib.PatchProcessor"), notYet: HarmonyNotLoaded);
 
     // ── .NET ArrayPool<byte>.Shared (GcPool.cs, PipelineTrace.cs) ──
 

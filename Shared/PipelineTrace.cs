@@ -65,6 +65,7 @@ public partial class WhatsAnAiBridge
         {
             System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += (_, name) => name.Name == "0Harmony" ? loaded : null;
             _harmonyAsm = loaded;
+            PreflightAfterHarmonyLoad();   // the Harmony/MonoMod links were not_now until 0Harmony was in the default context
             return null;
         }
         var dir = System.IO.Path.GetFileName(DirectoryFullName.TrimEnd('\\', '/'));
@@ -80,6 +81,7 @@ public partial class WhatsAnAiBridge
             var asm = System.Runtime.Loader.AssemblyLoadContext.Default.LoadFromStream(s);
             System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += (_, name) => name.Name == "0Harmony" ? asm : null;
             _harmonyAsm = asm;
+            PreflightAfterHarmonyLoad();
             return null;
         }
         catch (Exception ex) { return _harmonyError = $"Loading 0Harmony into the default load context failed: {ex.GetType().Name}: {ex.Message}"; }

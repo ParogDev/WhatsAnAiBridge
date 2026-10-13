@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using HarmonyLib;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -29,9 +28,9 @@ public class LinkCheckDto
 /// <summary>reflection.preflight: every declared reflection target (HudLinks) checked against this HUD build.</summary>
 public class ReflectionPreflightDto
 {
-    /// <summary>HUD assembly version + module id, .NET runtime, Harmony: what the targets live in.</summary>
+    /// <summary>HUD assembly version + module id and the .NET runtime: what the targets live in.</summary>
     [JsonProperty("stamp")] public string Stamp { get; set; } = "";
-    /// <summary>The stamp of the previous check saved in the bridge directory, when it differs (a HUD / runtime / Harmony update).</summary>
+    /// <summary>The stamp of the previous check saved in the bridge directory, when it differs (a HUD or .NET update).</summary>
     [JsonProperty("changedFrom", NullValueHandling = NullValueHandling.Ignore)] public string? ChangedFrom { get; set; }
     [JsonProperty("checkedAt")] public DateTime CheckedAt { get; set; }
     [JsonProperty("ms")] public double Ms { get; set; }
@@ -57,7 +56,7 @@ public class PreflightStateDto
 /// <summary>
 /// HUD-update drift preflight. Every private/internal reflection target in <see cref="HudLinks"/> is checked when the
 /// bridge loads (each HUD start, each bridge reload) against the build stamp saved by the previous check: a changed
-/// stamp means a HUD / .NET / Harmony update, and is reported as such. Broken links are named one by one (type,
+/// stamp means a HUD or .NET update, and is reported as such. Broken links are named one by one (type,
 /// member, expected shape, what is there instead) in hello's <c>reflection</c> (MCP bridge_status, hud_health_report)
 /// and in full by <c>reflection.preflight</c>; a break is also logged as a fault at load.
 /// </summary>
@@ -178,12 +177,20 @@ public partial class WhatsAnAiBridge
         return r;
     }
 
-    /// <summary>What the targets live in: the HUD assembly (version and module id, new on every build), .NET and Harmony.</summary>
+    /// <summary>0Harmony just loaded into the default context: its links (not_now until now) are checked.</summary>
+    private void PreflightAfterHarmonyLoad()
+    {
+        try { PreflightAtLoad(); } catch (Exception ex) { LogFault($"[Preflight] check after 0Harmony loaded failed: {ex.GetType().Name}: {ex.Message}", "preflight"); }
+    }
+
+    /// <summary>What the targets live in: the HUD assembly (version and module id, new on every build) and .NET.</summary>
     private static string BuildStamp()
     {
         var hud = typeof(GameController).Assembly;
         var info = hud.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? hud.GetName().Version?.ToString() ?? "?";
         var mvid = hud.ManifestModule.ModuleVersionId.ToString("N")[..8];
-        return $"{hud.GetName().Name} {info} ({mvid}); .NET {Environment.Version}; Harmony {typeof(Harmony).Assembly.GetName().Version}";
+        // No Harmony version: touching a Harmony type here would load 0Harmony into the plugin context (HudLinks.HarmonyAssembly),
+        // and it ships with the bridge build anyway.
+        return $"{hud.GetName().Name} {info} ({mvid}); .NET {Environment.Version}";
     }
 }
