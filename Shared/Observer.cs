@@ -348,13 +348,18 @@ public partial class WhatsAnAiBridge
     private static Dictionary<long, string> MappedPanels(object ui)
     {
         var d = new Dictionary<long, string>();
-        foreach (var p in ui.GetType().GetProperties())
+        foreach (var p in PanelMembers(ui.GetType()))
         {
-            if (!typeof(UiElement).IsAssignableFrom(p.PropertyType) || p.GetIndexParameters().Length > 0) continue;
-            try { if (p.GetValue(ui) is UiElement el && el.Address != 0) d.TryAdd(el.Address, p.Name); } catch { }
+            try { if (p.Get(ui) is UiElement el && el.Address != 0) d.TryAdd(el.Address, p.Name); } catch { }
         }
         return d;
     }
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Type, MemberIndex.Member[]> _panelMembers = new();
+
+    /// <summary>IngameUIElements' element-typed properties (reflection's order, compiled getters), listed once per type.</summary>
+    private static MemberIndex.Member[] PanelMembers(Type t) => _panelMembers.GetValue(t, type =>
+        MemberIndex.ReadableProperties(type).Where(m => typeof(UiElement).IsAssignableFrom(m.Type)).ToArray());
 
     /// <summary>The first few non-empty texts in a panel's subtree (breadth-first, bounded): what the panel says it is.</summary>
     private static List<string> PanelTexts(UiElement root, int depth, int max)
