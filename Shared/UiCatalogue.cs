@@ -131,6 +131,17 @@ public partial class WhatsAnAiBridge
                 if (typeof(WhatsAnAiBridge).GetMethod(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static
                         | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public) is { } m)
                     System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(m.MethodHandle);
+            // The HUD's element members the walk calls (compiled lazily too) and the walk's generic shapes, with no game read.
+            foreach (var m in typeof(UiElement).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public))
+                if (m.Name is "get_Text" or "get_Children" or "GetClientRect" or "get_IsVisibleLocal" or "HasFlag" or "get_Address"
+                    && !m.ContainsGenericParameters)
+                    try { System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(m.MethodHandle); } catch { }
+            var q = new Queue<(UiElement e, int[] path, bool parentHovers)>();
+            int[] p0 = [];
+            q.Enqueue((null!, [.. p0, 0], false));
+            var (_, p1, _) = q.Dequeue();
+            var w = new UcWalk();
+            w.Found.Add(("warm", p1, [0f, 0f, 1f, 1f], false));
             var o = new UcOpen { E = null!, OpenedAt = DateTime.UtcNow };
             UcMerge(new UiCatalogueFile(), null, o, [("warm", [0], [0f, 0f, 1f, 1f], false), ("up", [1], null, true), ("up", [2], null, false)]);
         }
