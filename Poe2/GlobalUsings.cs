@@ -17,3 +17,4 @@ global using UiElement = ExileCore2.PoEMemory.Element;
 global using NextFrameTask = ExileCore2.Shared.NextFrameTask;
 global using PluginManager = ExileCore2.Shared.PluginManager;
 global using PluginWrapper = ExileCore2.Shared.PluginWrapper;
+global using ImGuiNET;

@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
-using ImGuiNET;
 
 namespace WhatsAnAiBridge;
 
@@ -210,7 +209,7 @@ public partial class WhatsAnAiBridge
         if (r.HasOwner) DrawWhoDot(dl, new Vector2(x + GuideDotR, cy), r.Hue, alpha);
         else DrawNeutralDot(dl, new Vector2(x + GuideDotR, cy), alpha);
         x += WhoDotW;
-        dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * alpha), r.Label);
+        dl.AddFontText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * alpha), r.Label);
         x += ImGui.CalcTextSize(r.Label).X * k + 8f;
         if (!GuideSame(ui.RequestSrc, r.Request)) { ui.RequestSrc = r.Request; ui.RequestCaps = GuideCaps(r.Request); ui.RequestSize = -1; }
         if (ui.RequestSize != small) { ui.RequestSize = small; ui.RequestOut = GuideClipTracked(ui.RequestCaps, font, small, GuideToastMsgTrack, WorkRequestMaxW); }
@@ -229,14 +228,14 @@ public partial class WhatsAnAiBridge
         var sec = utc.Ticks / TimeSpan.TicksPerSecond;
         if (ui.ElapsedSecond != sec) { ui.ElapsedSecond = sec; ui.ElapsedText = GuideElapsed(utc - r.StartedAt); }
         var ew = ImGui.CalcTextSize(ui.ElapsedText).X * k;
-        dl.AddText(font, small, new Vector2(rx - ew, cy - small * 0.5f), U(r.Stalled && !r.Final ? ToneWarn : GuideToastMuted, alpha), ui.ElapsedText);
+        dl.AddFontText(font, small, new Vector2(rx - ew, cy - small * 0.5f), U(r.Stalled && !r.Final ? ToneWarn : GuideToastMuted, alpha), ui.ElapsedText);
         rx -= ew + 10f;
         if (more > 0)
         {
             var u = _workUi;
             if (u.MoreN != more) { u.MoreN = more; u.MoreText = "+" + more + WorkMoreSuffix; }
             var mw = ImGui.CalcTextSize(u.MoreText).X * k;
-            dl.AddText(font, small, new Vector2(rx - mw, cy - small * 0.5f), U(GuideToastMuted, 0.85f * alpha), u.MoreText);
+            dl.AddFontText(font, small, new Vector2(rx - mw, cy - small * 0.5f), U(GuideToastMuted, 0.85f * alpha), u.MoreText);
             rx -= mw + 10f;
         }
         DrawWorkTail(dl, font, f, x, rx, cy, r, ui, alpha);
@@ -272,7 +271,7 @@ public partial class WhatsAnAiBridge
             WorkTailKind.NeedsYou => U(GuideToastText, 0.9f * alpha),
             _ => U(GuideToastMuted, alpha),
         };
-        dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), col, ui.TailOut);
+        dl.AddFontText(font, small, new Vector2(x, cy - small * 0.5f), col, ui.TailOut);
     }
 
     /// <summary>
@@ -334,6 +333,6 @@ public partial class WhatsAnAiBridge
         var a0 = (float)(now * 4.5 % (Math.PI * 2));
         dl.PathClear();
         dl.PathArcTo(c, 5f, a0, a0 + 4.2f, 14);
-        dl.PathStroke(col, ImDrawFlags.None, 1.4f);
+        dl.PathStrokeEx(col, ImDrawFlags.None, 1.4f);
     }
 }

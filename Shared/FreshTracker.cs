@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
-using ImGuiNET;
 using Newtonsoft.Json.Linq;
 
 namespace WhatsAnAiBridge;

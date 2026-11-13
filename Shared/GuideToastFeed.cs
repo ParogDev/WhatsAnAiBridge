@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using ImGuiNET;
 using Newtonsoft.Json.Linq;
 
 namespace WhatsAnAiBridge;

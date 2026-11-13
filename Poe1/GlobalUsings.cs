@@ -17,3 +17,5 @@ global using UiElement = ExileCore.PoEMemory.Element;
 global using NextFrameTask = ExileCore.Shared.NextFrameTask;
 global using PluginManager = ExileCore.Shared.PluginManager;
 global using PluginWrapper = ExileCore.Shared.PluginWrapper;
+// ImGui is Hexa.NET.ImGui, imported by the .csproj (<Using Include="Hexa.NET.ImGui" />, poe1 only): that item keeps the
+// PoE1 HUD's plugin compiler from adding an unconditional one. PoE2 imports ImGuiNET in Poe2\GlobalUsings.cs.

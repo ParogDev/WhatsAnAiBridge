@@ -22,4 +22,12 @@
     <!-- The ExileCore2 host runs on .NET 8 - a net10 plugin will not load in PoE2. -->
     <TargetFramework Condition="'$(Game)' == 'poe2'">net8.0-windows</TargetFramework>
   </PropertyGroup>
+
+  <!-- The PoE2 HUD (ExileCore2) still runs ImGui.NET 1.90; the PoE1 HUD moved to Hexa.NET.ImGui (referenced in the
+       .csproj). This lives HERE, not in the .csproj: the PoE1 HUD's plugin compiler deletes every
+       PackageReference Include="ImGui.NET" it finds in a plugin .csproj, conditions ignored, and saves the file,
+       which would break the PoE2 build of this shared project. It does not read Directory.Build.props. -->
+  <ItemGroup Condition="'$(Game)' == 'poe2'">
+    <PackageReference Include="ImGui.NET" Version="1.90.0.1" />
+  </ItemGroup>
 </Project>

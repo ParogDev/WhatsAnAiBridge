@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
-using ImGuiNET;
 
 namespace WhatsAnAiBridge;
 
@@ -229,7 +228,7 @@ public partial class WhatsAnAiBridge
                 if (k < 1)
                 {
                     var grow = 3f + 14f * HlEase(k);
-                    dl.AddRect(min - new Vector2(grow, grow), max + new Vector2(grow, grow), U(ToneAccent, 0.55f * (float)(1 - k) * life), 5f, ImDrawFlags.None, 1.5f);
+                    dl.AddRectEx(min - new Vector2(grow, grow), max + new Vector2(grow, grow), U(ToneAccent, 0.55f * (float)(1 - k) * life), 5f, ImDrawFlags.None, 1.5f);
                 }
             }
             if (b.Order is int order)
@@ -382,7 +381,7 @@ public partial class WhatsAnAiBridge
     {
         if (state == 2)
         {
-            dl.AddRect(min - Vector2.One, max + Vector2.One, U(ToneNeutral, 0.4f * snap), 3f, ImDrawFlags.None, 1f);
+            dl.AddRectEx(min - Vector2.One, max + Vector2.One, U(ToneNeutral, 0.4f * snap), 3f, ImDrawFlags.None, 1f);
             return;
         }
         var strength = state == 1 ? 0.45f : 1f;
@@ -394,16 +393,16 @@ public partial class WhatsAnAiBridge
             {
                 var len = Math.Clamp(MathF.Min(max.X - min.X, max.Y - min.Y) * 0.3f, 8f, 18f);
                 if (state == 0)
-                    dl.AddRect(min - new Vector2(4, 4), max + new Vector2(4, 4), U(ToneAccent, (0.07f + 0.13f * pulse) * snap), 5f, ImDrawFlags.None, 1f);
+                    dl.AddRectEx(min - new Vector2(4, 4), max + new Vector2(4, 4), U(ToneAccent, (0.07f + 0.13f * pulse) * snap), 5f, ImDrawFlags.None, 1f);
                 HlBrackets(dl, min - o, max + o, len, U(ToneAccent, (0.78f + 0.22f * pulse) * strength * snap), 2f);
                 break;
             }
             case "secondary":
-                dl.AddRect(min - o * 0.5f - new Vector2(0.5f, 0.5f), max + o * 0.5f + new Vector2(0.5f, 0.5f),
+                dl.AddRectEx(min - o * 0.5f - new Vector2(0.5f, 0.5f), max + o * 0.5f + new Vector2(0.5f, 0.5f),
                     U(ToneAccent, 0.6f * strength * snap), 3f, ImDrawFlags.None, 1.5f);
                 break;
             default:   // context: a thin neutral outline, enough to find the area, not enough to look at
-                dl.AddRect(min - Vector2.One, max + Vector2.One, U(ToneNeutral, 0.5f * strength * snap), 5f, ImDrawFlags.None, 1f);
+                dl.AddRectEx(min - Vector2.One, max + Vector2.One, U(ToneNeutral, 0.5f * strength * snap), 5f, ImDrawFlags.None, 1f);
                 break;
         }
     }
@@ -412,13 +411,13 @@ public partial class WhatsAnAiBridge
     private static void HlBrackets(ImDrawListPtr dl, Vector2 min, Vector2 max, float len, uint col, float thick)
     {
         dl.PathLineTo(new Vector2(min.X, min.Y + len)); dl.PathLineTo(min); dl.PathLineTo(new Vector2(min.X + len, min.Y));
-        dl.PathStroke(col, ImDrawFlags.None, thick);
+        dl.PathStrokeEx(col, ImDrawFlags.None, thick);
         dl.PathLineTo(new Vector2(max.X - len, min.Y)); dl.PathLineTo(new Vector2(max.X, min.Y)); dl.PathLineTo(new Vector2(max.X, min.Y + len));
-        dl.PathStroke(col, ImDrawFlags.None, thick);
+        dl.PathStrokeEx(col, ImDrawFlags.None, thick);
         dl.PathLineTo(new Vector2(max.X, max.Y - len)); dl.PathLineTo(max); dl.PathLineTo(new Vector2(max.X - len, max.Y));
-        dl.PathStroke(col, ImDrawFlags.None, thick);
+        dl.PathStrokeEx(col, ImDrawFlags.None, thick);
         dl.PathLineTo(new Vector2(min.X + len, max.Y)); dl.PathLineTo(new Vector2(min.X, max.Y)); dl.PathLineTo(new Vector2(min.X, max.Y - len));
-        dl.PathStroke(col, ImDrawFlags.None, thick);
+        dl.PathStrokeEx(col, ImDrawFlags.None, thick);
     }
 
     /// <summary>
@@ -440,13 +439,13 @@ public partial class WhatsAnAiBridge
         {
             case 0:
                 dl.AddCircleFilled(c, HlBadgeR, U(ToneAccent, snap), 24);
-                dl.AddText(font, small, tp, U(ink, snap), text);
-                dl.AddText(font, small, tp + new Vector2(0.6f, 0), U(ink, snap), text);   // faux bold
+                dl.AddFontText(font, small, tp, U(ink, snap), text);
+                dl.AddFontText(font, small, tp + new Vector2(0.6f, 0), U(ink, snap), text);   // faux bold
                 break;
             case 1:
                 dl.AddCircleFilled(c, HlBadgeR, U(th.Card, 0.9f * snap), 24);
                 dl.AddCircle(c, HlBadgeR, U(ToneNeutral, 0.85f * snap), 24, 1.3f);
-                dl.AddText(font, small, tp, U(th.TextDim, snap), text);
+                dl.AddFontText(font, small, tp, U(th.TextDim, snap), text);
                 break;
             default:
             {
@@ -481,7 +480,7 @@ public partial class WhatsAnAiBridge
         }
         // Body: card fill so it reads on any art, light outline, button split lines.
         dl.AddRectFilled(min, max, U(th.Card, 0.92f * alpha), 6f);
-        dl.AddRect(min, max, U(th.Text, 0.8f * alpha), 6f, ImDrawFlags.None, 1.2f);
+        dl.AddRectEx(min, max, U(th.Text, 0.8f * alpha), 6f, ImDrawFlags.None, 1.2f);
         dl.AddLine(new Vector2(min.X + 1, split), new Vector2(max.X - 1, split), U(th.Text, 0.55f * alpha), 1f);
         dl.AddLine(new Vector2(midX, min.Y + 1), new Vector2(midX, split), U(th.Text, 0.55f * alpha), 1f);
         // The button to press, dipping while pressed.
@@ -489,7 +488,7 @@ public partial class WhatsAnAiBridge
         var bx1 = right ? max.X - 1.5f : midX - 1f;
         var dip = press * 1f;
         dl.AddRectFilled(new Vector2(bx0, min.Y + 1.5f + dip), new Vector2(bx1, split - 1f), U(ToneAccent, (0.7f + 0.3f * press) * alpha), 4.5f,
-            right ? ImDrawFlags.RoundCornersTopRight : ImDrawFlags.RoundCornersTopLeft);
+            right ? ImGuiShim.RoundTopRight : ImGuiShim.RoundTopLeft);
         // Click ring: leaves the pressed button's top edge and fades over the first 40% of the cycle.
         if (phase >= 0 && phase < 0.4)
         {
@@ -545,7 +544,7 @@ public partial class WhatsAnAiBridge
         var border = state == 0 && tier != "context" ? ToneAccent : th.Border;
         dl.AddRectFilled(pmin, pmax, U(th.Card, 0.94f * snap), size.Y * 0.5f);
         dl.AddRect(pmin, pmax, U(border, 0.55f * snap), size.Y * 0.5f);
-        dl.AddText(font, small, new Vector2(pmin.X + 6, pmin.Y + 3), U(tone, (state == 0 ? 1f : 0.85f) * snap), text);
+        dl.AddFontText(font, small, new Vector2(pmin.X + 6, pmin.Y + 3), U(tone, (state == 0 ? 1f : 0.85f) * snap), text);
         _hlPlaced.Add((pmin, pmax));
     }
 
@@ -576,7 +575,7 @@ public partial class WhatsAnAiBridge
         var x = pmin.X + pad;
         HlQuestionBadge(dl, font, small, new Vector2(x + HlBadgeR, cy), snap);
         x += HlBadgeR * 2 + HlAskGap;
-        dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(th.Text, snap), b.Ask);
+        dl.AddFontText(font, small, new Vector2(x, cy - small * 0.5f), U(th.Text, snap), b.Ask);
         x += askW + 12f;
         var answer = HlAskControls(dl, font, small, x, cy, pillH, slot, b.TargetIndex, true, snap, th);
         _hlPlaced.Add((pmin, pmax));
@@ -666,8 +665,8 @@ public partial class WhatsAnAiBridge
         var f = ImGui.GetFontSize();
         var tw = ImGui.CalcTextSize("?").X * (small / f);
         var tp = new Vector2(c.X - tw * 0.5f, c.Y - small * 0.5f);
-        dl.AddText(font, small, tp, U(ink, alpha), "?");
-        dl.AddText(font, small, tp + new Vector2(0.6f, 0), U(ink, alpha), "?");
+        dl.AddFontText(font, small, tp, U(ink, alpha), "?");
+        dl.AddFontText(font, small, tp + new Vector2(0.6f, 0), U(ink, alpha), "?");
     }
 
     /// <summary>
@@ -681,12 +680,12 @@ public partial class WhatsAnAiBridge
         var pmax = pmin + new Vector2(w, h);
         var dim = glyph == 2;
         dl.AddRectFilled(pmin, pmax, dim ? U(th.Tile, (hovered ? 1f : 0.7f) * alpha) : U(tone, (hovered ? 0.34f : 0.16f) * alpha), h * 0.5f);
-        dl.AddRect(pmin, pmax, dim ? U(th.Border, (hovered ? 0.9f : 0.6f) * alpha) : U(tone, (hovered ? 1f : 0.75f) * alpha), h * 0.5f, ImDrawFlags.None, hovered ? 1.4f : 1f);
+        dl.AddRectEx(pmin, pmax, dim ? U(th.Border, (hovered ? 0.9f : 0.6f) * alpha) : U(tone, (hovered ? 1f : 0.75f) * alpha), h * 0.5f, ImDrawFlags.None, hovered ? 1.4f : 1f);
         var x = pmin.X + 8f;
         var textTone = hovered && !dim ? Vector4.Lerp(tone, Vector4.One, 0.35f) : tone;
         if (glyph == 0) { HlCheckGlyph(dl, new Vector2(x + 5f, pos.Y), strength, U(textTone, alpha)); x += 14f; }
         else if (glyph == 1) { HlCrossGlyph(dl, new Vector2(x + 5f, pos.Y), strength, U(textTone, alpha)); x += 14f; }
-        dl.AddText(font, small, new Vector2(x - (dim ? 1f : 0f), pos.Y - small * 0.5f), U(textTone, alpha), text);
+        dl.AddFontText(font, small, new Vector2(x - (dim ? 1f : 0f), pos.Y - small * 0.5f), U(textTone, alpha), text);
     }
 
     /// <summary>The result pill after a click, where the strip was: glyph pops in, the pill fades out at the end.</summary>
@@ -796,9 +795,9 @@ public partial class WhatsAnAiBridge
             // The pill: card fill, accent hairline, rounded away from the edge only (the edge side runs 2 px off screen).
             var edgeMin = right ? pmin : pmin - new Vector2(2f, 0f);
             var edgeMax = right ? pmax + new Vector2(2f, 0f) : pmax;
-            var corners = right ? ImDrawFlags.RoundCornersLeft : ImDrawFlags.RoundCornersRight;
+            var corners = right ? ImGuiShim.RoundLeft : ImGuiShim.RoundRight;
             dl.AddRectFilled(edgeMin, edgeMax, U(th.Card, (0.9f + 0.06f * ease) * life), 6f, corners);
-            dl.AddRect(edgeMin, edgeMax, U(ToneAccent, (0.35f + 0.25f * ease) * life), 6f, corners, 1f);
+            dl.AddRectEx(edgeMin, edgeMax, U(ToneAccent, (0.35f + 0.25f * ease) * life), 6f, corners, 1f);
             dl.PushClipRect(pmin, pmax, true);
             var cy = (pmin.Y + pmax.Y) * 0.5f;
             var x = pmin.X + HlDockPad;
@@ -807,11 +806,11 @@ public partial class WhatsAnAiBridge
             string? answer = null;
             if (open <= 0.001f)
             {
-                dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(th.TextDim, 0.95f * life), HlDockClipped(b.Ask!, small).text);
+                dl.AddFontText(font, small, new Vector2(x, cy - small * 0.5f), U(th.TextDim, 0.95f * life), HlDockClipped(b.Ask!, small).text);
             }
             else
             {
-                dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(th.Text, life), b.Ask);
+                dl.AddFontText(font, small, new Vector2(x, cy - small * 0.5f), U(th.Text, life), b.Ask);
                 x += askW + 12f;
                 answer = HlAskControls(dl, font, small, x, cy, strip, l.Slot, b.TargetIndex, open > 0.6f, life, th);
             }
@@ -901,7 +900,7 @@ public partial class WhatsAnAiBridge
         dl.AddCircleFilled(new Vector2(pmin.X + 10, cy), 3f, U(ToneAccent, snap), 12);
         var x = pmin.X + 10 + 6 + 6;
         dl.AddText(new Vector2(x, cy - f * 0.5f), U(th.Text, snap), title);
-        if (sub != null) dl.AddText(font, small, new Vector2(x + tw + 8, cy - small * 0.5f), U(th.TextDim, snap), sub);
+        if (sub != null) dl.AddFontText(font, small, new Vector2(x + tw + 8, cy - small * 0.5f), U(th.TextDim, snap), sub);
         _hlPlaced.Add((pmin, pmax));
     }
 

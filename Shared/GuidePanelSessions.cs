@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
-using ImGuiNET;
 
 namespace WhatsAnAiBridge;
 
@@ -87,7 +86,7 @@ public partial class WhatsAnAiBridge
         if (flashT < 1) dl.AddRectFilled(min, max, U(tone, 0.28f * (float)(1 - flashT)), 6f);
         var topT = a.RestartTop == rr.Id ? (now - a.RestartTopAt) / GuideFlashSec : 1;
         if (topT < 1) dl.AddRectFilled(min, max, U(AttnHueColor(rr.Hue), 0.35f * (float)(1 - topT)), 6f);
-        dl.AddRect(min, max, U(tone, 0.55f), 6f, ImDrawFlags.None, 1f);
+        dl.AddRectEx(min, max, U(tone, 0.55f), 6f, ImDrawFlags.None, 1f);
 
         // Header: restart glyph + label in the tone; right: who asked, with its who-dot, dimmed.
         var hy = min.Y + headH * 0.5f;
@@ -95,37 +94,37 @@ public partial class WhatsAnAiBridge
         DrawRestartGlyph(dl, new Vector2(x + 6, hy), U(tone), blocked ? 0 : now);
         x += 18;
         var label = blocked ? "HUD RESTART WAITS" : "HUD RESTART";
-        dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(tone), label);
+        dl.AddFontText(font, small, new Vector2(x, hy - small * 0.5f), U(tone), label);
         x += ImGui.CalcTextSize(label).X * (small / f) + 10;
         var rx = max.X - pad;
         var whoW = ImGui.CalcTextSize(who).X * (small / f) + WhoDotW;
         if (rx - whoW > x)
         {
             DrawWhoDot(dl, new Vector2(rx - whoW + GuideDotR, hy), rr.Hue);
-            dl.AddText(font, small, new Vector2(rx - whoW + WhoDotW, hy - small * 0.5f), U(th.TextDim), who);
+            dl.AddFontText(font, small, new Vector2(rx - whoW + WhoDotW, hy - small * 0.5f), U(th.TextDim), who);
             rx -= whoW + 10;
         }
 
         // Body: the lead line, then the blockers as bullets (whose, what, how long left).
         var y = min.Y + headH + 2;
         var bx = min.X + pad;
-        dl.AddText(font, f, new Vector2(bx, y), U(blocked ? th.Text : tone), rt.Lead);
+        dl.AddFontText(font, f, new Vector2(bx, y), U(blocked ? th.Text : tone), rt.Lead);
         y += f + 4;
         if (blocked)
         {
             foreach (var line in rt.Lines)
             {
                 dl.AddCircleFilled(new Vector2(bx + 4, y + small * 0.5f), 2f, U(th.TextDim), 8);
-                dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim), line);
+                dl.AddFontText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim), line);
                 y += small + 3;
             }
             if (rt.More != null)
             {
-                dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim, 0.8f), rt.More);
+                dl.AddFontText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim, 0.8f), rt.More);
                 y += small + 3;
             }
         }
-        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim, 0.85f), rt.Meta);
+        dl.AddFontText(font, small, new Vector2(bx, y), U(th.TextDim, 0.85f), rt.Meta);
         y += small + 8;
 
         // Buttons: Restart now (primary) and Not now. The tooltip says what Restart now would interrupt. Both ignore clicks
@@ -220,7 +219,7 @@ public partial class WhatsAnAiBridge
         var a0 = (float)(t * 1.2 % (Math.PI * 2)) - MathF.PI * 0.75f;
         dl.PathClear();
         dl.PathArcTo(c, r, a0 + MathF.PI * 0.35f, a0 + MathF.PI * 1.85f, 14);
-        dl.PathStroke(col, ImDrawFlags.None, 1.4f);
+        dl.PathStrokeEx(col, ImDrawFlags.None, 1.4f);
         var tip = c + new Vector2(MathF.Cos(a0 + MathF.PI * 0.35f), MathF.Sin(a0 + MathF.PI * 0.35f)) * r;
         var dir = new Vector2(-MathF.Sin(a0 + MathF.PI * 0.35f), MathF.Cos(a0 + MathF.PI * 0.35f));   // tangent
         var n = new Vector2(-dir.Y, dir.X);
@@ -318,14 +317,14 @@ public partial class WhatsAnAiBridge
             if (work.AnyF8Running) dl.AddCircle(new Vector2(x + 6.5f, cy), 8.5f, U(ToneAccent, 0.85f * a), 20, 1.5f);
             DrawSessionsGlyph(dl, new Vector2(x + 6.5f, cy), U(ToneNeutral, a));
             x += 13f + 5f;
-            dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * a), u.ChipCountText);
+            dl.AddFontText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * a), u.ChipCountText);
             x += countW - 18f;
             if (badge > 0)
             {
                 // "!N": N items wait on the player (accent, 0.75 f).
                 x += 5f;
-                dl.AddText(font, tiny, new Vector2(x, cy - tiny * 0.5f), U(ToneAccent, a), u.ChipBadgeText);
-                dl.AddText(font, tiny, new Vector2(x + 0.6f, cy - tiny * 0.5f), U(ToneAccent, a), u.ChipBadgeText);
+                dl.AddFontText(font, tiny, new Vector2(x, cy - tiny * 0.5f), U(ToneAccent, a), u.ChipBadgeText);
+                dl.AddFontText(font, tiny, new Vector2(x + 0.6f, cy - tiny * 0.5f), U(ToneAccent, a), u.ChipBadgeText);
                 x += badgeW - 5f;
             }
             if (stateW > 0) x += 8f;
@@ -339,7 +338,7 @@ public partial class WhatsAnAiBridge
             {
                 x += 4f;
                 if (granted != null) GuideTrackedText(dl, font, small, new Vector2(x, cy - small * 0.5f), U(tone, a), stateText, GuideToastMsgTrack);
-                else dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(tone, a), stateText);
+                else dl.AddFontText(font, small, new Vector2(x, cy - small * 0.5f), U(tone, a), stateText);
             }
         }
         // Rollout: a hairline along the bottom edge, inside the frame, filled by how many of the supervised servers are on

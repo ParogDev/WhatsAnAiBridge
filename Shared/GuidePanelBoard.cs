@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Text;
-using ImGuiNET;
 using Newtonsoft.Json.Linq;
 
 namespace WhatsAnAiBridge;
@@ -334,13 +333,13 @@ public partial class WhatsAnAiBridge
             DrawCloseGlyph(dl, new Vector2(rx - 8, hy), 3.5f, U(hov ? GuideToastText : GuideToastMuted, hov ? 1f : 0.8f));
             rx -= 16 + 8;
             var pw = ImGui.CalcTextSize(BoardPinnedText).X * k;
-            dl.AddText(font, small, new Vector2(rx - pw, hy - small * 0.5f), U(GuideToastMuted, 0.85f * alpha), BoardPinnedText);
+            dl.AddFontText(font, small, new Vector2(rx - pw, hy - small * 0.5f), U(GuideToastMuted, 0.85f * alpha), BoardPinnedText);
             rx -= pw + 12;
         }
         if (b.Right.Length > 0)
         {
             var rw = ImGui.CalcTextSize(b.Right).X * k;
-            dl.AddText(font, small, new Vector2(rx - rw, hy - small * 0.5f), U(b.NeedsYou > 0 ? ToneAccent : GuideToastMuted, alpha), b.Right);
+            dl.AddFontText(font, small, new Vector2(rx - rw, hy - small * 0.5f), U(b.NeedsYou > 0 ? ToneAccent : GuideToastMuted, alpha), b.Right);
         }
         y += f + 6f;
 
@@ -349,7 +348,7 @@ public partial class WhatsAnAiBridge
         if (b.Empty)
         {
             DrawNeutralDot(dl, new Vector2(x0 + GuideDotR, y + rowH * 0.5f), 0.6f * alpha);
-            dl.AddText(font, small, new Vector2(x0 + WhoDotW, y + rowH * 0.5f - small * 0.5f), U(GuideToastMuted, alpha), BoardEmptyRow);
+            dl.AddFontText(font, small, new Vector2(x0 + WhoDotW, y + rowH * 0.5f - small * 0.5f), U(GuideToastMuted, alpha), BoardEmptyRow);
             y += rowH;
         }
         for (var i = 0; i < b.Rows.Count; i++)
@@ -359,31 +358,31 @@ public partial class WhatsAnAiBridge
         }
         if (b.More > 0)
         {
-            dl.AddText(font, small, new Vector2(x0 + WhoDotW, y), U(GuideToastMuted, 0.85f * alpha), b.MoreText);
+            dl.AddFontText(font, small, new Vector2(x0 + WhoDotW, y), U(GuideToastMuted, 0.85f * alpha), b.MoreText);
             y += small + 4f;
         }
         if (b.Recent != null)
         {
             y += 4f;
-            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.9f * alpha), b.RecentClip.Get(b.Recent, (max.X - GuideToastPadX - x0) / k));
+            dl.AddFontText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.9f * alpha), b.RecentClip.Get(b.Recent, (max.X - GuideToastPadX - x0) / k));
             y += small + 2f;
         }
         if (b.Note != null)
         {
             y += 2f;
-            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, alpha), b.NoteClip.Get(b.Note, (max.X - GuideToastPadX - x0) / k));
+            dl.AddFontText(font, small, new Vector2(x0, y), U(GuideToastMuted, alpha), b.NoteClip.Get(b.Note, (max.X - GuideToastPadX - x0) / k));
             y += small + 2f;
         }
         if (b.Foot1 != null)
         {
             y += 2f;
-            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.75f * alpha), b.Foot1Clip.Get(b.Foot1, (max.X - GuideToastPadX - x0) / k));
+            dl.AddFontText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.75f * alpha), b.Foot1Clip.Get(b.Foot1, (max.X - GuideToastPadX - x0) / k));
             y += small + 2f;
         }
         if (b.Foot2 != null)
         {
             y += 2f;
-            dl.AddText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.75f * alpha), b.Foot2Clip.Get(b.Foot2, (max.X - GuideToastPadX - x0) / k));
+            dl.AddFontText(font, small, new Vector2(x0, y), U(GuideToastMuted, 0.75f * alpha), b.Foot2Clip.Get(b.Foot2, (max.X - GuideToastPadX - x0) / k));
         }
     }
 
@@ -424,7 +423,7 @@ public partial class WhatsAnAiBridge
         x += WhoDotW;
         // Name (110 px) and request (150 px), clipped; the clipped forms are kept until the text or the room changes.
         if (!GuideSame(r.NameSrc, r.Name) || r.NameW != WorkNameW) { r.NameSrc = r.Name; r.NameW = WorkNameW; r.NameOut = GuideClipText(r.Name, (WorkNameW - 8f) / k); }
-        dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * a), r.NameOut);
+        dl.AddFontText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * a), r.NameOut);
         x += WorkNameW;
         // The right side first (elapsed, the stage word, the track and a minimum tail): the request column gives way so the
         // stage word never runs into the elapsed and the tail ("waits for CI", "PR #57 - CI") keeps a readable slot.
@@ -434,7 +433,7 @@ public partial class WhatsAnAiBridge
         var tailMin = r.Tail != null ? BoardTailMinW : 0f;
         var reqW = Math.Clamp(rx - ew - x - trackW - wordW - tailMin, BoardRequestMinW, WorkRequestW);
         if (!GuideSame(r.ReqSrc, r.Request) || r.ReqW != reqW) { r.ReqSrc = r.Request; r.ReqW = reqW; r.ReqOut = GuideClipText(r.Request, (reqW - 8f) / k); }
-        dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.8f * a), r.ReqOut);
+        dl.AddFontText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.8f * a), r.ReqOut);
         x += reqW;
         if (r.Track && r.Work != null && r.Ui != null)
         {
@@ -455,7 +454,7 @@ public partial class WhatsAnAiBridge
         }
         if (r.Elapsed.Length > 0)
         {
-            dl.AddText(font, small, new Vector2(rx - (ew - 10f), cy - small * 0.5f), U(r.Work is { Stalled: true, Final: false } ? ToneWarn : GuideToastMuted, a), r.Elapsed);
+            dl.AddFontText(font, small, new Vector2(rx - (ew - 10f), cy - small * 0.5f), U(r.Work is { Stalled: true, Final: false } ? ToneWarn : GuideToastMuted, a), r.Elapsed);
             rx -= ew;
         }
         if (r.Tail == null || rx - x < 24f) return;
@@ -483,7 +482,7 @@ public partial class WhatsAnAiBridge
             WorkTailKind.NeedsYou => U(GuideToastText, 0.9f * a),
             _ => U(GuideToastMuted, a),
         };
-        dl.AddText(font, small, new Vector2(x, cy - small * 0.5f), col, r.TailOut);
+        dl.AddFontText(font, small, new Vector2(x, cy - small * 0.5f), col, r.TailOut);
     }
 
     private static readonly string[] BoardRowIds = ["##board_row_0", "##board_row_1", "##board_row_2", "##board_row_3", "##board_row_4", "##board_row_5"];

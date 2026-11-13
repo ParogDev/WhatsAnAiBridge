@@ -174,7 +174,7 @@ public partial class WhatsAnAiBridge
             e["at"] = DateTime.UtcNow.ToString("O");
             // One clock and frame number for every layer, so events from different layers can be lined up.
             e["t"] = Math.Round(ObsClock.Elapsed.TotalMilliseconds, 1);
-            e["frame"] = ImGuiNET.ImGui.GetFrameCount();
+            e["frame"] = ImGui.GetFrameCount();
             _obsEvents.Add(e);
             if (_obsEvents.Count > ObsRing) _obsEvents.RemoveRange(0, _obsEvents.Count - ObsRing);
             _obsPending.Add(e.ToString(Formatting.None));

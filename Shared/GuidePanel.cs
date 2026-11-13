@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
-using ImGuiNET;
 using Newtonsoft.Json.Linq;
 
 namespace WhatsAnAiBridge;
@@ -696,17 +695,17 @@ public partial class WhatsAnAiBridge
         if (urgent)
         {
             dl.AddRectFilled(min, max, U(look.Tone, 0.05f + 0.15f * pulse), 0f);
-            dl.AddRect(min - new Vector2(7, 7), max + new Vector2(7, 7), U(look.Tone, 0.22f * pulse), 0f, ImDrawFlags.None, 6f);
-            dl.AddRect(min - new Vector2(3, 3), max + new Vector2(3, 3), U(look.Tone, 0.18f + 0.42f * pulse), 0f, ImDrawFlags.None, 3.5f);
-            dl.AddRect(min, max, U(look.Tone, 0.5f + 0.5f * pulse), 0f, ImDrawFlags.None, 1.5f + 1.5f * pulse);
+            dl.AddRectEx(min - new Vector2(7, 7), max + new Vector2(7, 7), U(look.Tone, 0.22f * pulse), 0f, ImDrawFlags.None, 6f);
+            dl.AddRectEx(min - new Vector2(3, 3), max + new Vector2(3, 3), U(look.Tone, 0.18f + 0.42f * pulse), 0f, ImDrawFlags.None, 3.5f);
+            dl.AddRectEx(min, max, U(look.Tone, 0.5f + 0.5f * pulse), 0f, ImDrawFlags.None, 1.5f + 1.5f * pulse);
         }
         else if (pulsing)
         {
-            dl.AddRect(min - new Vector2(2, 2), max + new Vector2(2, 2), U(look.Tone, 0.12f + 0.16f * pulse), 0f, ImDrawFlags.None, 2.5f);
-            dl.AddRect(min, max, U(look.Tone, 0.6f + 0.4f * pulse), 0f, ImDrawFlags.None, 1.2f);
+            dl.AddRectEx(min - new Vector2(2, 2), max + new Vector2(2, 2), U(look.Tone, 0.12f + 0.16f * pulse), 0f, ImDrawFlags.None, 2.5f);
+            dl.AddRectEx(min, max, U(look.Tone, 0.6f + 0.4f * pulse), 0f, ImDrawFlags.None, 1.2f);
         }
         else if (loud || (g.status == "captured" && !compact))
-            dl.AddRect(min, max, U(look.Tone, 0.8f), 0f, ImDrawFlags.None, 1.2f);
+            dl.AddRectEx(min, max, U(look.Tone, 0.8f), 0f, ImDrawFlags.None, 1.2f);
         else
             dl.AddRect(min, max, U(GuideToastLine), 0f);
         // The stripe, flush on the left edge over the border, in the tone.
@@ -804,7 +803,7 @@ public partial class WhatsAnAiBridge
             dl.AddRectFilled(pmin, pmax, U(tone, fill), 0f);
             dl.AddRect(pmin, pmax, U(tone, 0.5f), 0f);
             DrawQueueGlyph(dl, new Vector2(pmin.X + 6 + 6, hy), U(tone));
-            dl.AddText(font, small, new Vector2(pmin.X + 6 + glyphW, hy - small * 0.5f), U(tone), t);
+            dl.AddFontText(font, small, new Vector2(pmin.X + 6 + glyphW, hy - small * 0.5f), U(tone), t);
             ImGui.SetCursorScreenPos(pmin);
             ImGui.InvisibleButton("##guide_countdown", pmax - pmin);
             if (ImGui.IsItemHovered())
@@ -815,7 +814,7 @@ public partial class WhatsAnAiBridge
         {
             var t = GuideElapsed(utc - since);
             var tw = ImGui.CalcTextSize(t).X * (small / f);
-            dl.AddText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(GuideToastMuted), t);
+            dl.AddFontText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(GuideToastMuted), t);
             rx -= tw + 10;
         }
         if (g.step is int step)
@@ -827,7 +826,7 @@ public partial class WhatsAnAiBridge
             var pmin = new Vector2(rx - pillW, hy - pillH * 0.5f);
             dl.AddRectFilled(pmin, pmin + new Vector2(pillW, pillH), U(GuideToastLine, 0.7f), 0f);
             dl.AddRect(pmin, pmin + new Vector2(pillW, pillH), U(GuideToastLine), 0f);
-            dl.AddText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(GuideToastMuted), t);
+            dl.AddFontText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(GuideToastMuted), t);
             rx -= pillW + 10;
         }
         // The guide's title (the experiment), dimmed caps in the space left on the title row (cached caps). With two or
@@ -863,8 +862,8 @@ public partial class WhatsAnAiBridge
             for (var i = 0; i < lines; i++)
             {
                 var ly = my + i * (msgSize + 2f);
-                dl.AddText(font, msgSize, new Vector2(textX, ly), col, u.MsgWrap.Lines[i]);
-                if (loud) dl.AddText(font, msgSize, new Vector2(textX + 0.6f, ly), col, u.MsgWrap.Lines[i]);
+                dl.AddFontText(font, msgSize, new Vector2(textX, ly), col, u.MsgWrap.Lines[i]);
+                if (loud) dl.AddFontText(font, msgSize, new Vector2(textX + 0.6f, ly), col, u.MsgWrap.Lines[i]);
             }
         }
 
@@ -880,9 +879,9 @@ public partial class WhatsAnAiBridge
             }
             var lcol = U(line3Tone, 0.9f);
             if (line3Static)
-                for (var i = 0; i < line3Lines; i++) dl.AddText(font, small, new Vector2(line3X, ly + i * (small + 2f)), lcol, u.SubWrap.Lines[i]);
+                for (var i = 0; i < line3Lines; i++) dl.AddFontText(font, small, new Vector2(line3X, ly + i * (small + 2f)), lcol, u.SubWrap.Lines[i]);
             else
-                dl.AddText(font, small, new Vector2(line3X, ly), lcol, GuideClipText(line3, (max.X - GuideToastPadX - line3X) * (f / small)));
+                dl.AddFontText(font, small, new Vector2(line3X, ly), lcol, GuideClipText(line3, (max.X - GuideToastPadX - line3X) * (f / small)));
         }
 
         // Hover over the text block: the whole step in the toast-family panel under the card (title, the full
@@ -1039,7 +1038,7 @@ public partial class WhatsAnAiBridge
         for (var i = 0; i < u.HoverLines.Count; i++)
         {
             var col = u.HoverKinds[i] == 0 ? U(GuideToastText, 0.95f) : U(GuideToastMuted, u.HoverKinds[i] == 1 ? 1f : 0.85f);
-            dl.AddText(font, small, new Vector2(x, y), col, u.HoverLines[i]);
+            dl.AddFontText(font, small, new Vector2(x, y), col, u.HoverLines[i]);
             y += small + lineGap;
         }
     }
@@ -1094,8 +1093,8 @@ public partial class WhatsAnAiBridge
                 dl.AddRectFilled(pmin, pmax, U(ToneAccent, hov ? 1f : 0.85f), 0f);
                 dl.AddLine(new Vector2(tx, cy + 0.2f), new Vector2(tx + 2.6f, cy + 2.8f), ink, 1.8f);
                 dl.AddLine(new Vector2(tx + 2.6f, cy + 2.8f), new Vector2(tx + 7.4f, cy - 2.8f), ink, 1.8f);
-                dl.AddText(font, small, new Vector2(tx + glyphW, cy - small * 0.5f), ink, label);
-                dl.AddText(font, small, new Vector2(tx + glyphW + 0.6f, cy - small * 0.5f), ink, label);
+                dl.AddFontText(font, small, new Vector2(tx + glyphW, cy - small * 0.5f), ink, label);
+                dl.AddFontText(font, small, new Vector2(tx + glyphW + 0.6f, cy - small * 0.5f), ink, label);
                 break;
             }
             case GuidePill.Stop:
@@ -1104,13 +1103,13 @@ public partial class WhatsAnAiBridge
                 dl.AddRectFilled(pmin, pmax, hov ? U(ToneBad, 0.22f) : U(GuideToastLine, 0.7f), 0f);
                 dl.AddRect(pmin, pmax, U(hov ? ToneBad : GuideToastLine), 0f);
                 dl.AddRectFilled(new Vector2(tx, cy - 3.5f), new Vector2(tx + 7, cy + 3.5f), sc, 1f);
-                dl.AddText(font, small, new Vector2(tx + glyphW, cy - small * 0.5f), sc, label);
+                dl.AddFontText(font, small, new Vector2(tx + glyphW, cy - small * 0.5f), sc, label);
                 break;
             }
             default:
                 dl.AddRectFilled(pmin, pmax, U(GuideToastLine, hov ? 1f : 0.7f), 0f);
                 dl.AddRect(pmin, pmax, U(hov ? GuideToastMuted : GuideToastLine), 0f);
-                dl.AddText(font, small, new Vector2(tx, cy - small * 0.5f), U(hov ? GuideToastText : GuideToastMuted), label);
+                dl.AddFontText(font, small, new Vector2(tx, cy - small * 0.5f), U(hov ? GuideToastText : GuideToastMuted), label);
                 break;
         }
         return pillW;
@@ -1139,7 +1138,7 @@ public partial class WhatsAnAiBridge
             {
                 var a0 = (float)(now * 4.5 % (Math.PI * 2));
                 dl.PathArcTo(c, r, a0, a0 + 4.2f, 18);
-                dl.PathStroke(col, ImDrawFlags.None, t);
+                dl.PathStrokeEx(col, ImDrawFlags.None, t);
                 if (status == "settling") dl.AddCircleFilled(c, 2f * s, col, 10);
                 break;
             }
@@ -1208,8 +1207,8 @@ public partial class WhatsAnAiBridge
                 var tw = ImGui.CalcTextSize(n).X * (small / f);
                 var tp = new Vector2(c.X - tw * 0.5f, c.Y - small * 0.5f);
                 var ink = U(new Vector4(0.05f, 0.08f, 0.06f, 1f), alpha);
-                dl.AddText(ImGui.GetFont(), small, tp, ink, n);
-                dl.AddText(ImGui.GetFont(), small, tp + new Vector2(0.6f, 0), ink, n);   // faux bold
+                dl.AddFontText(ImGui.GetFont(), small, tp, ink, n);
+                dl.AddFontText(ImGui.GetFont(), small, tp + new Vector2(0.6f, 0), ink, n);   // faux bold
             }
         }
         else
@@ -1311,11 +1310,11 @@ public partial class WhatsAnAiBridge
                 if (bump > 0.01f)
                 {
                     var k = 1f + 5f * (1f - bump);
-                    dl.AddRect(pmin - new Vector2(k, k), pmax + new Vector2(k, k), U(tone, 0.45f * bump * alpha), 0f, ImDrawFlags.None, 1.5f);
+                    dl.AddRectEx(pmin - new Vector2(k, k), pmax + new Vector2(k, k), U(tone, 0.45f * bump * alpha), 0f, ImDrawFlags.None, 1.5f);
                 }
                 dl.AddRectFilled(pmin, pmax, U(tone, (0.14f + 0.3f * bump) * alpha), 0f);
                 dl.AddRect(pmin, pmax, U(tone, (0.5f + 0.5f * bump) * alpha), 0f);
-                dl.AddText(font, small, new Vector2(pmin.X + 5f, ty + f * 0.5f - small * 0.5f), U(tone, alpha), e.CountText);
+                dl.AddFontText(font, small, new Vector2(pmin.X + 5f, ty + f * 0.5f - small * 0.5f), U(tone, alpha), e.CountText);
                 titleMax -= pillW + 8f;
             }
             // Title: caps, faux bold (drawn twice 0.6 px apart), tracked. Message: caps, 0.85 f, muted, tracked.
@@ -1487,8 +1486,8 @@ public partial class WhatsAnAiBridge
         dl.PathLineTo(new Vector2(fmin.X + 3f, fmin.Y - 3f));
         dl.PathLineTo(new Vector2(fmax.X + 3f, fmin.Y - 3f));
         dl.PathLineTo(new Vector2(fmax.X + 3f, fmax.Y - 3f));
-        dl.PathStroke(col, ImDrawFlags.None, t);
-        dl.AddRect(fmin, fmax, col, 0f, ImDrawFlags.None, t);
+        dl.PathStrokeEx(col, ImDrawFlags.None, t);
+        dl.AddRectEx(fmin, fmax, col, 0f, ImDrawFlags.None, t);
         dl.AddLine(new Vector2(c.X - 4.6f, c.Y + 1.6f), new Vector2(c.X - 2.4f, c.Y + 3.8f), col, 1.4f);
         dl.AddLine(new Vector2(c.X - 2.4f, c.Y + 3.8f), new Vector2(c.X + 1.6f, c.Y - 0.6f), col, 1.4f);
     }
@@ -1496,8 +1495,8 @@ public partial class WhatsAnAiBridge
     // One cached string per ASCII glyph, so tracked text allocates nothing per frame.
     private static readonly string[] GuideGlyphs = Enumerable.Range(0, 128).Select(c => ((char)c).ToString()).ToArray();
 
-    /// <summary>The advance of one glyph at <paramref name="size"/>: the font's base advance, scaled.</summary>
-    private static float GuideGlyphAdvance(ImFontPtr font, float size, char ch) => font.GetCharAdvance(ch < 128 ? ch : '?') * (size / font.FontSize);
+    /// <summary>The advance of one glyph at <paramref name="size"/> (per-game: ImGuiShim.GlyphAdvance).</summary>
+    private static float GuideGlyphAdvance(ImFontPtr font, float size, char ch) => ImGuiShim.GlyphAdvance(font, size, ch < 128 ? ch : '?');
 
     /// <summary>
     /// Draw text one glyph at a time with <paramref name="track"/> px after each (fake letter-spacing: the HUD font
@@ -1510,7 +1509,7 @@ public partial class WhatsAnAiBridge
         for (var i = 0; i < text.Length; i++)
         {
             var ch = text[i] < 128 ? text[i] : '?';
-            dl.AddText(font, size, new Vector2(x, pos.Y), col, GuideGlyphs[ch]);
+            dl.AddFontText(font, size, new Vector2(x, pos.Y), col, GuideGlyphs[ch]);
             x += GuideGlyphAdvance(font, size, ch) + track;
         }
     }
@@ -1661,13 +1660,13 @@ public partial class WhatsAnAiBridge
                 var x = min.X + pad;
                 dl.AddRectFilled(new Vector2(x, hy - 5), new Vector2(x + 3, hy + 5), U(ToneNeutral, 0.9f), 1f);
                 const string title = "AGENT LOG";
-                dl.AddText(font, small, new Vector2(x + 9, hy - small * 0.5f), U(th.TextDim), title);
+                dl.AddFontText(font, small, new Vector2(x + 9, hy - small * 0.5f), U(th.TextDim), title);
                 x += 9 + ImGui.CalcTextSize(title).X * (small / f) + 10;
                 var copyW = ImGui.CalcTextSize("Copy all").X + 24;
                 var closeW = ImGui.CalcTextSize("Close").X + 24;
                 var hint = $"last {lines.Count} of {g.log.Length} - select, ctrl+c - {hotkey.Value} closes";
                 var hintW = max.X - pad - closeW - 6 - copyW - 10 - x;
-                if (hintW > 40) dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(th.TextDim, 0.7f), GuideClipText(hint, hintW * (f / small)));
+                if (hintW > 40) dl.AddFontText(font, small, new Vector2(x, hy - small * 0.5f), U(th.TextDim, 0.7f), GuideClipText(hint, hintW * (f / small)));
                 var btnH = small + 8;
                 QueuePillButton(dl, "##guide_log_close", new Vector2(max.X - pad - closeW, hy - btnH * 0.5f), btnH, "Close", false, th,
                     out closeClicked, $"Close the log ({hotkey.Value} toggles it)");
@@ -1807,7 +1806,7 @@ public partial class WhatsAnAiBridge
         dl.AddRectFilled(min, max, U(th.Card, 0.94f), 6f);
         var flashT = (now - _guideUi.QueueArrivedAt) / GuideFlashSec;
         if (flashT < 1) dl.AddRectFilled(min, max, U(tone, 0.28f * (float)(1 - flashT)), 6f);
-        dl.AddRect(min, max, U(tone, 0.55f), 6f, ImDrawFlags.None, 1f);
+        dl.AddRectEx(min, max, U(tone, 0.55f), 6f, ImDrawFlags.None, 1f);
 
         // Header: clock glyph + label, the experiment, then (right) how many more wait.
         var hy = min.Y + headH * 0.5f;
@@ -1815,7 +1814,7 @@ public partial class WhatsAnAiBridge
         DrawQueueGlyph(dl, new Vector2(x + 6, hy), U(tone));
         x += 18;
         const string label = "QUEUED FOR YOU";
-        dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(tone), label);
+        dl.AddFontText(font, small, new Vector2(x, hy - small * 0.5f), U(tone), label);
         x += ImGui.CalcTextSize(label).X * (small / f) + 10;
         var rx = max.X - pad;
         if (q.QueuedCount > 1)
@@ -1827,7 +1826,7 @@ public partial class WhatsAnAiBridge
             var pmin = new Vector2(rx - pillW, hy - pillH * 0.5f);
             dl.AddRectFilled(pmin, pmin + new Vector2(pillW, pillH), U(th.Tile), pillH * 0.5f);
             dl.AddRect(pmin, pmin + new Vector2(pillW, pillH), U(th.Border, 0.6f), pillH * 0.5f);
-            dl.AddText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(th.TextDim), t);
+            dl.AddFontText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(th.TextDim), t);
             rx -= pillW + 10;
         }
         var title = next.Title ?? $"{next.Experiment}: {next.Label}";
@@ -1857,17 +1856,17 @@ public partial class WhatsAnAiBridge
 
         // Step 2: the instruction, dimmed - it is what comes after Start, not what to do now.
         DrawQueueBadge(dl, new Vector2(bx + 8, y + f * 0.5f), "2", false, th);
-        dl.AddText(font, f, new Vector2(sx, y), U(th.TextDim), thenText, stepW);
+        dl.AddFontText(font, f, new Vector2(sx, y), U(th.TextDim), thenText, stepW);
         y += thenSize.Y + 2;
-        dl.AddText(font, small, new Vector2(sx, y), U(th.TextDim, 0.75f), thenSub, stepW);
+        dl.AddFontText(font, small, new Vector2(sx, y), U(th.TextDim, 0.75f), thenSub, stepW);
         y += thenSubSize.Y + 8;
 
         if (next.Note != null)
         {
-            dl.AddText(font, f, new Vector2(bx, y), U(th.TextDim), next.Note, innerW);
+            dl.AddFontText(font, f, new Vector2(bx, y), U(th.TextDim), next.Note, innerW);
             y += noteSize.Y + 4;
         }
-        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim), GuideClipText(meta, innerW));
+        dl.AddFontText(font, small, new Vector2(bx, y), U(th.TextDim), GuideClipText(meta, innerW));
         y += small + 6;
 
         // "Will record" line: a disclosure that opens the exact watch specs, for the developer who wants to know.
@@ -1886,7 +1885,7 @@ public partial class WhatsAnAiBridge
         if (watchOpen)
             for (var i = 0; i < next.Watch.Length; i++)
             {
-                dl.AddText(font, small, new Vector2(bx + specIndent, y), U(th.TextDim, 0.85f), next.Watch[i], innerW - specIndent);
+                dl.AddFontText(font, small, new Vector2(bx + specIndent, y), U(th.TextDim, 0.85f), next.Watch[i], innerW - specIndent);
                 y += specSizes[i].Y + 2;
             }
 
@@ -1904,12 +1903,12 @@ public partial class WhatsAnAiBridge
         if (active)
         {
             dl.AddCircleFilled(c, 8f, U(ToneAccent), 20);
-            dl.AddText(font, small, new Vector2(c.X - tw * 0.5f, c.Y - small * 0.5f), U(new Vector4(0.05f, 0.08f, 0.06f, 1f)), n);
+            dl.AddFontText(font, small, new Vector2(c.X - tw * 0.5f, c.Y - small * 0.5f), U(new Vector4(0.05f, 0.08f, 0.06f, 1f)), n);
         }
         else
         {
             dl.AddCircle(c, 8f, U(ToneNeutral, 0.8f), 20, 1.3f);
-            dl.AddText(font, small, new Vector2(c.X - tw * 0.5f, c.Y - small * 0.5f), U(th.TextDim), n);
+            dl.AddFontText(font, small, new Vector2(c.X - tw * 0.5f, c.Y - small * 0.5f), U(th.TextDim), n);
         }
     }
 
@@ -1943,7 +1942,7 @@ public partial class WhatsAnAiBridge
         DrawQueueGlyph(dl, new Vector2(x + 6, hy), U(ToneNeutral));
         x += 18;
         var label = q.NextAuto ? "THEN" : "QUEUED";   // never NEXT: that word belongs to the attention queue's next strip
-        dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(ToneNeutral), label);
+        dl.AddFontText(font, small, new Vector2(x, hy - small * 0.5f), U(ToneNeutral), label);
         x += ImGui.CalcTextSize(label).X * (small / f) + 10;
         var rx = max.X - pad;
         // Right: whether it starts by itself (chained), and how many wait after it.
@@ -1952,7 +1951,7 @@ public partial class WhatsAnAiBridge
         if (tail != null)
         {
             var tw = ImGui.CalcTextSize(tail).X * (small / f);
-            dl.AddText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(th.TextDim, 0.8f), tail);
+            dl.AddFontText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(th.TextDim, 0.8f), tail);
             rx -= tw + 10;
         }
         if (rx - x > 40) dl.AddText(new Vector2(x, hy - f * 0.5f), U(th.TextDim), GuideClipText(next.Instruction, rx - x));
