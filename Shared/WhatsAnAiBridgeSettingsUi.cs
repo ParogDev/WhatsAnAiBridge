@@ -286,7 +286,7 @@ public class WhatsAnAiBridgeSettingsUi
         if (pulse)
         {
             float a = (float)(0.3 + 0.7 * Math.Abs(Math.Sin(ImGui.GetTime() * 2.5)));
-            dl.AddCircle(c, 8f, ImGui.GetColorU32(col with { W = a * 0.5f }), 12, 1.5f);
+            dl.AddCircleEx(c, 8f, ImGui.GetColorU32(col with { W = a * 0.5f }), 12, 1.5f);
         }
         ImGui.Dummy(new Vector2(18f, h));
         ImGui.SameLine();

@@ -444,7 +444,7 @@ public partial class WhatsAnAiBridge
                 break;
             case 1:
                 dl.AddCircleFilled(c, HlBadgeR, U(th.Card, 0.9f * snap), 24);
-                dl.AddCircle(c, HlBadgeR, U(ToneNeutral, 0.85f * snap), 24, 1.3f);
+                dl.AddCircleEx(c, HlBadgeR, U(ToneNeutral, 0.85f * snap), 24, 1.3f);
                 dl.AddFontText(font, small, tp, U(th.TextDim, snap), text);
                 break;
             default:
@@ -493,7 +493,7 @@ public partial class WhatsAnAiBridge
         if (phase >= 0 && phase < 0.4)
         {
             var k = (float)(phase / 0.4);
-            dl.AddCircle(new Vector2((bx0 + bx1) * 0.5f, min.Y + 1.5f), 2.5f + 6.5f * HlEase(k), U(ToneAccent, 0.6f * (1 - k) * alpha), 16, 1.2f);
+            dl.AddCircleEx(new Vector2((bx0 + bx1) * 0.5f, min.Y + 1.5f), 2.5f + 6.5f * HlEase(k), U(ToneAccent, 0.6f * (1 - k) * alpha), 16, 1.2f);
         }
     }
 
@@ -543,7 +543,7 @@ public partial class WhatsAnAiBridge
         var tone = state != 0 ? th.TextDim : tier switch { "primary" => ToneAccent, "secondary" => ToneAccent, _ => th.TextDim };
         var border = state == 0 && tier != "context" ? ToneAccent : th.Border;
         dl.AddRectFilled(pmin, pmax, U(th.Card, 0.94f * snap), size.Y * 0.5f);
-        dl.AddRect(pmin, pmax, U(border, 0.55f * snap), size.Y * 0.5f);
+        dl.AddRectEx(pmin, pmax, U(border, 0.55f * snap), size.Y * 0.5f);
         dl.AddFontText(font, small, new Vector2(pmin.X + 6, pmin.Y + 3), U(tone, (state == 0 ? 1f : 0.85f) * snap), text);
         _hlPlaced.Add((pmin, pmax));
     }
@@ -571,7 +571,7 @@ public partial class WhatsAnAiBridge
 
         // The strip: card fill, accent hairline (the question is the current thing to look at).
         dl.AddRectFilled(pmin, pmax, U(th.Card, 0.95f * snap), 6f);
-        dl.AddRect(pmin, pmax, U(ToneAccent, 0.55f * snap), 6f);
+        dl.AddRectEx(pmin, pmax, U(ToneAccent, 0.55f * snap), 6f);
         var x = pmin.X + pad;
         HlQuestionBadge(dl, font, small, new Vector2(x + HlBadgeR, cy), snap);
         x += HlBadgeR * 2 + HlAskGap;
@@ -703,7 +703,7 @@ public partial class WhatsAnAiBridge
         var fade = age > HlVerdictShowSec - HlVerdictFadeSec ? (float)((HlVerdictShowSec - age) / HlVerdictFadeSec) : 1f;
         var alpha = Math.Clamp(fade, 0f, 1f) * snap;
         dl.AddRectFilled(pmin, pmax, U(th.Card, 0.95f * alpha), 6f);
-        dl.AddRect(pmin, pmax, U(tone, 0.55f * alpha), 6f);
+        dl.AddRectEx(pmin, pmax, U(tone, 0.55f * alpha), 6f);
         HlAnswerPill(dl, font, small, new Vector2(pmin.X + 4f, (pmin.Y + pmax.Y) * 0.5f), w, h, text, tone, glyph, false, alpha, th, 0.4f + 0.6f * HlEase(age / HlVerdictPopSec));
         _hlPlaced.Add((pmin, pmax));
     }
@@ -896,7 +896,7 @@ public partial class WhatsAnAiBridge
         var (pmin, pmax) = HlPlace(size, min, max, boxes, disp, prefer: 1);
         var cy = (pmin.Y + pmax.Y) * 0.5f;
         dl.AddRectFilled(pmin, pmax, U(th.Card, 0.94f * snap), 5f);
-        dl.AddRect(pmin, pmax, U(ToneAccent, 0.5f * snap), 5f);
+        dl.AddRectEx(pmin, pmax, U(ToneAccent, 0.5f * snap), 5f);
         dl.AddCircleFilled(new Vector2(pmin.X + 10, cy), 3f, U(ToneAccent, snap), 12);
         var x = pmin.X + 10 + 6 + 6;
         dl.AddText(new Vector2(x, cy - f * 0.5f), U(th.Text, snap), title);

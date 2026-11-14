@@ -378,15 +378,15 @@ public partial class WhatsAnAiBridge
     {
         var breath = 0.5f + 0.5f * MathF.Sin((float)(time * Math.PI * 2 / RlBreathSec));
         var r = RlRingR + 0.6f * breath;
-        dl.AddCircle(c, r + 2.5f, RlCol(RlPathGlow, 0.14f * mul), 32, 3.5f);
-        dl.AddCircle(c, r, RlCol(RlInk, 0.30f * mul), 32, 3.2f);
-        dl.AddCircle(c, r, RlCol(RlPathCore, (0.78f + 0.2f * breath) * mul), 32, 1.6f);
+        dl.AddCircleEx(c, r + 2.5f, RlCol(RlPathGlow, 0.14f * mul), 32, 3.5f);
+        dl.AddCircleEx(c, r, RlCol(RlInk, 0.30f * mul), 32, 3.2f);
+        dl.AddCircleEx(c, r, RlCol(RlPathCore, (0.78f + 0.2f * breath) * mul), 32, 1.6f);
         dl.AddCircleFilled(c, 2f, RlCol(RlPathCore, 0.9f * mul), 12);
         if (changed < RlRingSec)
         {
             var k = changed / RlRingSec;
             var e = 1f - (1f - k) * (1f - k) * (1f - k);
-            dl.AddCircle(c, r + 18f * e, RlCol(RlPathCore, 0.5f * (1f - k)), 32, 1.5f);
+            dl.AddCircleEx(c, r + 18f * e, RlCol(RlPathCore, 0.5f * (1f - k)), 32, 1.5f);
         }
     }
 
@@ -411,7 +411,7 @@ public partial class WhatsAnAiBridge
             MathF.Round(Math.Clamp(pos.X, 2f, MathF.Max(2f, disp.X - size.X - 2f))),
             MathF.Round(Math.Clamp(pos.Y, 2f, MathF.Max(2f, disp.Y - size.Y - 2f))));
         dl.AddRectFilled(pos, pos + size, RlCol(RlPillFill, 0.80f * mul), size.Y * 0.5f);
-        dl.AddRect(pos, pos + size, RlCol(RlPathGlow, 0.40f * mul), size.Y * 0.5f);
+        dl.AddRectEx(pos, pos + size, RlCol(RlPathGlow, 0.40f * mul), size.Y * 0.5f);
         dl.AddFontText(font, small, new Vector2(pos.X + 6f, pos.Y + 3f), RlCol(RlPillText, 0.95f * mul), text);
     }
 

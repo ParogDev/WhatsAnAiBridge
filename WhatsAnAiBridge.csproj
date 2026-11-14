@@ -47,7 +47,7 @@
       <Private>False</Private>
     </Reference>
     <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
-    <!-- The PoE1 HUD moved to Hexa.NET.ImGui (Dear ImGui 1.92, its own build) and ships the DLL.
+    <!-- The PoE1 HUD moved to Hexa.NET.ImGui (Dear ImGui 1.93, its own build) and ships the DLL.
          Its plugin compiler rewrites and saves this file before building (PluginCompiler.MigrateImGui): it deletes every
          PackageReference Include="ImGui.NET" (conditions ignored) and adds an unconditional Reference and Using for
          Hexa.NET.ImGui unless one already exists anywhere in the file. Both exist here, under the poe1 condition, so it

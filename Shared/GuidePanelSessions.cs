@@ -229,8 +229,8 @@ public partial class WhatsAnAiBridge
     /// <summary>12 px "several" glyph: two overlapping rings (the next strip's "WHO IS ASKING" form, GuidePanelQueue.cs).</summary>
     private static void DrawSessionsGlyph(ImDrawListPtr dl, Vector2 c, uint col)
     {
-        dl.AddCircle(new Vector2(c.X - 2.5f, c.Y), 4.2f, col, 14, 1.3f);
-        dl.AddCircle(new Vector2(c.X + 2.5f, c.Y), 4.2f, col, 14, 1.3f);
+        dl.AddCircleEx(new Vector2(c.X - 2.5f, c.Y), 4.2f, col, 14, 1.3f);
+        dl.AddCircleEx(new Vector2(c.X + 2.5f, c.Y), 4.2f, col, 14, 1.3f);
     }
 
     // ── Sessions chip ────────────────────────────────────────────────
@@ -308,13 +308,13 @@ public partial class WhatsAnAiBridge
         // The pill: the toast ink, its hairline (the tone's at half strength while a restart is on, accent while something
         // needs the player, ToneBad for 10 s after a failed press), square corners.
         dl.AddRectFilled(min, max, U(GuideToastInk, 0.94f * a), 0f);
-        dl.AddRect(min, max, failed ? U(ToneBad, 0.8f * a) : waiting != null || granted != null ? U(tone, 0.55f * a) : badge > 0 ? U(ToneAccent, 0.55f * a) : U(GuideToastLine, a), 0f);
+        dl.AddRectEx(min, max, failed ? U(ToneBad, 0.8f * a) : waiting != null || granted != null ? U(tone, 0.55f * a) : badge > 0 ? U(ToneAccent, 0.55f * a) : U(GuideToastLine, a), 0f);
         if (_workUi.Pinned) dl.AddRectFilled(new Vector2(min.X + 1f, min.Y + 1f), new Vector2(max.X - 1f, max.Y - 1f), U(ToneAccent, 0.08f * a), 0f);
         var x = min.X + ChipPadX;
         if (showCount)
         {
             // The rings glyph, with a 1.5 px accent ring around it while an F8 press runs (Pressed .. Verifying).
-            if (work.AnyF8Running) dl.AddCircle(new Vector2(x + 6.5f, cy), 8.5f, U(ToneAccent, 0.85f * a), 20, 1.5f);
+            if (work.AnyF8Running) dl.AddCircleEx(new Vector2(x + 6.5f, cy), 8.5f, U(ToneAccent, 0.85f * a), 20, 1.5f);
             DrawSessionsGlyph(dl, new Vector2(x + 6.5f, cy), U(ToneNeutral, a));
             x += 13f + 5f;
             dl.AddFontText(font, small, new Vector2(x, cy - small * 0.5f), U(GuideToastText, 0.9f * a), u.ChipCountText);

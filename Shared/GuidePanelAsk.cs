@@ -247,7 +247,7 @@ public partial class WhatsAnAiBridge
         dl.AddRectFilled(min, max, U(GuideToastInk, 0.94f * alpha), 0f);
         var flashT = (now - a.ArrivedAt) / GuideFlashSec;
         if (a.Flash && flashT < 1) dl.AddRectFilled(min, max, U(a.FlashTone, 0.35f * (float)(1 - flashT) * alpha), 0f);
-        dl.AddRect(min, max, U(GuideToastLine, alpha), 0f);
+        dl.AddRectEx(min, max, U(GuideToastLine, alpha), 0f);
         if (loud > 0.01f && !leaving)
         {
             var pulse = at.CardPulse ? (float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 1.6)) : 0.5f;
@@ -304,7 +304,7 @@ public partial class WhatsAnAiBridge
             ImGui.InvisibleButton("##ask_again", new Vector2(pillW, ph));
             if (ImGui.IsItemHovered() && a.LaterTip != null) GuideTooltip(a.LaterTip);
             dl.AddRectFilled(pmin, pmin + new Vector2(pillW, ph), U(GuideToastLine, 0.7f * alpha), 0f);
-            dl.AddRect(pmin, pmin + new Vector2(pillW, ph), U(GuideToastLine, alpha), 0f);
+            dl.AddRectEx(pmin, pmin + new Vector2(pillW, ph), U(GuideToastLine, alpha), 0f);
             dl.AddFontText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(GuideToastMuted, alpha), AskAgainText);
             rx -= pillW + 10;
         }
@@ -364,7 +364,7 @@ public partial class WhatsAnAiBridge
         if (lhov)
         {
             dl.AddRectFilled(new Vector2(lx, firstRowY), new Vector2(lx + laterW, firstRowY + pillH), U(GuideToastLine, 0.7f * alpha), pillH * 0.5f);
-            dl.AddRect(new Vector2(lx, firstRowY), new Vector2(lx + laterW, firstRowY + pillH), U(GuideToastLine, alpha), pillH * 0.5f);
+            dl.AddRectEx(new Vector2(lx, firstRowY), new Vector2(lx + laterW, firstRowY + pillH), U(GuideToastLine, alpha), pillH * 0.5f);
         }
         var lcol = U(lhov ? GuideToastText : GuideToastMuted, laterA);
         DrawQueueGlyph(dl, new Vector2(lx + 14f, firstRowY + pillH * 0.5f), lcol);
@@ -440,7 +440,7 @@ public partial class WhatsAnAiBridge
             }
             case 2:
                 dl.AddRectFilled(pos, max, U(GuideToastLine, 0.7f * 0.35f * alpha), r);
-                dl.AddRect(pos, max, U(GuideToastLine, 0.35f * alpha), r);
+                dl.AddRectEx(pos, max, U(GuideToastLine, 0.35f * alpha), r);
                 dl.AddFontText(font, f, new Vector2(pos.X + AskPillPadX, cy - f * 0.5f), U(GuideToastText, 0.9f * 0.35f * alpha), label);
                 break;
             default:
@@ -453,7 +453,7 @@ public partial class WhatsAnAiBridge
                 else
                 {
                     dl.AddRectFilled(pos, max, U(GuideToastLine, 0.7f * alpha), r);
-                    dl.AddRect(pos, max, U(GuideToastLine, alpha), r);
+                    dl.AddRectEx(pos, max, U(GuideToastLine, alpha), r);
                     dl.AddFontText(font, f, new Vector2(pos.X + AskPillPadX, cy - f * 0.5f), U(GuideToastText, 0.9f * alpha), label);
                 }
                 break;

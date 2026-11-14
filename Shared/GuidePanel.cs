@@ -707,7 +707,7 @@ public partial class WhatsAnAiBridge
         else if (loud || (g.status == "captured" && !compact))
             dl.AddRectEx(min, max, U(look.Tone, 0.8f), 0f, ImDrawFlags.None, 1.2f);
         else
-            dl.AddRect(min, max, U(GuideToastLine), 0f);
+            dl.AddRectEx(min, max, U(GuideToastLine), 0f);
         // The stripe, flush on the left edge over the border, in the tone.
         dl.AddRectFilled(min, new Vector2(min.X + stripe, max.Y), U(look.Tone, urgent ? 0.6f + 0.4f * pulse : 1f), 0f);
         // A timed step: a 3 px bar along the bottom edge, full at the start and draining to the left as time runs out,
@@ -801,7 +801,7 @@ public partial class WhatsAnAiBridge
             // The last 10 s breathe the fill at 1 Hz: noticed, never a throb.
             var fill = left <= 10 && left > 0 ? 0.14f + 0.14f * (float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 2)) : 0.14f;
             dl.AddRectFilled(pmin, pmax, U(tone, fill), 0f);
-            dl.AddRect(pmin, pmax, U(tone, 0.5f), 0f);
+            dl.AddRectEx(pmin, pmax, U(tone, 0.5f), 0f);
             DrawQueueGlyph(dl, new Vector2(pmin.X + 6 + 6, hy), U(tone));
             dl.AddFontText(font, small, new Vector2(pmin.X + 6 + glyphW, hy - small * 0.5f), U(tone), t);
             ImGui.SetCursorScreenPos(pmin);
@@ -825,7 +825,7 @@ public partial class WhatsAnAiBridge
             var pillH = small + 6;
             var pmin = new Vector2(rx - pillW, hy - pillH * 0.5f);
             dl.AddRectFilled(pmin, pmin + new Vector2(pillW, pillH), U(GuideToastLine, 0.7f), 0f);
-            dl.AddRect(pmin, pmin + new Vector2(pillW, pillH), U(GuideToastLine), 0f);
+            dl.AddRectEx(pmin, pmin + new Vector2(pillW, pillH), U(GuideToastLine), 0f);
             dl.AddFontText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(GuideToastMuted), t);
             rx -= pillW + 10;
         }
@@ -1017,7 +1017,7 @@ public partial class WhatsAnAiBridge
 
         var dl = ImGui.GetForegroundDrawList();
         dl.AddRectFilled(min, max, U(GuideToastInk, 0.96f), 0f);
-        dl.AddRect(min, max, U(GuideToastLine), 0f);
+        dl.AddRectEx(min, max, U(GuideToastLine), 0f);
         dl.AddRectFilled(min, new Vector2(min.X + GuideToastStripe, max.Y), U(tone), 0f);
         var x = min.X + GuideToastStripe + pad;
         var y = min.Y + pad;
@@ -1101,14 +1101,14 @@ public partial class WhatsAnAiBridge
             {
                 var sc = U(hov ? ToneBad : GuideToastMuted);
                 dl.AddRectFilled(pmin, pmax, hov ? U(ToneBad, 0.22f) : U(GuideToastLine, 0.7f), 0f);
-                dl.AddRect(pmin, pmax, U(hov ? ToneBad : GuideToastLine), 0f);
+                dl.AddRectEx(pmin, pmax, U(hov ? ToneBad : GuideToastLine), 0f);
                 dl.AddRectFilled(new Vector2(tx, cy - 3.5f), new Vector2(tx + 7, cy + 3.5f), sc, 1f);
                 dl.AddFontText(font, small, new Vector2(tx + glyphW, cy - small * 0.5f), sc, label);
                 break;
             }
             default:
                 dl.AddRectFilled(pmin, pmax, U(GuideToastLine, hov ? 1f : 0.7f), 0f);
-                dl.AddRect(pmin, pmax, U(hov ? GuideToastMuted : GuideToastLine), 0f);
+                dl.AddRectEx(pmin, pmax, U(hov ? GuideToastMuted : GuideToastLine), 0f);
                 dl.AddFontText(font, small, new Vector2(tx, cy - small * 0.5f), U(hov ? GuideToastText : GuideToastMuted), label);
                 break;
         }
@@ -1128,9 +1128,9 @@ public partial class WhatsAnAiBridge
         switch (status)
         {
             case "waiting":
-                dl.AddCircle(c, r, col, 24, t);
+                dl.AddCircleEx(c, r, col, 24, t);
                 dl.AddCircleFilled(c, 3.2f * s, col, 12);
-                dl.AddCircle(c, r + (2f + 5f * pulse) * s, U(tone, 0.6f * (1f - pulse)), 24, t);
+                dl.AddCircleEx(c, r + (2f + 5f * pulse) * s, U(tone, 0.6f * (1f - pulse)), 24, t);
                 break;
             case "detected":
             case "settling":
@@ -1150,17 +1150,17 @@ public partial class WhatsAnAiBridge
                 dl.AddLine(new Vector2(c.X - 6.5f * s, c.Y + 6.5f * s), new Vector2(c.X + 6.5f * s, c.Y - 6.5f * s), col, t);
                 break;
             case "captured":
-                dl.AddCircle(c, r, col, 24, t);
+                dl.AddCircleEx(c, r, col, 24, t);
                 dl.AddLine(new Vector2(c.X - 3.6f * s, c.Y + 0.2f * s), new Vector2(c.X - 1f * s, c.Y + 2.8f * s), col, t);
                 dl.AddLine(new Vector2(c.X - 1f * s, c.Y + 2.8f * s), new Vector2(c.X + 3.8f * s, c.Y - 2.8f * s), col, t);
                 break;
             case "failed":
-                dl.AddCircle(c, r, col, 24, t);
+                dl.AddCircleEx(c, r, col, 24, t);
                 dl.AddLine(new Vector2(c.X - 3f * s, c.Y - 3f * s), new Vector2(c.X + 3f * s, c.Y + 3f * s), col, t);
                 dl.AddLine(new Vector2(c.X + 3f * s, c.Y - 3f * s), new Vector2(c.X - 3f * s, c.Y + 3f * s), col, t);
                 break;
             default:
-                dl.AddCircle(c, r, col, 24, t);
+                dl.AddCircleEx(c, r, col, 24, t);
                 dl.AddCircleFilled(new Vector2(c.X, c.Y - 3.5f * s), 1.1f * s, col, 8);
                 dl.AddLine(new Vector2(c.X, c.Y - 1f * s), new Vector2(c.X, c.Y + 4f * s), col, t);
                 break;
@@ -1214,7 +1214,7 @@ public partial class WhatsAnAiBridge
         else
         {
             dl.AddCircleFilled(c, r, U(th.Card, 0.9f * alpha), 16);
-            dl.AddCircle(c, r, U(ToneNeutral, 0.7f * alpha), 16, 1.2f);
+            dl.AddCircleEx(c, r, U(ToneNeutral, 0.7f * alpha), 16, 1.2f);
         }
     }
 
@@ -1290,7 +1290,7 @@ public partial class WhatsAnAiBridge
             // The panel: fixed slate ink, a hairline one step lighter, square corners, no shadow; then the stripe
             // over the border's left edge.
             dl.AddRectFilled(min, max, U(GuideToastInk, 0.94f * alpha), 0f);
-            dl.AddRect(min, max, U(GuideToastLine, alpha), 0f);
+            dl.AddRectEx(min, max, U(GuideToastLine, alpha), 0f);
             dl.AddRectFilled(min, new Vector2(min.X + GuideToastStripe, max.Y), U(tone, alpha), 0f);
             if (e.Summary) GuideToastStackGlyph(dl, new Vector2(iconX, min.Y + rowH * 0.5f), U(tone, alpha));
             else GuideToastGlyph(dl, e.Kind, new Vector2(iconX, min.Y + rowH * 0.5f), U(tone, alpha));
@@ -1313,7 +1313,7 @@ public partial class WhatsAnAiBridge
                     dl.AddRectEx(pmin - new Vector2(k, k), pmax + new Vector2(k, k), U(tone, 0.45f * bump * alpha), 0f, ImDrawFlags.None, 1.5f);
                 }
                 dl.AddRectFilled(pmin, pmax, U(tone, (0.14f + 0.3f * bump) * alpha), 0f);
-                dl.AddRect(pmin, pmax, U(tone, (0.5f + 0.5f * bump) * alpha), 0f);
+                dl.AddRectEx(pmin, pmax, U(tone, (0.5f + 0.5f * bump) * alpha), 0f);
                 dl.AddFontText(font, small, new Vector2(pmin.X + 5f, ty + f * 0.5f - small * 0.5f), U(tone, alpha), e.CountText);
                 titleMax -= pillW + 8f;
             }
@@ -1373,7 +1373,7 @@ public partial class WhatsAnAiBridge
         var a = at.BridgeDown ? 0.65f + 0.25f * breathe : 0.8f;
         dl.AddCircleFilled(c, r, U(tone, MathF.Min(1f, a + 0.2f * h)), 20);
         // An F8 press runs while its strip is not on screen (combat, the quiet collapse): a 1.5 px accent ring says so (f8-agent-ux.md 3.3).
-        if (at.DotRing) dl.AddCircle(c, r + 4f, U(ToneAccent, 0.85f), 20, 1.5f);
+        if (at.DotRing) dl.AddCircleEx(c, r + 4f, U(ToneAccent, 0.85f), 20, 1.5f);
         if (hovered && !peekable) DrawGuideDotTip(c, at.BridgeDown ? GuideDotTipDown : tip ?? GuideDotTipIdle, tone);
     }
 
@@ -1393,7 +1393,7 @@ public partial class WhatsAnAiBridge
         if (min.Y + size.Y > disp.Y - GuideEdge) min.Y = dot.Y - GuideDotHit - size.Y;
         var max = min + size;
         dl.AddRectFilled(min, max, U(GuideToastInk, 0.94f), 0f);
-        dl.AddRect(min, max, U(GuideToastLine), 0f);
+        dl.AddRectEx(min, max, U(GuideToastLine), 0f);
         dl.AddRectFilled(min, new Vector2(min.X + GuideToastStripe, max.Y), U(tone), 0f);
         GuideTrackedText(dl, font, small, new Vector2(min.X + GuideToastStripe + 10f, min.Y + 5f), U(GuideToastMuted), text, GuideToastMsgTrack);
     }
@@ -1450,23 +1450,23 @@ public partial class WhatsAnAiBridge
         switch (kind)
         {
             case "error":
-                dl.AddCircle(c, r, col, 24, t);
+                dl.AddCircleEx(c, r, col, 24, t);
                 dl.AddLine(new Vector2(c.X - 3f, c.Y - 3f), new Vector2(c.X + 3f, c.Y + 3f), col, t);
                 dl.AddLine(new Vector2(c.X + 3f, c.Y - 3f), new Vector2(c.X - 3f, c.Y + 3f), col, t);
                 break;
             case "warn":
                 // Apex up; the base sits 1 px below the circle's bottom so the optical centre matches the circles.
-                dl.AddTriangle(new Vector2(c.X, c.Y - 8f), new Vector2(c.X + 8.5f, c.Y + 7f), new Vector2(c.X - 8.5f, c.Y + 7f), col, t);
+                dl.AddTriangleEx(new Vector2(c.X, c.Y - 8f), new Vector2(c.X + 8.5f, c.Y + 7f), new Vector2(c.X - 8.5f, c.Y + 7f), col, t);
                 dl.AddLine(new Vector2(c.X, c.Y - 1.5f), new Vector2(c.X, c.Y + 2f), col, t);
                 dl.AddCircleFilled(new Vector2(c.X, c.Y + 4.5f), 1.1f, col, 8);
                 break;
             case "result":
-                dl.AddCircle(c, r, col, 24, t);
+                dl.AddCircleEx(c, r, col, 24, t);
                 dl.AddLine(new Vector2(c.X - 3.6f, c.Y + 0.2f), new Vector2(c.X - 1f, c.Y + 2.8f), col, t);
                 dl.AddLine(new Vector2(c.X - 1f, c.Y + 2.8f), new Vector2(c.X + 3.8f, c.Y - 2.8f), col, t);
                 break;
             default:
-                dl.AddCircle(c, r, col, 24, t);
+                dl.AddCircleEx(c, r, col, 24, t);
                 dl.AddCircleFilled(new Vector2(c.X, c.Y - 3.5f), 1.1f, col, 8);
                 dl.AddLine(new Vector2(c.X, c.Y - 1f), new Vector2(c.X, c.Y + 4f), col, t);
                 break;
@@ -1654,7 +1654,7 @@ public partial class WhatsAnAiBridge
                 var dl = ImGui.GetWindowDrawList();
                 var min = ImGui.GetWindowPos();
                 var max = min + new Vector2(w, h);
-                dl.AddRect(min, max, U(th.Border, 0.6f), 6f);
+                dl.AddRectEx(min, max, U(th.Border, 0.6f), 6f);
                 // Header: title, count, how to keep it, Copy all.
                 var hy = min.Y + headH * 0.5f;
                 var x = min.X + pad;
@@ -1825,7 +1825,7 @@ public partial class WhatsAnAiBridge
             var pillH = small + 6;
             var pmin = new Vector2(rx - pillW, hy - pillH * 0.5f);
             dl.AddRectFilled(pmin, pmin + new Vector2(pillW, pillH), U(th.Tile), pillH * 0.5f);
-            dl.AddRect(pmin, pmin + new Vector2(pillW, pillH), U(th.Border, 0.6f), pillH * 0.5f);
+            dl.AddRectEx(pmin, pmin + new Vector2(pillW, pillH), U(th.Border, 0.6f), pillH * 0.5f);
             dl.AddFontText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(th.TextDim), t);
             rx -= pillW + 10;
         }
@@ -1907,7 +1907,7 @@ public partial class WhatsAnAiBridge
         }
         else
         {
-            dl.AddCircle(c, 8f, U(ToneNeutral, 0.8f), 20, 1.3f);
+            dl.AddCircleEx(c, 8f, U(ToneNeutral, 0.8f), 20, 1.3f);
             dl.AddFontText(font, small, new Vector2(c.X - tw * 0.5f, c.Y - small * 0.5f), U(th.TextDim), n);
         }
     }
@@ -1928,7 +1928,7 @@ public partial class WhatsAnAiBridge
         var min = new Vector2(x0, p.Y);
         var max = new Vector2(x0 + w, p.Y + h);
         dl.AddRectFilled(min, max, U(th.Card, 0.92f), 5f);
-        dl.AddRect(min, max, U(ToneNeutral, 0.4f), 5f);
+        dl.AddRectEx(min, max, U(ToneNeutral, 0.4f), 5f);
 
         ImGui.SetCursorScreenPos(min);
         ImGui.InvisibleButton("##queue_strip", new Vector2(w, h));
@@ -1987,7 +1987,7 @@ public partial class WhatsAnAiBridge
         else
         {
             dl.AddRectFilled(pos, max, U(th.Tile, hov ? 1f : 0.8f), h * 0.5f);
-            dl.AddRect(pos, max, U(th.Border, 0.7f), h * 0.5f);
+            dl.AddRectEx(pos, max, U(th.Border, 0.7f), h * 0.5f);
             dl.AddText(new Vector2(pos.X + 12, cy - f * 0.5f), U(hov ? th.Text : th.TextDim), text);
         }
         return w;
@@ -1996,7 +1996,7 @@ public partial class WhatsAnAiBridge
     /// <summary>12 px clock: the step waits for the user, not the other way round.</summary>
     private static void DrawQueueGlyph(ImDrawListPtr dl, Vector2 c, uint col)
     {
-        dl.AddCircle(c, 5.5f, col, 16, 1.4f);
+        dl.AddCircleEx(c, 5.5f, col, 16, 1.4f);
         dl.AddLine(c, new Vector2(c.X, c.Y - 3.5f), col, 1.4f);
         dl.AddLine(c, new Vector2(c.X + 2.6f, c.Y + 1.2f), col, 1.4f);
     }

@@ -311,7 +311,7 @@ public partial class WhatsAnAiBridge
         var max = min + new Vector2(w, h);
         var tone = BoardTone(work, utc);
         dl.AddRectFilled(min, max, U(GuideToastInk, 0.96f * alpha), 0f);
-        dl.AddRect(min, max, U(tone == ToneBad ? ToneBad : GuideToastLine, alpha), 0f);
+        dl.AddRectEx(min, max, U(tone == ToneBad ? ToneBad : GuideToastLine, alpha), 0f);
         dl.AddRectFilled(min, new Vector2(min.X + GuideToastStripe, max.Y), U(tone, alpha), 0f);
 
         // Title row: the tracked caps title; right: the counts (muted), and when pinned "pinned" + the x.
@@ -415,7 +415,7 @@ public partial class WhatsAnAiBridge
             if (r.NeedsYou)
             {
                 var breathe = 0.5f + 0.5f * MathF.Sin((float)(now * Math.PI * 2 / WorkBreatheSec));
-                dl.AddCircle(dc, GuideDotR + 2f + 1.5f * breathe, U(AttnHueColor(r.Hue), (0.2f + 0.4f * breathe) * a), 16, 1.2f);
+                dl.AddCircleEx(dc, GuideDotR + 2f + 1.5f * breathe, U(AttnHueColor(r.Hue), (0.2f + 0.4f * breathe) * a), 16, 1.2f);
             }
             DrawWhoDot(dl, dc, r.Hue, a);
         }

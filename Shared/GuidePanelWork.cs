@@ -196,7 +196,7 @@ public partial class WhatsAnAiBridge
             dl.AddRectFilled(min, max, U(GuideToastInk, 0.94f * alpha), 0f);
             var washT = (now - ui.WashAt) / GuideFlashSec;
             if (washT < 1) dl.AddRectFilled(min, max, U(ui.FailWash ? ToneBad : ToneAccent, 0.35f * (float)(1 - washT) * alpha), 0f);
-            dl.AddRect(min, max, U(GuideToastLine, alpha), 0f);
+            dl.AddRectEx(min, max, U(GuideToastLine, alpha), 0f);
             dl.AddRectFilled(min, new Vector2(min.X + GuideToastStripe, max.Y), U(tone, alpha), 0f);
             // Hover: the whole story under the stack (title, the stage history, the text, the PR or where to watch it).
             ImGui.SetCursorScreenPos(min);
@@ -298,12 +298,12 @@ public partial class WhatsAnAiBridge
             {
                 var on = k / 4f <= fillT;
                 if (on) dl.AddCircleFilled(c, WorkDotR, U(ToneOk, alpha), 12);
-                else dl.AddCircle(c, WorkDotR, U(ToneNeutral, 0.4f * alpha), 12, 1f);
+                else dl.AddCircleEx(c, WorkDotR, U(ToneNeutral, 0.4f * alpha), 12, 1f);
             }
             else if (r.Stage == "Failed")
             {
                 if (k <= r.ReachedPhase) dl.AddCircleFilled(c, WorkDotR, U(ToneBad, alpha), 12);
-                else dl.AddCircle(c, WorkDotR, U(ToneNeutral, 0.4f * alpha), 12, 1f);
+                else dl.AddCircleEx(c, WorkDotR, U(ToneNeutral, 0.4f * alpha), 12, 1f);
             }
             else if (r.Stage == "Dropped") dl.AddCircleFilled(c, WorkDotR, U(ToneNeutral, 0.45f * alpha), 12);
             else if (k < r.PhaseIndex) dl.AddCircleFilled(c, WorkDotR, U(tone, 0.9f * alpha), 12);
@@ -311,10 +311,10 @@ public partial class WhatsAnAiBridge
             {
                 var grow = 1f + 0.5f * pop;
                 dl.AddCircleFilled(c, WorkDotR * grow, U(ToneAccent, alpha), 14);
-                dl.AddCircle(c, WorkDotR + 2.2f + 0.8f * breathe, U(ToneAccent, (0.25f + 0.35f * breathe) * alpha), 16, 1.5f);
-                if (pop > 0.01f) dl.AddCircle(c, WorkDotR + 2f + 7f * (1f - pop), U(ToneAccent, 0.6f * pop * alpha), 16, 1.2f);
+                dl.AddCircleEx(c, WorkDotR + 2.2f + 0.8f * breathe, U(ToneAccent, (0.25f + 0.35f * breathe) * alpha), 16, 1.5f);
+                if (pop > 0.01f) dl.AddCircleEx(c, WorkDotR + 2f + 7f * (1f - pop), U(ToneAccent, 0.6f * pop * alpha), 16, 1.2f);
             }
-            else dl.AddCircle(c, WorkDotR, U(ToneNeutral, 0.4f * alpha), 12, 1f);
+            else dl.AddCircleEx(c, WorkDotR, U(ToneNeutral, 0.4f * alpha), 12, 1f);
         }
     }
 
