@@ -39,8 +39,13 @@ internal static unsafe class ImGuiShim
         dl.AddText((ImFont*)font, size, pos, col, text!, wrapWidth);
 
     /// <summary>Advance of one glyph at <paramref name="size"/>: 1.92 bakes per size, so ask the baked font at that size.</summary>
-    internal static float GlyphAdvance(ImFontPtr font, float size, char ch) =>
-        ImGui.GetFontBaked(font, size).GetCharAdvance(ch);
+    /// The baked size can differ from the one asked for (font loader limits), so scale by what was baked.
+    internal static float GlyphAdvance(ImFontPtr font, float size, char ch)
+    {
+        var baked = ImGui.GetFontBaked(font, size);
+        if (baked.IsNull) return 0f;
+        return baked.GetCharAdvance(ch) * (baked.Size > 0 ? size / baked.Size : 1f);
+    }
 
     /// <summary>Screen X of the current window's content-region right edge (GetWindowContentRegionMax is gone in 1.92).</summary>
     internal static float ContentRegionMaxX() =>

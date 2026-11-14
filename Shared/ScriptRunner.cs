@@ -244,7 +244,7 @@ public partial class WhatsAnAiBridge
             }
             .Concat(AppDomain.CurrentDomain.GetAssemblies().Where(a =>
                 !a.IsDynamic && !string.IsNullOrEmpty(a.Location)
-                && (a.GetName().Name is { } n && (n.StartsWith("GameOffsets") || n == "ImGui.NET" || n == "System.Runtime"
+                && (a.GetName().Name is { } n && (n.StartsWith("GameOffsets") || n == "ImGui.NET" || n == "Hexa.NET.ImGui" || n == "HexaGen.Runtime" || n == "System.Runtime"
                     || n == "System.Collections" || n == "System.Linq" || n == "netstandard" || n.StartsWith("SharpDX")))))
             .Distinct();
         // Import the game's common namespaces - only those this HUD build actually has.
