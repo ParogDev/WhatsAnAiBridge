@@ -4,7 +4,7 @@ namespace WhatsAnAiBridge;
 
 /// <summary>
 /// PoE2 side of the ImGui API differences: the PoE2 HUD (ExileCore2) runs ImGui.NET 1.90, the PoE1 HUD Hexa.NET.ImGui
-/// (Dear ImGui 1.92). Shared code calls these instead of the differing members, so it has one path. These are the
+/// (Dear ImGui 1.93). Shared code calls these instead of the differing members, so it has one path. These are the
 /// 1.90 calls exactly as Shared code made them before the PoE1 migration.
 /// The PoE1 twin is Poe1/ImGuiShim.cs - keep the two member lists and signatures identical.
 /// </summary>
@@ -17,8 +17,20 @@ internal static class ImGuiShim
 
     internal const ImGuiChildFlags ChildBorders = ImGuiChildFlags.Border;
 
+    /// <summary>1.90 strokes are already centred (the PoE1 shim asks 1.93 for this look); no flag here.</summary>
+    internal const ImDrawFlags StrokeLegacy = ImDrawFlags.None;
+
     internal static void AddRectEx(this ImDrawListPtr dl, Vector2 min, Vector2 max, uint col, float rounding, ImDrawFlags flags, float thickness) =>
         dl.AddRect(min, max, col, rounding, flags, thickness);
+
+    internal static void AddRectEx(this ImDrawListPtr dl, Vector2 min, Vector2 max, uint col, float rounding) =>
+        dl.AddRect(min, max, col, rounding);
+
+    internal static void AddCircleEx(this ImDrawListPtr dl, Vector2 center, float radius, uint col, int segments, float thickness) =>
+        dl.AddCircle(center, radius, col, segments, thickness);
+
+    internal static void AddTriangleEx(this ImDrawListPtr dl, Vector2 p1, Vector2 p2, Vector2 p3, uint col, float thickness) =>
+        dl.AddTriangle(p1, p2, p3, col, thickness);
 
     internal static void AddPolylineEx(this ImDrawListPtr dl, ref Vector2 first, int count, uint col, ImDrawFlags flags, float thickness) =>
         dl.AddPolyline(ref first, count, col, flags, thickness);

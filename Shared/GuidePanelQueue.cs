@@ -89,7 +89,7 @@ public partial class WhatsAnAiBridge
         var min = new Vector2(x0, p.Y);
         var max = new Vector2(x0 + w, p.Y + h);
         dl.AddRectFilled(min, max, U(th.Card, 0.92f), 5f);
-        dl.AddRect(min, max, U(ToneNeutral, 0.4f), 5f);
+        dl.AddRectEx(min, max, U(ToneNeutral, 0.4f), 5f);
 
         var frozen = a.LeaveAt > -1e8 || now < a.GapUntil;
         if (!frozen) StripCompose(a, q, ag, restartUp, utc);

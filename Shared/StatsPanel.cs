@@ -326,7 +326,7 @@ public partial class WhatsAnAiBridge
         {
             var t = set == 0 ? "Set I" : "Set II";
             var tw = ImGui.CalcTextSize(t).X + 10;
-            dl.AddRect(new Vector2(x, p.Y + 2), new Vector2(x + tw, p.Y + h - 2), U(th.Border), 4f);
+            dl.AddRectEx(new Vector2(x, p.Y + 2), new Vector2(x + tw, p.Y + h - 2), U(th.Border), 4f);
             dl.AddText(new Vector2(x + 5, p.Y + 4), U(th.TextDim), t);
             ImGui.SetCursorScreenPos(new Vector2(x, p.Y + 2));
             ImGui.InvisibleButton("##wset", new Vector2(tw, h - 4));
@@ -355,7 +355,7 @@ public partial class WhatsAnAiBridge
             if (remote)
             {
                 var pulse = (float)(0.5 + 0.5 * Math.Sin((now - _panel.RemoteAt) * 9));
-                dl.AddCircle(new Vector2(px + 10, p.Y + h * 0.5f), r + 2 + pulse * 2, U(ToneAccent, 0.5f - pulse * 0.4f), 12, 1.5f);
+                dl.AddCircleEx(new Vector2(px + 10, p.Y + h * 0.5f), r + 2 + pulse * 2, U(ToneAccent, 0.5f - pulse * 0.4f), 12, 1.5f);
             }
             dl.AddCircleFilled(new Vector2(px + 10, p.Y + h * 0.5f), r, U(dotCol));
             dl.AddText(new Vector2(px + 17, p.Y + 4), U(remote ? ToneAccent : th.TextDim), label);
@@ -377,7 +377,7 @@ public partial class WhatsAnAiBridge
         var f = ImGui.GetFontSize();
         var h = f + 10;
         dl.AddRectFilled(p, new Vector2(p.X + w, p.Y + h), U(ToneWarn, 0.12f), 4f);
-        dl.AddRect(p, new Vector2(p.X + w, p.Y + h), U(ToneWarn, 0.4f), 4f);
+        dl.AddRectEx(p, new Vector2(p.X + w, p.Y + h), U(ToneWarn, 0.4f), 4f);
         dl.AddText(new Vector2(p.X + 8, p.Y + 5), U(ToneWarn), text);
         ImGui.Dummy(new Vector2(w, h));
     }
@@ -676,7 +676,7 @@ public partial class WhatsAnAiBridge
 
             dl.AddRectFilled(min, mx, U(hovered ? th.Tile : th.Card), chipH * 0.5f);
             if (selected) dl.AddRectEx(min, mx, U(ToneAccent, 0.9f), chipH * 0.5f, ImDrawFlags.None, 1.5f);
-            else dl.AddRect(min, mx, U(th.Border, 0.6f), chipH * 0.5f);
+            else dl.AddRectEx(min, mx, U(th.Border, 0.6f), chipH * 0.5f);
 
             var tx = x + pad;
             dl.AddText(new Vector2(tx, y + 4), U(th.TextDim), label);
@@ -1038,7 +1038,7 @@ public partial class WhatsAnAiBridge
         var font = ImGui.GetFont();
 
         dl.AddRectFilled(min, mx, U(th.Card), 5f);
-        dl.AddRect(min, mx, U(ToneAccent, remote ? 0.6f : 0.3f), 5f);
+        dl.AddRectEx(min, mx, U(ToneAccent, remote ? 0.6f : 0.3f), 5f);
 
         var x = p.X + 10; var y = p.Y + 6;
         var lineH = small + 6;
@@ -1064,7 +1064,7 @@ public partial class WhatsAnAiBridge
         if (ImGui.IsItemClicked()) PanelApply(SetStatPinned(key, !pinned), now);
         if (pinHov) ImGui.SetTooltip(pinned ? "Unpin (shared with the Claude app)" : "Pin (shared with the Claude app)");
         dl.AddRectFilled(pillMin, pillMax, pinned ? U(ToneWarn, pinHov ? 0.3f : 0.18f) : U(th.Tile, pinHov ? 1f : 0.8f), lineH * 0.5f);
-        if (!pinned) dl.AddRect(pillMin, pillMax, U(th.Border, 0.7f), lineH * 0.5f);
+        if (!pinned) dl.AddRectEx(pillMin, pillMax, U(th.Border, 0.7f), lineH * 0.5f);
         DrawPinGlyph(dl, new Vector2(pillMin.X + 10, cy), pinned ? U(ToneWarn) : U(th.TextDim));
         dl.AddFontText(font, small, new Vector2(pillMin.X + 18, y + 3), U(pinned ? ToneWarn : th.Text), pinLabel);
 
@@ -1167,7 +1167,7 @@ public partial class WhatsAnAiBridge
                         : lv == null ? lkey + "\nnot on the character" : lkey + (isThis ? "" : "\nClick to select"));
                 if (ImGui.IsItemClicked() && lv != null && !assumed && !isThis) PanelApply(SelectStat(lkey), now);
                 dl.AddRectFilled(cmin, cmax, isThis ? U(e.Hue, 0.2f) : U(th.Tile, hov ? 1f : 0.8f), chipH * 0.5f);
-                if (isThis) dl.AddRect(cmin, cmax, U(e.Hue, 0.8f), chipH * 0.5f);
+                if (isThis) dl.AddRectEx(cmin, cmax, U(e.Hue, 0.8f), chipH * 0.5f);
                 dl.AddFontText(font, small, new Vector2(lx + 7, y + 3), U(th.TextDim), label);
                 dl.AddFontText(font, small, new Vector2(lx + 7 + lw + 4, y + 3), U(lv == null || assumed ? th.TextDim : th.Text), valueText);
                 lx += cw + 4;
@@ -1285,7 +1285,7 @@ public partial class WhatsAnAiBridge
     private static void DrawCopyGlyph(ImDrawListPtr dl, Vector2 p, float size, uint col)
     {
         var s = size * 0.7f;
-        dl.AddRect(new Vector2(p.X + size - s, p.Y + size - s), new Vector2(p.X + size, p.Y + size), col, 1.5f);
-        dl.AddRect(p, new Vector2(p.X + s, p.Y + s), col, 1.5f);
+        dl.AddRectEx(new Vector2(p.X + size - s, p.Y + size - s), new Vector2(p.X + size, p.Y + size), col, 1.5f);
+        dl.AddRectEx(p, new Vector2(p.X + s, p.Y + s), col, 1.5f);
     }
 }
