@@ -1,6 +1,5 @@
 using System;
 using System.Numerics;
-using ImGuiNET;
 
 namespace WhatsAnAiBridge;
 
@@ -252,8 +251,8 @@ public partial class WhatsAnAiBridge
         if (loud > 0.01f && !leaving)
         {
             var pulse = at.CardPulse ? (float)(0.5 + 0.5 * Math.Sin(now * Math.PI * 1.6)) : 0.5f;
-            dl.AddRect(min - new Vector2(2, 2), max + new Vector2(2, 2), U(ToneAccent, (0.12f + 0.16f * pulse) * loud * alpha), 0f, ImDrawFlags.None, 2.5f);
-            dl.AddRect(min, max, U(ToneAccent, (0.6f + 0.4f * pulse) * loud * alpha), 0f, ImDrawFlags.None, 1.2f);
+            dl.AddRectEx(min - new Vector2(2, 2), max + new Vector2(2, 2), U(ToneAccent, (0.12f + 0.16f * pulse) * loud * alpha), 0f, ImDrawFlags.None, 2.5f);
+            dl.AddRectEx(min, max, U(ToneAccent, (0.6f + 0.4f * pulse) * loud * alpha), 0f, ImDrawFlags.None, 1.2f);
         }
         dl.AddRectFilled(min, new Vector2(min.X + stripe, max.Y), U(ToneAccent, alpha), 0f);
 
@@ -292,7 +291,7 @@ public partial class WhatsAnAiBridge
             }
             var t = receipt ? AskAnsweredText : a.ElapsedText;
             var tw = ImGui.CalcTextSize(t).X * k;
-            dl.AddText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(GuideToastMuted, alpha), t);
+            dl.AddFontText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(GuideToastMuted, alpha), t);
             rx -= tw + 10;
         }
         if (ask.LaterCount > 0)
@@ -306,7 +305,7 @@ public partial class WhatsAnAiBridge
             if (ImGui.IsItemHovered() && a.LaterTip != null) GuideTooltip(a.LaterTip);
             dl.AddRectFilled(pmin, pmin + new Vector2(pillW, ph), U(GuideToastLine, 0.7f * alpha), 0f);
             dl.AddRect(pmin, pmin + new Vector2(pillW, ph), U(GuideToastLine, alpha), 0f);
-            dl.AddText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(GuideToastMuted, alpha), AskAgainText);
+            dl.AddFontText(font, small, new Vector2(pmin.X + 6, hy - small * 0.5f), U(GuideToastMuted, alpha), AskAgainText);
             rx -= pillW + 10;
         }
         if (_guideUi.ShowWho && rx - x > 60) DrawAskWhoTitle(dl, font, small, ask, x, rx, hy, alpha);
@@ -317,8 +316,8 @@ public partial class WhatsAnAiBridge
         for (var i = 0; i < qLines; i++)
         {
             var ly = qy + i * (f + 2f);
-            dl.AddText(font, f, new Vector2(textX, ly), qcol, a.QWrap.Lines[i]);
-            dl.AddText(font, f, new Vector2(textX + 0.6f, ly), qcol, a.QWrap.Lines[i]);
+            dl.AddFontText(font, f, new Vector2(textX, ly), qcol, a.QWrap.Lines[i]);
+            dl.AddFontText(font, f, new Vector2(textX + 0.6f, ly), qcol, a.QWrap.Lines[i]);
         }
         // Hover over the question: the whole ask in the toast-family panel under the card (title, question, detail, who
         // asked) whenever the card holds more than it shows - something clipped, or an asker worth naming.
@@ -369,14 +368,14 @@ public partial class WhatsAnAiBridge
         }
         var lcol = U(lhov ? GuideToastText : GuideToastMuted, laterA);
         DrawQueueGlyph(dl, new Vector2(lx + 14f, firstRowY + pillH * 0.5f), lcol);
-        dl.AddText(font, small, new Vector2(lx + 26f, firstRowY + pillH * 0.5f - small * 0.5f), lcol, AskLaterText);
+        dl.AddFontText(font, small, new Vector2(lx + 26f, firstRowY + pillH * 0.5f - small * 0.5f), lcol, AskLaterText);
         a.PillsMin = new Vector2(textX, firstRowY);
         a.PillsMax = new Vector2(max.X, py + pillH);
 
         // Footer: the agent's detail, small and muted, up to two lines.
         var fy = py + pillH + 6f;
         var fcol = U(GuideToastMuted, 0.9f * alpha);
-        for (var i = 0; i < dLines; i++) dl.AddText(font, small, new Vector2(textX, fy + i * (small + 2f)), fcol, a.DWrap.Lines[i]);
+        for (var i = 0; i < dLines; i++) dl.AddFontText(font, small, new Vector2(textX, fy + i * (small + 2f)), fcol, a.DWrap.Lines[i]);
 
         ImGui.SetCursorScreenPos(p);
         ImGui.Dummy(new Vector2(GuideWidth, h + GuideEdge * 2));
@@ -435,27 +434,27 @@ public partial class WhatsAnAiBridge
                 var ink = U(GuideInk, alpha);
                 HlCheckGlyph(dl, new Vector2(pos.X + AskPillPadX + 5f, cy), 1f, ink);
                 var tp = new Vector2(pos.X + AskPillPadX + AskCheckW, cy - f * 0.5f);
-                dl.AddText(font, f, tp, ink, label);
-                dl.AddText(font, f, tp + new Vector2(0.6f, 0), ink, label);
+                dl.AddFontText(font, f, tp, ink, label);
+                dl.AddFontText(font, f, tp + new Vector2(0.6f, 0), ink, label);
                 break;
             }
             case 2:
                 dl.AddRectFilled(pos, max, U(GuideToastLine, 0.7f * 0.35f * alpha), r);
                 dl.AddRect(pos, max, U(GuideToastLine, 0.35f * alpha), r);
-                dl.AddText(font, f, new Vector2(pos.X + AskPillPadX, cy - f * 0.5f), U(GuideToastText, 0.9f * 0.35f * alpha), label);
+                dl.AddFontText(font, f, new Vector2(pos.X + AskPillPadX, cy - f * 0.5f), U(GuideToastText, 0.9f * 0.35f * alpha), label);
                 break;
             default:
                 if (hov)
                 {
                     dl.AddRectFilled(pos, max, U(ToneAccent, 0.22f * alpha), r);
-                    dl.AddRect(pos, max, U(ToneAccent, 0.9f * alpha), r, ImDrawFlags.None, 1.4f);
-                    dl.AddText(font, f, new Vector2(pos.X + AskPillPadX, cy - f * 0.5f), U(GuideToastText, alpha), label);
+                    dl.AddRectEx(pos, max, U(ToneAccent, 0.9f * alpha), r, ImDrawFlags.None, 1.4f);
+                    dl.AddFontText(font, f, new Vector2(pos.X + AskPillPadX, cy - f * 0.5f), U(GuideToastText, alpha), label);
                 }
                 else
                 {
                     dl.AddRectFilled(pos, max, U(GuideToastLine, 0.7f * alpha), r);
                     dl.AddRect(pos, max, U(GuideToastLine, alpha), r);
-                    dl.AddText(font, f, new Vector2(pos.X + AskPillPadX, cy - f * 0.5f), U(GuideToastText, 0.9f * alpha), label);
+                    dl.AddFontText(font, f, new Vector2(pos.X + AskPillPadX, cy - f * 0.5f), U(GuideToastText, 0.9f * alpha), label);
                 }
                 break;
         }

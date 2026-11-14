@@ -5,7 +5,6 @@ using System.Linq;
 using System.Linq.Expressions;
 using System.Numerics;
 using System.Reflection;
-using ImGuiNET;
 
 namespace WhatsAnAiBridge;
 
@@ -463,7 +462,7 @@ internal sealed class SettingsMenu
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(10f, 8f));
         ImGui.PushStyleColor(ImGuiCol.ChildBg, SurfaceFill(window, frame, depth));
         ImGui.PushStyleColor(ImGuiCol.Border, U32(Accent, 0.18f));
-        ImGui.BeginChild("##card", new Vector2(0, 0), ImGuiChildFlags.Border | ImGuiChildFlags.AutoResizeY | ImGuiChildFlags.AlwaysAutoResize);
+        ImGui.BeginChild("##card", new Vector2(0, 0), ImGuiShim.ChildBorders | ImGuiChildFlags.AutoResizeY | ImGuiChildFlags.AlwaysAutoResize);
         try
         {
             bool open = true;
@@ -620,7 +619,7 @@ internal sealed class SettingsMenu
         {
             var dl = ImGui.GetWindowDrawList();
             var p = ImGui.GetCursorScreenPos();
-            float maxX = ImGui.GetWindowPos().X + ImGui.GetWindowContentRegionMax().X;
+            float maxX = ImGuiShim.ContentRegionMaxX();
             dl.PushClipRect(new Vector2(p.X, p.Y), new Vector2(maxX, p.Y + ImGui.GetTextLineHeight() + 2), true);
             dl.AddText(p, Muted, r.Tip);
             dl.PopClipRect();

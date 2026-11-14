@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Text;
-using ImGuiNET;
 
 namespace WhatsAnAiBridge;
 
@@ -91,14 +90,14 @@ public partial class WhatsAnAiBridge
         if (flashT < 1) dl.AddRectFilled(min, max, U(tone, 0.28f * (float)(1 - flashT)), 6f);
         var flipT = (now - u.FlipAt) / GuideFlashSec;
         if (flipT < 1) dl.AddRectFilled(min, max, U(ToneAccent, 0.20f * (float)(1 - flipT)), 6f);
-        dl.AddRect(min, max, U(tone, 0.55f), 6f, ImDrawFlags.None, 1f);
+        dl.AddRectEx(min, max, U(tone, 0.55f), 6f, ImDrawFlags.None, 1f);
 
         // Header: glyph + caps title in the tone; right: who asked, with its who-dot, dimmed.
         var hy = min.Y + headH * 0.5f;
         var x = min.X + pad;
         DrawRestartGlyph(dl, new Vector2(x + 6, hy), U(tone), turning ? now : 0);
         x += 18;
-        dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(tone), u.Title);
+        dl.AddFontText(font, small, new Vector2(x, hy - small * 0.5f), U(tone), u.Title);
         x += ImGui.CalcTextSize(u.Title).X * (small / f) + 10;
         var rx = max.X - pad;
         if (u.Who.Length > 0)
@@ -107,7 +106,7 @@ public partial class WhatsAnAiBridge
             if (rx - whoW > x)
             {
                 DrawWhoDot(dl, new Vector2(rx - whoW + GuideDotR, hy), u.Hue);
-                dl.AddText(font, small, new Vector2(rx - whoW + WhoDotW, hy - small * 0.5f), U(th.TextDim), u.Who);
+                dl.AddFontText(font, small, new Vector2(rx - whoW + WhoDotW, hy - small * 0.5f), U(th.TextDim), u.Who);
             }
         }
 
@@ -115,23 +114,23 @@ public partial class WhatsAnAiBridge
         var y = min.Y + headH + 2;
         var bx = min.X + pad;
         var textTop = y;
-        dl.AddText(font, f, new Vector2(bx, y), U(form == OutageFormWaits ? th.Text : tone), u.Lead);
+        dl.AddFontText(font, f, new Vector2(bx, y), U(form == OutageFormWaits ? th.Text : tone), u.Lead);
         y += f + 4;
         var steps = form == OutageFormCountdown;
         foreach (var line in u.Lines)
         {
             if (!steps) dl.AddCircleFilled(new Vector2(bx + 4, y + small * 0.5f), 2f, U(th.TextDim), 8);
-            dl.AddText(font, small, new Vector2(bx + bulletIndent, y), steps ? U(th.Text) : U(th.TextDim), line);
+            dl.AddFontText(font, small, new Vector2(bx + bulletIndent, y), steps ? U(th.Text) : U(th.TextDim), line);
             y += small + 3;
         }
         if (u.More != null)
         {
-            dl.AddText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim, 0.8f), u.More);
+            dl.AddFontText(font, small, new Vector2(bx + bulletIndent, y), U(th.TextDim, 0.8f), u.More);
             y += small + 3;
         }
-        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim, 0.85f), u.Explain);
+        dl.AddFontText(font, small, new Vector2(bx, y), U(th.TextDim, 0.85f), u.Explain);
         y += small + 3;
-        dl.AddText(font, small, new Vector2(bx, y), U(th.TextDim, 0.85f), u.Meta);
+        dl.AddFontText(font, small, new Vector2(bx, y), U(th.TextDim, 0.85f), u.Meta);
         y += small + 8;
 
         // Hover over the text block: the whole story (reason, every busy agent, who is ready).

@@ -644,7 +644,7 @@ public partial class WhatsAnAiBridge
             step = "GameController.Game.IsEscapeState";
             if (GameController.Game.IsEscapeState) return new AttnPlayer("menu", false, false, false, 0, 0, false, _combatBroken);
             step = "CombatNear";
-            var t = ImGuiNET.ImGui.GetTime();
+            var t = ImGui.GetTime();
             var combat = CombatNear(t);
             if (combat) _attnLastCombatAt = t;
             var noCombat = t - _attnLastCombatAt;

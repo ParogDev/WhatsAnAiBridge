@@ -217,7 +217,7 @@ public partial class WhatsAnAiBridge
         // Only clicks in the game count (a click in another window over the game is not the user using this panel).
         var released = _ucMouseWasDown && !down && UcGameInFront();
         _ucMouseWasDown = down;
-        var mouse = released ? ImGuiNET.ImGui.GetIO().MousePos : default;
+        var mouse = released ? ImGui.GetIO().MousePos : default;
         // One walk at a time, sliced: at most UcSliceUs of it per frame (a big panel spreads over a few frames), so a
         // capture never makes a frame spike.
         long addr = 0, dueAddr = 0;

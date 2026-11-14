@@ -1,7 +1,6 @@
 using System;
 using System.Numerics;
 using System.Text;
-using ImGuiNET;
 
 namespace WhatsAnAiBridge;
 
@@ -117,13 +116,13 @@ public partial class WhatsAnAiBridge
         if (a.StripNext) DrawNextGlyph(dl, new Vector2(x + 6, hy), U(ToneNeutral));
         else DrawSessionsGlyph(dl, new Vector2(x + 6, hy), U(ToneNeutral));
         x += 18;
-        dl.AddText(font, small, new Vector2(x, hy - small * 0.5f), U(ToneNeutral), a.StripLabel);
+        dl.AddFontText(font, small, new Vector2(x, hy - small * 0.5f), U(ToneNeutral), a.StripLabel);
         x += ImGui.CalcTextSize(a.StripLabel).X * k + 10;
         var rx = max.X - pad;
         if (a.StripTail != null)
         {
             var tw = ImGui.CalcTextSize(a.StripTail).X * k;
-            dl.AddText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(th.TextDim, 0.8f), a.StripTail);
+            dl.AddFontText(font, small, new Vector2(rx - tw, hy - small * 0.5f), U(th.TextDim, 0.8f), a.StripTail);
             rx -= tw + 10;
         }
         if (a.StripNext)

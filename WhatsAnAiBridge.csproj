@@ -16,6 +16,8 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <DefineConstants Condition="'$(Game)' == 'poe1'">$(DefineConstants);POE1</DefineConstants>
     <DefineConstants Condition="'$(Game)' == 'poe2'">$(DefineConstants);POE2</DefineConstants>
+    <!-- Poe1\ImGuiShim.cs converts ImFontPtr to ImFont* (Hexa's only string AddText overload taking a font). -->
+    <AllowUnsafeBlocks Condition="'$(Game)' == 'poe1'">true</AllowUnsafeBlocks>
     <PathMap>$(MSBuildProjectDirectory)=$(MSBuildProjectName)</PathMap>
     <EmbedAllSources>true</EmbedAllSources>
     <!--Don't bother setting anything to do with the output path, HUD will do it for you if you put the source code inside Plugins/Source-->
@@ -45,6 +47,16 @@
       <Private>False</Private>
     </Reference>
     <PackageReference Include="SharpDX.Mathematics" Version="4.2.0" />
+    <!-- The PoE1 HUD moved to Hexa.NET.ImGui (Dear ImGui 1.92, its own build) and ships the DLL.
+         Its plugin compiler rewrites and saves this file before building (PluginCompiler.MigrateImGui): it deletes every
+         PackageReference Include="ImGui.NET" (conditions ignored) and adds an unconditional Reference and Using for
+         Hexa.NET.ImGui unless one already exists anywhere in the file. Both exist here, under the poe1 condition, so it
+         adds nothing, and the PoE2 ImGui.NET package lives in Directory.Build.props, where it cannot see it. -->
+    <Reference Include="Hexa.NET.ImGui">
+      <HintPath>$(GameRefDir)\Hexa.NET.ImGui.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Using Include="Hexa.NET.ImGui" />
   </ItemGroup>
   <ItemGroup Condition="'$(Game)' == 'poe2'">
     <Reference Include="ExileCore2">
@@ -55,13 +67,13 @@
       <HintPath>$(GameRefDir)\GameOffsets2.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <!-- ImGui.NET 1.90 (the PoE2 HUD's ImGui) is referenced from Directory.Build.props: see the PoE1 group above. -->
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Newtonsoft.Json">
       <HintPath>$(GameRefDir)\Newtonsoft.Json.dll</HintPath>
       <Private>False</Private>
     </Reference>
-    <PackageReference Include="ImGui.NET" Version="1.90.0.1" />
     <!-- Runtime patching of the HUD's own unprotected managed code for pipeline.trace (Shared\PipelineTrace.cs). MIT. -->
     <PackageReference Include="Lib.Harmony" Version="2.4.2" GeneratePathProperty="true" />
   </ItemGroup>

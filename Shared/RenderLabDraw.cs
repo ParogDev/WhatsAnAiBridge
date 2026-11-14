@@ -1,6 +1,5 @@
 using System;
 using System.Numerics;
-using ImGuiNET;
 
 namespace WhatsAnAiBridge;
 
@@ -123,7 +122,7 @@ public partial class WhatsAnAiBridge
         var dt = u.LastTime > 0 ? (float)Math.Clamp(f.Time - u.LastTime, 0, 0.1) : 0f;
         u.LastTime = f.Time;
         var dl = ImGui.GetBackgroundDrawList();
-        if ((dl.Flags & ImDrawListFlags.AntiAliasedLines) == 0) dl.Flags |= ImDrawListFlags.AntiAliasedLines;
+        ImGuiShim.EnsureAntiAliasedLines(dl);
         var disp = ImGui.GetIO().DisplaySize;
         if (f.ShowWalls) RlDrawWalls(dl, f, dt, disp);
         if (f.ShowPath) RlDrawPath(dl, f, disp);
@@ -171,7 +170,7 @@ public partial class WhatsAnAiBridge
     {
         var pts = run.Points;
         var h = run.Height;
-        var canGrad = (dl.Flags & ImDrawListFlags.AllowVtxOffset) != 0;
+        var canGrad = ImGuiShim.CanOffsetVertices(dl);
         var top = RlCol(RlWallGlow, 0f);
         for (var i = 0; i < n - 1; i++)
         {
@@ -186,10 +185,10 @@ public partial class WhatsAnAiBridge
             var t0 = new Vector2(p0.X, p0.Y - MathF.Min(h0, RlFaceMaxPx));
             var t1 = new Vector2(p1.X, p1.Y - MathF.Min(h1, RlFaceMaxPx));
             var bottom = RlCol(RlWallGlow, ab);
-            if (canGrad || dl._VtxCurrentIdx < 60000)
+            if (canGrad || ImGuiShim.VtxCurrentIdx(dl) < 60000)
             {
                 dl.PrimReserve(6, 4);
-                var idx = dl._VtxCurrentIdx;                  // after the reserve: it may have started a new command
+                var idx = ImGuiShim.VtxCurrentIdx(dl);                  // after the reserve: it may have started a new command
                 dl.PrimWriteVtx(p0, uv, bottom);
                 dl.PrimWriteVtx(p1, uv, bottom);
                 dl.PrimWriteVtx(t1, uv, top);
@@ -413,7 +412,7 @@ public partial class WhatsAnAiBridge
             MathF.Round(Math.Clamp(pos.Y, 2f, MathF.Max(2f, disp.Y - size.Y - 2f))));
         dl.AddRectFilled(pos, pos + size, RlCol(RlPillFill, 0.80f * mul), size.Y * 0.5f);
         dl.AddRect(pos, pos + size, RlCol(RlPathGlow, 0.40f * mul), size.Y * 0.5f);
-        dl.AddText(font, small, new Vector2(pos.X + 6f, pos.Y + 3f), RlCol(RlPillText, 0.95f * mul), text);
+        dl.AddFontText(font, small, new Vector2(pos.X + 6f, pos.Y + 3f), RlCol(RlPillText, 0.95f * mul), text);
     }
 
     // ── Glowing polylines ────────────────────────────────────────────
@@ -466,7 +465,7 @@ public partial class WhatsAnAiBridge
     private static void RlLine(ImDrawListPtr dl, Vector2[] buf, int n, Vector3 col, float alpha, float width)
     {
         if (alpha < 0.012f || n < 2) return;
-        dl.AddPolyline(ref buf[0], n, RlCol(col, alpha), ImDrawFlags.None, width);
+        dl.AddPolylineEx(ref buf[0], n, RlCol(col, alpha), ImDrawFlags.None, width);
     }
 
     private static int RlLevel(float a0, float a1, float mul) =>
